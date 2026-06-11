@@ -27,10 +27,11 @@ target-version = "py311"
 [tool.mypy]
 python_version = "3.11"
 
-# thermo / CoolProp / chemicals / fluids / scipy / pyomo / idaes ship no type stubs.
+# thermo / CoolProp / chemicals / fluids / scipy / pyomo / idaes ship no type
+# stubs; anthropic/cantera are optional extras absent in the default CI env.
 [[tool.mypy.overrides]]
 module = ["thermo.*", "CoolProp.*", "chemicals.*", "fluids.*", "scipy.*",
-          "pyomo.*", "idaes.*", "cyipopt.*"]
+          "pyomo.*", "idaes.*", "cyipopt.*", "anthropic.*", "cantera.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

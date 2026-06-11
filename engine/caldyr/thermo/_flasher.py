@@ -286,6 +286,8 @@ class FlasherPackage:
 
         temps = np.linspace(298.15, T, 11)
         integrand = np.array([dH_rxn(float(t)) / (t * t) for t in temps])
-        integral = float(np.trapezoid(integrand, temps)) if hasattr(np, "trapezoid") \
-            else float(np.trapz(integrand, temps))
+        # numpy >= 2 renamed trapz -> trapezoid; getattr keeps both stub
+        # generations happy (the missing name is a dead branch either way).
+        trapezoid = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+        integral = float(trapezoid(integrand, temps))
         return ln_k298 + integral / _R
