@@ -8,6 +8,7 @@ import { api } from "../api";
 import { compositionSum, metaFor, validateParam } from "../lib/params";
 import { useStore, type Tab } from "../store";
 import type { EnvelopeResponse } from "../types";
+import { DesignPanel } from "./DesignPanel";
 import { EconomicsPanel } from "./EconomicsPanel";
 import { LogicalEditor } from "./LogicalEditor";
 import { OptimizePanel } from "./OptimizePanel";
@@ -138,6 +139,7 @@ function NodePanel({ nodeId }: { nodeId: string }) {
             <Hint>No parameters set — this unit will use engine defaults.</Hint>
           )}
           <AddParam nodeId={node.id} existing={Object.keys(p)} />
+          <DesignPanel unitId={node.id} />
         </>
       )}
 

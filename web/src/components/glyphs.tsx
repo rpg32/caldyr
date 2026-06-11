@@ -74,6 +74,16 @@ export const GLYPHS: Record<string, ReactNode> = {
     <rect x="9" y="2" width="10" height="24" rx="4" />
     <path d="M10 8 h8 M10 13 h8 M10 18 h8" />
   </>),
+  Absorber: svg(<>
+    <rect x="9" y="2" width="10" height="24" rx="4" />
+    <path d="M10 7.5 h8 M10 12 h8 M10 16.5 h8 M10 21 h8" strokeDasharray="2 1.5" />
+    <path d="M5 5 L9 5 M19 23 L23 23" />
+  </>),
+  ReboiledAbsorber: svg(<>
+    <rect x="9" y="2" width="10" height="20" rx="4" />
+    <path d="M10 7 h8 M10 11.5 h8 M10 16 h8" strokeDasharray="2 1.5" />
+    <path d="M9 24 c0 2 2.5 3 5 3 s5 -1 5 -3 M19 24 c2.5 0 2.5 -3 0 -3" />
+  </>),
   RigorousColumn: svg(<>
     <rect x="9" y="2" width="10" height="24" rx="4" />
     <path d="M10 6.5 h8 M10 10 h8 M10 13.5 h8 M10 17 h8 M10 20.5 h8" />
@@ -106,6 +116,15 @@ export const GLYPHS: Record<string, ReactNode> = {
     <path d="M5 15 h18" strokeDasharray="2.5 2" />
     <path d="M5 18 h18" strokeDasharray="1.2 1.8" />
     <path d="M9 8 L9 4 M14 21 L14 25 M20 21 L20 25" />
+  </>),
+  Balance: svg(<>
+    <path d="M14 4 L14 24 M4 24 h20" />
+    <path d="M5 9 L23 9 M8 9 l-3 5 h6 Z M20 9 l-3 5 h6 Z" />
+  </>),
+  Evaporator: svg(<>
+    <rect x="5" y="7" width="18" height="16" rx="4" />
+    <path d="M8 19 c2 -1.5 4 1.5 6 0 s4 1.5 6 0" />
+    <path d="M10 14 L10 10 M14 15 L14 10 M18 14 L18 10" strokeDasharray="2 1.6" />
   </>),
   feed: svg(<>
     <path d="M3 14 L19 14 M13 8 L19 14 L13 20" />

@@ -53,6 +53,22 @@ def _stream_dict(s) -> dict:
     }
 
 
+def _designs_dict(fs) -> dict:
+    """JSON-safe per-unit design results (column profiles, FUG numbers, ...)."""
+    import json as _json
+
+    out: dict = {}
+    for uid, unit in fs.units.items():
+        design = getattr(unit, "design", None)
+        if not isinstance(design, dict) or not design:
+            continue
+        try:  # round-trip through json to coerce numpy scalars/arrays safely
+            out[uid] = _json.loads(_json.dumps(design, default=float))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _report_dict(r) -> dict:
     return {
         "converged": r.converged, "iterations": r.iterations, "residual": r.residual,
@@ -113,12 +129,32 @@ def components() -> list[dict]:
     return list(COMMON_COMPONENTS)
 
 
+@app.post("/ports")
+def unit_ports(body: dict) -> list[dict]:
+    """Per-instance port list for a unit type with given params.
+
+    Needed because some units derive ports from params (e.g. multi-feed
+    columns); the static /unit-types palette shows only the defaults.
+    """
+    utype = body.get("type")
+    if not isinstance(utype, str) or utype not in REGISTRY:
+        raise HTTPException(422, f"unknown unit type {utype!r}")
+    try:
+        unit = REGISTRY[utype]("_ports", body.get("params") or {})
+        return [{"name": p.name, "direction": p.direction, "kind": p.kind}
+                for p in unit.ports]
+    except Exception as exc:
+        raise HTTPException(400, f"could not derive ports: {exc}") from exc
+
+
 @app.get("/property-packages")
 def property_packages() -> list[dict]:
     return [
         {"id": "thermo:PR", "name": "Peng-Robinson (cubic EOS)", "use": "non-polar systems"},
         {"id": "thermo:SRK", "name": "Soave-Redlich-Kwong (cubic EOS)", "use": "non-polar"},
         {"id": "thermo:NRTL", "name": "NRTL gamma-phi", "use": "polar mixtures / azeotropes"},
+        {"id": "coolprop:Water", "name": "Steam tables (IAPWS-95 via CoolProp)",
+         "use": "pure-water / steam systems"},
     ]
 
 
@@ -131,6 +167,7 @@ def solve(req: SolveRequest) -> SolveResponse:
     return SolveResponse.model_validate({
         "report": _report_dict(report),
         "streams": {sid: _stream_dict(s) for sid, s in fs.streams.items()},
+        "designs": _designs_dict(fs),
     })
 
 
@@ -367,7 +404,8 @@ async def ws_solve(ws: WebSocket) -> None:
                 return {"type": "result",
                         "report": _report_dict(report),
                         "streams": {sid: _stream_dict(s)
-                                    for sid, s in fs.streams.items()}}
+                                    for sid, s in fs.streams.items()},
+                        "designs": _designs_dict(fs)}
 
             task = loop.run_in_executor(None, job)
             while True:

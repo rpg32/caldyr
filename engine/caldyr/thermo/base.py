@@ -76,6 +76,32 @@ class PropertyPackage(Protocol):
         phase enthalpies — the workhorse of tray-by-tray (MESH) columns.
         """
         ...
+    # Per-phase properties at an *arbitrary* (T, P) — not restricted to the
+    # saturation locus like bubble_point. These are what energy-balance-driven
+    # MESH methods (sum-rates absorbers, Seader 3e ch. 10.4) and tray hydraulic
+    # sizing need: the stage temperature there is set by the heat balance, so
+    # K-values and phase enthalpies must be evaluable off saturation.
+    def k_values(self, T: float, P: float, x: dict[str, float],
+                 y: dict[str, float]) -> dict[str, float]:
+        """K_i = phi_i^L(T, P, x) / phi_i^V(T, P, y) — phi-phi K-values of a
+        liquid of composition ``x`` against a vapor of composition ``y``."""
+        ...
+    def enthalpy_liquid(self, T: float, P: float, x: dict[str, float]) -> float:
+        """Molar enthalpy (J/mol) of composition ``x`` forced to the liquid
+        phase at (T, P), on the formation-inclusive basis."""
+        ...
+    def enthalpy_vapor(self, T: float, P: float, y: dict[str, float]) -> float:
+        """Molar enthalpy (J/mol) of composition ``y`` forced to the vapor
+        phase at (T, P), on the formation-inclusive basis."""
+        ...
+    def volume_liquid(self, T: float, P: float, x: dict[str, float]) -> float:
+        """Molar volume (m^3/mol) of composition ``x`` forced to the liquid
+        phase at (T, P)."""
+        ...
+    def volume_vapor(self, T: float, P: float, y: dict[str, float]) -> float:
+        """Molar volume (m^3/mol) of composition ``y`` forced to the vapor
+        phase at (T, P)."""
+        ...
     # Three-phase (VLLE) flashes. Only the cubic-EOS backends implement these;
     # others raise NotImplementedError with a clear message (PR/SRK only for now).
     def flash_pt_3p(self, T: float, P: float, z: dict[str, float]) -> ThreePhaseResult: ...

@@ -63,6 +63,7 @@ const DEFAULT_FEED_PARAMS = { T: 298.15, P: 101325, molar_flow: 1.0, z: {} };
 
 let toastId = 0;
 const chatSocket = new ChatSocket();
+const portRefreshAt = new Map<string, number>();
 
 interface State {
   // catalog (fetched once)
@@ -133,6 +134,7 @@ interface State {
   removeComponent: (id: string) => void;
   addUnit: (kind: "unit" | "feed" | "product", unitType?: UnitType) => void;
   setParam: (nodeId: string, key: string, value: unknown) => void;
+  refreshPorts: (nodeId: string) => void;
   renameNode: (id: string, next: string) => boolean;
   renameEdge: (id: string, next: string) => boolean;
   undo: () => void;
@@ -429,6 +431,28 @@ export const useStore = create<State>((set, get) => {
             ? { ...n, data: { ...n.data, params: { ...n.data.params, [key]: value } } }
             : n),
       });
+      get().refreshPorts(nodeId);
+    },
+
+    // Some unit types derive their ports from params (multi-feed columns,
+    // Balance n_inlets, ...). Re-derive from the engine after param edits.
+    refreshPorts: (nodeId) => {
+      const node = get().nodes.find((n) => n.id === nodeId);
+      if (!node || node.data.kind !== "unit" || !node.data.unitType) return;
+      const requestedAt = Date.now();
+      portRefreshAt.set(nodeId, requestedAt);
+      void api.ports(node.data.unitType, node.data.params)
+        .then((ports) => {
+          if (portRefreshAt.get(nodeId) !== requestedAt) return; // stale reply
+          const cur = get().nodes.find((n) => n.id === nodeId);
+          if (!cur) return;
+          if (JSON.stringify(cur.data.ports) === JSON.stringify(ports)) return;
+          set({
+            nodes: get().nodes.map((n) =>
+              n.id === nodeId ? { ...n, data: { ...n.data, ports } } : n),
+          });
+        })
+        .catch(() => { /* params mid-edit can be invalid; keep old ports */ });
     },
 
     renameNode: (id, next) => {
@@ -647,6 +671,7 @@ export const useStore = create<State>((set, get) => {
             detail?: string;
             report?: SolveResponse["report"];
             streams?: SolveResponse["streams"];
+            designs?: SolveResponse["designs"];
           }
           const final = await requestOverWs<SolveEvent>(
             "/ws/solve",
@@ -659,7 +684,7 @@ export const useStore = create<State>((set, get) => {
             (e) => e.type === "result" || e.type === "error",
           );
           if (final.type === "error") throw new Error(final.detail ?? "solve failed");
-          res = { report: final.report!, streams: final.streams! };
+          res = { report: final.report!, streams: final.streams!, designs: final.designs };
         } catch (wsErr) {
           if ((wsErr as Error).message.includes("WebSocket")) {
             res = await api.solve(get().toFlowDoc(), get().backend);  // fallback

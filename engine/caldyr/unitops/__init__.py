@@ -1,10 +1,13 @@
+from .absorber import Absorber, AbsorberError, ReboiledAbsorber
 from .air_cooler import AirCooler, AirCoolerApproachError
+from .balance import Balance
 from .base import REGISTRY, register
 from .component_splitter import ComponentSplitter
 from .compressor import Compressor
 from .conversion_reactor import ConversionReactor
 from .cstr import CSTR, KineticSolveError
 from .equilibrium_reactor import EquilibriumReactor
+from .evaporator import Evaporator
 from .expander import Expander
 from .fired_heater import FiredHeater
 from .flash import FlashDrum
@@ -38,6 +41,8 @@ __all__ = [
     "Compressor",
     "Expander",
     "FlashDrum",
+    "Evaporator",
+    "Balance",
     "ThreePhaseSeparator",
     "HeatExchanger",
     "ConversionReactor",
@@ -51,4 +56,7 @@ __all__ = [
     "ShortcutColumnError",
     "RigorousColumn",
     "RigorousColumnError",
+    "Absorber",
+    "ReboiledAbsorber",
+    "AbsorberError",
 ]

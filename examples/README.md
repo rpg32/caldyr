@@ -17,3 +17,8 @@ balance closes and/or agreeing with a cited reference.
   Turton-costed, then `caldyr.analysis.pinch_analysis` computes minimum-utility
   targets and the heat-recovery potential (the feed-effluent exchanger
   opportunity, quantified before designing any exchanger).
+- `14_absorber.py` — gas absorption: the SO2/water absorber of Hameed (2025)
+  sec. 9.1 (sum-rates MESH, stage profiles, Fair-flooding tray design vs the
+  book's 1.285 m packed column), a Kremser (book eq. 9.1) cross-check, and
+  the book's sec. 9.3.5 reboiled absorber (n-pentane/n-heptane stripping
+  tower) reproduced to ~0.1%.

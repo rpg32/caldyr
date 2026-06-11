@@ -1,0 +1,903 @@
+"""Absorber / stripper and reboiled absorber: sum-rates (Burningham-Otto) MESH.
+
+Columns *without* a condenser — gas absorbers, strippers and reboiled
+absorbers — are wide-boiling: the stage temperatures are governed by the
+energy balances (absorption heat, solvent sensible heat), not by bubble
+points, so the bubble-point (Wang-Henke) method of
+:mod:`caldyr.unitops.rigorous_column` fails on them. The standard workhorse is
+the **sum-rates method** of Burningham & Otto (1967), per Seader, Henley &
+Roper, *Separation Process Principles* 3e, ch. 10.4:
+
+1. **Initialize** temperatures linearly between the two feed temperatures and
+   the traffic at the feed rates (absorber) or a boilup estimate (reboiled
+   absorber).
+2. **Component balances**: with the current ``K_ij`` (phi-phi, evaluated at
+   the stage T — *not* at saturation), ``L_j``, ``V_j``, each component's
+   stage balances form a tridiagonal system solved by the Thomas algorithm.
+3. **Sum-rates step**: the new total liquid flows are the *sums of the
+   component liquid flows* (``L_j = sum_i l_ij``) and the vapor flows follow
+   from the total mass balance around the column bottom
+   (``V_j = L_{j-1} + sum_{k>=j} F_k - L_N``). This replaces the energy-based
+   traffic update of the bubble-point method.
+4. **Energy balances**: the N stage enthalpy balances are solved
+   *simultaneously* for the new temperature profile by Newton's method with a
+   tridiagonal Jacobian (the original Burningham-Otto step), using per-phase
+   enthalpies at the stage temperature (``pp.enthalpy_liquid/vapor``).
+5. Repeat 2-4 until the temperatures and traffic stop moving. A
+   non-convergent or degenerate iteration raises :class:`AbsorberError` with
+   diagnostics — never a silent wrong answer.
+
+**Stage convention**: stages are numbered from the top, ``1 .. n_stages``.
+The :class:`Absorber` has no condenser or reboiler — the liquid (solvent)
+feed enters stage 1, the gas feed enters stage ``n_stages``, the vapor
+product leaves stage 1 and the liquid product leaves stage ``n_stages``. A
+**stripper is the same unit**: feed the volatile-rich liquid on top and the
+stripping gas at the bottom (gas desorption is the mirror image of
+absorption — Hameed, *Chemical Process Simulations using Aspen Hysys*, 2025,
+sec. 9.2); no separate unit type is needed.
+
+The :class:`ReboiledAbsorber` (stripping tower; Hameed 2025 sec. 9.3.5) is
+the same MESH system with the bottom stage replaced by a reboiler: a single
+(liquid) feed near the top, the stripping vapor generated internally by the
+reboiler heat input. **Method choice**: a reboiled absorber boils a
+condensable liquid feed, so its stages are narrow-boiling — exactly the
+regime where the sum-rates method oscillates (its energy-balance temperature
+step fights the composition-determined boiling temperatures; Seader 3e
+ch. 10.4 discusses this division of labor) and the bubble-point method
+shines. The ReboiledAbsorber therefore runs a Wang-Henke *bubble-point*
+inner loop (stage temperatures from bubble points, vapor traffic from the
+energy-balance recurrence) **driven by the overhead vapor rate**: with
+``V_top`` fixed, the N-1 upper-stage energy balances determine the full
+traffic and the reboiler duty follows from the overall energy balance,
+exactly. The heat-input specification is one of ``vapor_rate`` (direct),
+``boilup_ratio`` or ``reboiler_duty`` (the latter two close an outer Brent
+iteration over ``V_top``; both are strictly monotone in it).
+
+Mass balances close to machine precision (products by difference);
+the overall energy balance is closed exactly by resolving the bottom liquid
+enthalpy from the column energy balance (its temperature then comes from a
+PH flash, which agrees with the converged stage-N temperature to within the
+solver tolerance — the residual is reported in
+``design['energy_residual_rel']``). The full converged stage profiles
+(per-stage T, P, L, V, x, y) are stored on ``unit.design``.
+
+Validation (see tests/test_m12_absorber.py and the module reports there):
+the Kremser closed form — Hameed 2025 eq. (9.1) / Seader 3e ch. 5 — for
+dilute near-isothermal absorption and stripping, structural monotonicity
+(more stages / more solvent -> more absorption), and the worked reboiled
+absorber of Hameed 2025 sec. 9.3.5 (n-pentane/n-heptane at 110 kPa, PR).
+"""
+from __future__ import annotations
+
+import math
+from typing import Any
+
+from scipy.optimize import brentq
+
+from ..core import EnergyStream, Port, Stream, UnitOp
+from ..core.unitop import PortStream
+from .base import register
+from .rigorous_column import _NoVLEError, _thomas, fenske_profile
+
+_MAX_ITER = 120          # default sum-rates iteration cap ('max_iter' overrides)
+_TOL_T = 1e-4            # K, stage-temperature convergence
+_TOL_FLOW = 1e-7         # relative liquid/vapor traffic convergence
+_X_FLOOR = 1e-15         # floor for stage mole fractions
+_FLOW_FLOOR_FRAC = 1e-9  # traffic floor, as a fraction of the total feed
+_NEWTON_MAX = 60         # inner Newton iterations on the energy balances
+_NEWTON_TOL = 1e-10      # relative energy-balance residual target (inner)
+_ENERGY_TOL = 1e-9       # relative energy residual required at convergence
+_NEWTON_STEP_MAX = 12.0  # K, per-stage Newton step clamp
+_DH_DT = 0.05            # K, finite-difference step for dh/dT
+_WARM_Z_TOL = 0.1        # max |dz| of the feed for warm-starting
+
+
+class AbsorberError(ValueError):
+    """Specification or convergence error in an Absorber / ReboiledAbsorber
+    (bad stage counts, infeasible heat-input spec, sum-rates failure, ...)."""
+
+
+def _normalized(row: dict[str, float]) -> dict[str, float]:
+    tot = sum(row.values())
+    return {c: v / tot for c, v in row.items()}
+
+
+def _solve_sum_rates(
+    unit_id: str,
+    pp: Any,
+    active: list[str],
+    N: int,
+    P_j: list[float],
+    feeds: list[tuple[int, dict[str, float], float]],
+    Q: list[float],
+    T: list[float],
+    x: list[dict[str, float]],
+    y: list[dict[str, float]],
+    L: list[float],
+    V: list[float],
+    max_iter: int,
+    T_bounds: tuple[float, float],
+) -> dict[str, Any]:
+    """Run the sum-rates (Burningham-Otto) MESH iteration.
+
+    ``feeds`` is a list of ``(stage_0based, component_flows mol/s, F*h W)``;
+    ``Q`` is the per-stage heat input (W, positive heats the stage). ``T``,
+    ``x``, ``y``, ``L``, ``V`` are starting profiles (mutated copies are
+    returned in the result dict, never the inputs); ``T_bounds`` brackets the
+    physically admissible stage temperatures for the Newton energy solve.
+    """
+    T, L, V = list(T), list(L), list(V)
+    x = [dict(row) for row in x]
+    y = [dict(row) for row in y]
+
+    f_stage: list[dict[str, float]] = [{} for _ in range(N)]
+    fh_stage = [0.0] * N
+    for j, flows, fh in feeds:
+        for c, v in flows.items():
+            f_stage[j][c] = f_stage[j].get(c, 0.0) + v
+        fh_stage[j] += fh
+    F_total = sum(sum(flows.values()) for _, flows, _ in feeds)
+    # Total feed entering at or below stage j (for the total mass balance).
+    F_below = [0.0] * (N + 1)
+    for j in range(N - 1, -1, -1):
+        F_below[j] = F_below[j + 1] + sum(f_stage[j].values())
+    floor = _FLOW_FLOOR_FRAC * F_total
+
+    omega = 1.0
+    dT_prev = math.inf
+    worsened = 0
+    converged = False
+    n_prop = 0
+    it = 0
+    dT = dF = resid_rel = math.inf
+    for it in range(1, max_iter + 1):
+        K = [pp.k_values(T[j], P_j[j], x[j], y[j]) for j in range(N)]
+        n_prop += N
+
+        # -- component balances (Thomas) + sum-rates traffic update ----------
+        cols: dict[str, list[float]] = {}
+        for c in active:
+            a = [0.0] + [L[j - 1] for j in range(1, N)]
+            b = [-(L[j] + V[j] * K[j][c]) for j in range(N)]
+            cc = [V[j + 1] * K[j + 1][c] for j in range(N - 1)] + [0.0]
+            d = [-f_stage[j].get(c, 0.0) for j in range(N)]
+            cols[c] = _thomas(a, b, cc, d)
+        sum_raw = [sum(max(cols[c][j], 0.0) for c in active) for j in range(N)]
+        if min(sum_raw) <= 0.0:
+            raise AbsorberError(
+                f"{unit_id}: sum-rates produced a stage with no liquid "
+                f"(iteration {it}); the column is infeasible as specified"
+            )
+        L_new = [max(L[j] * sum_raw[j], floor) for j in range(N)]
+        L_prev, V_prev = list(L), list(V)
+        L = [lo + omega * (ln - lo) for lo, ln in zip(L, L_new)]
+        V = [max((L[j - 1] if j > 0 else 0.0) + F_below[j] - L[N - 1], floor)
+             for j in range(N)]
+        dF = max(
+            max(abs(a - b) / max(a, b) for a, b in zip(L, L_prev)),
+            max(abs(a - b) / max(a, b, floor * 10) for a, b in zip(V, V_prev)),
+        )
+
+        for j in range(N):
+            row = {c: max(cols[c][j], _X_FLOOR) for c in active}
+            x[j] = _normalized(row)
+            y[j] = _normalized({c: K[j][c] * x[j][c] for c in active})
+
+        # -- energy balances: simultaneous Newton for the new T profile ------
+        # Best-effort mid-iteration (the traffic may still be inconsistent);
+        # tight closure is *required* at the converged point below.
+        T_new, hL, hV, resid_rel, n_h = _newton_temperatures(
+            pp, N, P_j, x, y, L, V, fh_stage, Q, T, T_bounds)
+        n_prop += n_h
+        dT = max(abs(tn - to) for tn, to in zip(T_new, T))
+        T = T_new
+
+        # Damp the liquid update if the temperature profile oscillates.
+        if dT > dT_prev:
+            worsened += 1
+            if worsened >= 2:
+                omega = max(0.25, 0.5 * omega)
+                worsened = 0
+        else:
+            worsened = 0
+        dT_prev = dT
+
+        if dT <= _TOL_T and dF <= _TOL_FLOW and resid_rel <= _ENERGY_TOL:
+            converged = True
+            break
+
+    if not converged:
+        raise AbsorberError(
+            f"{unit_id}: sum-rates (Burningham-Otto) iteration did not "
+            f"converge in {max_iter} iterations (max |dT|={dT:.3g} K vs "
+            f"{_TOL_T} K, max traffic change={dF:.3g} vs {_TOL_FLOW}, "
+            f"energy residual={resid_rel:.3g} vs {_ENERGY_TOL}, "
+            f"damping={omega}). Check the specifications and feed states, or "
+            f"raise 'max_iter'"
+        )
+    return {
+        "T": T, "L": L, "V": V, "x": x, "y": y, "hL": hL, "hV": hV,
+        "iterations": it, "max_dT": dT, "max_dF_rel": dF, "damping": omega,
+        "prop_calls": n_prop, "energy_residual_rel": resid_rel,
+        "F_total": F_total,
+    }
+
+
+def _newton_temperatures(
+    pp: Any, N: int, P_j: list[float],
+    x: list[dict[str, float]], y: list[dict[str, float]],
+    L: list[float], V: list[float],
+    fh_stage: list[float], Q: list[float],
+    T0: list[float], T_bounds: tuple[float, float],
+) -> tuple[list[float], list[float], list[float], float, int]:
+    """Solve the N stage energy balances for the temperature profile by
+    Newton's method with a tridiagonal Jacobian (Burningham-Otto; Seader 3e
+    eqs. 10-65..10-67), steps clamped and temperatures bounded to the
+    physically admissible window. Best-effort: returns the last iterate with
+    its residual rather than raising — the *outer* sum-rates loop requires a
+    tight residual before declaring convergence. Returns
+    ``(T, hL, hV, residual_rel, n_prop_calls)`` with the phase enthalpies at
+    the returned temperatures."""
+    T = list(T0)
+    t_lo, t_hi = T_bounds
+    n_prop = 0
+    best: tuple[float, list[float], list[float], list[float]] | None = None
+    for _ in range(_NEWTON_MAX):
+        hL = [pp.enthalpy_liquid(T[j], P_j[j], x[j]) for j in range(N)]
+        hV = [pp.enthalpy_vapor(T[j], P_j[j], y[j]) for j in range(N)]
+        cpL = [(pp.enthalpy_liquid(T[j] + _DH_DT, P_j[j], x[j]) - hL[j]) / _DH_DT
+               for j in range(N)]
+        cpV = [(pp.enthalpy_vapor(T[j] + _DH_DT, P_j[j], y[j]) - hV[j]) / _DH_DT
+               for j in range(N)]
+        n_prop += 4 * N
+
+        H = [0.0] * N
+        scale = [1.0] * N
+        for j in range(N):
+            inflow = ((L[j - 1] * hL[j - 1] if j > 0 else 0.0)
+                      + (V[j + 1] * hV[j + 1] if j < N - 1 else 0.0)
+                      + fh_stage[j] + Q[j])
+            outflow = L[j] * hL[j] + V[j] * hV[j]
+            H[j] = inflow - outflow
+            scale[j] = max(abs(L[j] * hL[j]), abs(V[j] * hV[j]),
+                           abs(fh_stage[j]), 1.0)
+        resid_rel = max(abs(H[j]) / scale[j] for j in range(N))
+        if best is None or resid_rel < best[0]:
+            best = (resid_rel, list(T), hL, hV)
+        if resid_rel <= _NEWTON_TOL:
+            return T, hL, hV, resid_rel, n_prop
+
+        a = [0.0] + [L[j - 1] * cpL[j - 1] for j in range(1, N)]
+        b = [-(L[j] * cpL[j] + V[j] * cpV[j]) for j in range(N)]
+        c = [V[j + 1] * cpV[j + 1] for j in range(N - 1)] + [0.0]
+        # b_j < 0 always (Cp > 0, flows > 0), so Thomas is well-posed.
+        dT = _thomas(a, b, c, [-h for h in H])
+        T = [min(max(tj + max(min(d, _NEWTON_STEP_MAX), -_NEWTON_STEP_MAX),
+                     t_lo), t_hi)
+             for tj, d in zip(T, dT)]
+    assert best is not None
+    resid_rel, T, hL, hV = best
+    return T, hL, hV, resid_rel, n_prop
+
+
+def _active_components(comps: list[str], *zs: dict[str, float]) -> list[str]:
+    active = [c for c in comps if any(z.get(c, 0.0) > 0.0 for z in zs)]
+    if len(active) < 2:
+        raise AbsorberError(
+            f"absorption needs at least two components with feed flow; got "
+            f"{active}"
+        )
+    return active
+
+
+def _pad(row: dict[str, float], comps: list[str]) -> dict[str, float]:
+    return {c: row.get(c, 0.0) for c in comps}
+
+
+@register("Absorber")
+class Absorber(UnitOp):
+    """Gas absorber / stripper: MESH without condenser or reboiler, solved by
+    the sum-rates (Burningham-Otto) method. See the module docstring.
+
+    Ports: ``gas_in`` (bottom-stage vapor feed), ``liquid_in`` (top-stage
+    solvent feed), ``vapor_out`` (top), ``liquid_out`` (bottom). To use the
+    unit as a **stripper**, feed the volatile-rich liquid on ``liquid_in``
+    and the stripping gas on ``gas_in`` — same physics, mirrored direction.
+
+    Params (JSON-friendly scalars; ``.flow`` round-trips):
+      * ``n_stages`` — theoretical stages (no condenser/reboiler). Required,
+        >= 1.
+      * ``P`` — top-stage pressure, Pa (default: gas feed pressure).
+      * ``dP_stage`` — linear pressure rise per stage going down, Pa
+        (default 0).
+      * ``max_iter`` — sum-rates iteration cap (default 120).
+    """
+
+    design: dict[str, Any] | None = None
+
+    def __init__(self, id: str, params: dict | None = None) -> None:
+        super().__init__(id, params)
+        self._warm: dict[str, Any] | None = None
+        self._cache_key: tuple | None = None
+        self._cache_out: dict[str, PortStream] | None = None
+        self._cache_design: dict[str, Any] | None = None
+
+    def define_ports(self) -> list[Port]:
+        return [
+            Port("gas_in", "inlet"),
+            Port("liquid_in", "inlet"),
+            Port("vapor_out", "outlet"),
+            Port("liquid_out", "outlet"),
+        ]
+
+    def _read_params(self, P_in: float) -> tuple[int, float, float, int]:
+        try:
+            n_stages = int(self.params["n_stages"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: integer 'n_stages' is required "
+                f"(got {self.params.get('n_stages')!r})"
+            ) from exc
+        if n_stages < 1:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: n_stages={n_stages} must be >= 1"
+            )
+        P = float(self.params.get("P") or P_in)
+        if P <= 0.0:
+            raise AbsorberError(f"Absorber {self.id!r}: P={P} Pa must be > 0")
+        dP = float(self.params.get("dP_stage", 0.0))
+        if dP < 0.0:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: dP_stage={dP} Pa must be >= 0 "
+                f"(pressure increases going down)"
+            )
+        max_iter = int(self.params.get("max_iter", _MAX_ITER))
+        return n_stages, P, dP, max_iter
+
+    def solve(self, inlets: dict[str, Stream], pp) -> dict[str, PortStream]:
+        gas = inlets.get("gas_in")
+        liq = inlets.get("liquid_in")
+        if gas is None or not gas.molar_flow:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: missing or empty inlet on 'gas_in'"
+            )
+        if liq is None or not liq.molar_flow:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: missing or empty inlet on 'liquid_in'"
+            )
+        T_g, P_g, F_g = gas.require_state()
+        T_l, P_l, F_l = liq.require_state()
+        z_g, z_l = gas.normalized_z(), liq.normalized_z()
+        comps = list(gas.components)
+        n_stages, P, dP, max_iter = self._read_params(P_g)
+
+        key = (repr(sorted(self.params.items())),
+               T_g, P_g, F_g, tuple(sorted(z_g.items())), gas.H,
+               T_l, P_l, F_l, tuple(sorted(z_l.items())), liq.H)
+        if key == self._cache_key and self._cache_out is not None:
+            assert self._cache_design is not None
+            self.design = _copy_design(self._cache_design)
+            return _copy_out(self._cache_out)
+
+        active = _active_components(comps, z_g, z_l)
+        N = n_stages
+        P_j = [P + j * dP for j in range(N)]
+        h_g = gas.H if gas.H is not None else pp.enthalpy(T_g, P_g, z_g)
+        h_l = liq.H if liq.H is not None else pp.enthalpy(T_l, P_l, z_l)
+        f_gas = {c: F_g * z_g.get(c, 0.0) for c in active}
+        f_liq = {c: F_l * z_l.get(c, 0.0) for c in active}
+        f_tot = {c: f_gas[c] + f_liq[c] for c in active}
+        feeds = [(0, f_liq, F_l * h_l), (N - 1, f_gas, F_g * h_g)]
+
+        T0, x0, y0, L0, V0 = self._initial_profiles(
+            N, active, z_g, z_l, T_g, T_l, F_g, F_l)
+        res = _solve_sum_rates(
+            f"Absorber {self.id!r}", pp, active, N, P_j, feeds,
+            [0.0] * N, T0, x0, y0, L0, V0, max_iter,
+            T_bounds=(min(T_g, T_l) - 60.0, max(T_g, T_l) + 90.0))
+
+        out, design = _build_products(
+            self.id, pp, comps, active, f_tot, res, P_j,
+            feeds_enthalpy=F_g * h_g + F_l * h_l, q_added=0.0,
+            vapor_port="vapor_out", liquid_port="liquid_out")
+        design["N"] = float(N)            # ideal stages (no condenser/reboiler)
+        design["absorbed"] = {
+            c: (1.0 - design["vapor_flows"][c] / f_gas[c]) if f_gas[c] > 0.0
+            else 0.0
+            for c in active
+        }
+        self.design = design
+
+        self._warm = {"n_stages": N, "active": list(active),
+                      "z": dict(_normalized(f_tot)),
+                      "T": list(res["T"]), "x": [dict(r) for r in res["x"]],
+                      "y": [dict(r) for r in res["y"]],
+                      "L": list(res["L"]), "V": list(res["V"])}
+        self._cache_key = key
+        self._cache_out = _copy_out(out)
+        self._cache_design = _copy_design(design)
+        return out
+
+    def _initial_profiles(self, N, active, z_g, z_l, T_g, T_l, F_g, F_l):
+        w = self._warm
+        z_tot = _normalized({c: F_g * z_g.get(c, 0.0) + F_l * z_l.get(c, 0.0)
+                             for c in active})
+        if (w is not None and w["n_stages"] == N and w["active"] == active
+                and max(abs(w["z"].get(c, 0.0) - z_tot[c]) for c in active)
+                < _WARM_Z_TOL):
+            return w["T"], w["x"], w["y"], w["L"], w["V"]
+        T0 = [T_l + (T_g - T_l) * (j / max(N - 1, 1)) for j in range(N)]
+        x0 = [_normalized({c: max(z_l.get(c, 0.0), _X_FLOOR) for c in active})
+              for _ in range(N)]
+        y0 = [_normalized({c: max(z_g.get(c, 0.0), _X_FLOOR) for c in active})
+              for _ in range(N)]
+        return T0, x0, y0, [F_l] * N, [F_g] * N
+
+
+@register("ReboiledAbsorber")
+class ReboiledAbsorber(UnitOp):
+    """Reboiled absorber (stripping tower): an absorber whose bottom stage is
+    a reboiler — the stripping vapor is generated internally by the reboiler
+    heat input instead of being fed (Hameed 2025 sec. 9.3.5). Solved with a
+    Wang-Henke bubble-point inner loop driven by the overhead vapor rate;
+    the reboiler duty closes the overall energy balance exactly (see the
+    module docstring for why bubble-point rather than sum-rates here).
+
+    Ports: ``feed`` (liquid feed near the top), ``vapor_out`` (top),
+    ``bottoms`` (reboiler liquid), ``reboiler_duty`` (energy).
+
+    Params:
+      * ``n_stages`` — theoretical stages **including the reboiler** as stage
+        n_stages. Required, >= 2. (A HYSYS reboiled absorber with "N stages"
+        plus its reboiler corresponds to ``n_stages = N + 1`` here.)
+      * ``feed_stage`` — feed stage, 1..n_stages-1 (default 1: top).
+      * exactly one of ``vapor_rate`` (overhead vapor, mol/s),
+        ``boilup_ratio`` (V_reboiler / bottoms) or ``reboiler_duty`` (W).
+        The latter two are met by an outer Brent iteration on the overhead
+        vapor rate (both are strictly monotone in it).
+      * ``P`` — top-stage pressure, Pa (default: feed pressure).
+      * ``P_bottom`` — reboiler pressure, Pa (linear stage profile), or
+        ``dP_stage`` — Pa per stage going down (not both; default uniform).
+      * ``max_iter`` — inner-iteration cap (default 120).
+    """
+
+    design: dict[str, Any] | None = None
+
+    def __init__(self, id: str, params: dict | None = None) -> None:
+        super().__init__(id, params)
+        self._warm: dict[str, Any] | None = None
+        self._cache_key: tuple | None = None
+        self._cache_out: dict[str, PortStream] | None = None
+        self._cache_design: dict[str, Any] | None = None
+
+    def define_ports(self) -> list[Port]:
+        return [
+            Port("feed", "inlet"),
+            Port("vapor_out", "outlet"),
+            Port("bottoms", "outlet"),
+            Port("reboiler_duty", "outlet", "energy"),
+        ]
+
+    def _read_params(self, P_in: float):
+        try:
+            n_stages = int(self.params["n_stages"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: integer 'n_stages' is "
+                f"required (got {self.params.get('n_stages')!r})"
+            ) from exc
+        if n_stages < 2:
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: n_stages={n_stages} must be "
+                f">= 2 — the count includes the reboiler as stage n_stages"
+            )
+        feed_stage = int(self.params.get("feed_stage", 1))
+        if not 1 <= feed_stage <= n_stages - 1:
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: feed_stage={feed_stage} is "
+                f"out of range — it must lie between stage 1 (top) and stage "
+                f"{n_stages - 1} (above the reboiler) for n_stages={n_stages}"
+            )
+
+        specs = {k: self.params.get(k)
+                 for k in ("reboiler_duty", "boilup_ratio", "vapor_rate")}
+        given = {k: v for k, v in specs.items() if v is not None}
+        if len(given) != 1:
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: specify exactly one of "
+                f"'reboiler_duty' (W), 'boilup_ratio' or 'vapor_rate' "
+                f"(mol/s); got {given or specs}"
+            )
+        spec_name, spec_value = next(iter(given.items()))
+        spec_value = float(spec_value)
+        if spec_value <= 0.0:
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: {spec_name}={spec_value} "
+                f"must be > 0"
+            )
+
+        P = float(self.params.get("P") or P_in)
+        if P <= 0.0:
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: P={P} Pa must be > 0")
+        if (self.params.get("P_bottom") is not None
+                and self.params.get("dP_stage") is not None):
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: give 'P_bottom' or "
+                f"'dP_stage', not both"
+            )
+        if self.params.get("P_bottom") is not None:
+            P_bot = float(self.params["P_bottom"])
+            if P_bot < P:
+                raise AbsorberError(
+                    f"ReboiledAbsorber {self.id!r}: P_bottom={P_bot} Pa must "
+                    f"be >= the top pressure P={P} Pa"
+                )
+            dP = (P_bot - P) / max(n_stages - 1, 1)
+        else:
+            dP = float(self.params.get("dP_stage", 0.0))
+            if dP < 0.0:
+                raise AbsorberError(
+                    f"ReboiledAbsorber {self.id!r}: dP_stage={dP} Pa must "
+                    f"be >= 0"
+                )
+        max_iter = int(self.params.get("max_iter", _MAX_ITER))
+        return n_stages, feed_stage, spec_name, spec_value, P, dP, max_iter
+
+    def solve(self, inlets: dict[str, Stream], pp) -> dict[str, PortStream]:
+        feed = inlets.get("feed")
+        if feed is None or not feed.molar_flow:
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: missing or empty inlet on "
+                f"'feed'"
+            )
+        T_in, P_in, F = feed.require_state()
+        z = feed.normalized_z()
+        comps = list(feed.components)
+        n_stages, feed_stage, spec_name, spec_value, P, dP, max_iter = \
+            self._read_params(P_in)
+
+        key = (repr(sorted(self.params.items())),
+               T_in, P_in, F, tuple(sorted(z.items())), feed.H)
+        if key == self._cache_key and self._cache_out is not None:
+            assert self._cache_design is not None
+            self.design = _copy_design(self._cache_design)
+            return _copy_out(self._cache_out)
+
+        active = _active_components(comps, z)
+        N = n_stages
+        f0 = feed_stage - 1
+        P_j = [P + j * dP for j in range(N)]
+        h_F = feed.H if feed.H is not None else pp.enthalpy(T_in, P_in, z)
+        f = {c: F * z[c] for c in active}
+        z_act = {c: z[c] for c in active}
+
+        if spec_name == "vapor_rate" and not 0.0 < spec_value < F:
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: vapor_rate={spec_value:.6g} "
+                f"mol/s must lie strictly between 0 and the feed rate "
+                f"F={F:.6g} mol/s"
+            )
+
+        def run(v_top: float) -> dict[str, Any]:
+            x0 = self._initial_x(pp, N, active, z_act, P_j[f0], f, v_top)
+            res = _solve_reboiled_wh(
+                f"ReboiledAbsorber {self.id!r}", pp, active, N, P_j, f0,
+                f, F, h_F, v_top, x0, max_iter)
+            # Remember the profile: the next spec-iteration (or recycle
+            # sweep) warm-starts from it.
+            self._warm = {"n_stages": N, "active": list(active),
+                          "z": dict(z_act),
+                          "x": [dict(r) for r in res["x"]]}
+            return res
+
+        if spec_name == "vapor_rate":
+            res = run(spec_value)
+        else:
+            res = self._meet_spec(run, spec_name, spec_value, F, h_F)
+
+        # The reboiler duty closes the overall energy balance exactly
+        # (enthalpies are absolute / formation-inclusive):
+        #   F h_F + Q_reb = V_top h_V,top + B h_B
+        q_reb = (res["V"][0] * res["hV"][0]
+                 + res["L"][N - 1] * res["hL"][N - 1] - F * h_F)
+        out, design = _build_products(
+            self.id, pp, comps, active, f, res, P_j,
+            feeds_enthalpy=F * h_F, q_added=q_reb,
+            vapor_port="vapor_out", liquid_port="bottoms")
+        # Sizing keys: "N" is the ideal-stage count excluding the reboiler
+        # (it has no tray); the reboiler is costed from Q_reboiler/T_bottom.
+        design["N"] = float(N - 1)
+        design["Q_reboiler"] = q_reb
+        design["boilup_ratio"] = res["V"][N - 1] / res["L"][N - 1]
+        design["feed_stage"] = feed_stage
+        self.design = design
+
+        out["reboiler_duty"] = EnergyStream(
+            id=f"{self.id}.reboiler_duty", duty=q_reb)
+        self._cache_key = key
+        self._cache_out = _copy_out(out)
+        self._cache_design = _copy_design(design)
+        return out
+
+    def _meet_spec(self, run, spec_name: str, target: float, F: float,
+                   h_F: float) -> dict[str, Any]:
+        """Outer Brent iteration on the overhead vapor rate to meet a
+        boilup-ratio or reboiler-duty spec (both are strictly increasing in
+        V_top: more overhead vapor means more boilup and more reboiler heat)."""
+        cache: dict[float, dict[str, Any]] = {}
+
+        def g(v_top: float) -> float:
+            res = cache.get(v_top)
+            if res is None:
+                res = run(v_top)
+                cache[v_top] = res
+            if spec_name == "boilup_ratio":
+                return res["V"][-1] / res["L"][-1] - target
+            q = (res["V"][0] * res["hV"][0]
+                 + res["L"][-1] * res["hL"][-1] - F * h_F)
+            return q - target
+
+        lo, hi = 0.02 * F, 0.98 * F
+        g_lo, g_hi = g(lo), g(hi)
+        for _ in range(8):
+            if g_lo > 0.0 and lo > 1e-4 * F:
+                hi, g_hi = lo, g_lo
+                lo = max(lo / 4.0, 1e-4 * F)
+                g_lo = g(lo)
+            elif g_hi < 0.0 and hi < (1.0 - 1e-4) * F:
+                lo, g_lo = hi, g_hi
+                hi = min(hi * 1.02, (1.0 - 1e-4) * F)
+                g_hi = g(hi)
+            else:
+                break
+        if g_lo > 0.0 or g_hi < 0.0:
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: no overhead vapor rate in "
+                f"({lo:.4g}, {hi:.4g}) mol/s meets {spec_name}={target:.6g} "
+                f"(spec residuals {g_lo:.3g}..{g_hi:.3g}); the spec is "
+                f"infeasible for this feed"
+            )
+        v_top = float(brentq(g, lo, hi, rtol=1e-10))
+        return cache.get(v_top) or run(v_top)
+
+    def _initial_x(self, pp, N, active, z, P_feed, f, v_top):
+        """Stage liquid-composition starting profile: the last converged one
+        when the layout/feed are unchanged, else a Fenske-style interpolation
+        (:func:`caldyr.unitops.rigorous_column.fenske_profile`)."""
+        w = self._warm
+        if (w is not None and w["n_stages"] == N and w["active"] == active
+                and max(abs(w["z"].get(c, 0.0) - z[c]) for c in active)
+                < _WARM_Z_TOL):
+            return [dict(r) for r in w["x"]]
+        try:
+            return fenske_profile(pp, P_feed, f, v_top, N)
+        except _NoVLEError as exc:
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: no vapor-liquid equilibrium "
+                f"for the feed at P={P_feed:.4g} Pa (bubble flash returned a "
+                f"single phase); check the pressure"
+            ) from exc
+
+
+# -- reboiled-absorber inner loop (Wang-Henke, V_top-driven) -------------------
+def _solve_reboiled_wh(
+    unit_id: str, pp: Any, active: list[str], N: int, P_j: list[float],
+    f0: int, f: dict[str, float], F: float, h_F: float, V_top: float,
+    x0: list[dict[str, float]], max_iter: int,
+) -> dict[str, Any]:
+    """Bubble-point (Wang-Henke) MESH for a reboiled absorber with the
+    overhead vapor rate fixed at ``V_top``: stage temperatures from bubble
+    points, vapor traffic from the energy-balance forward recurrence (the
+    N-1 upper-stage balances; the reboiler balance is the one closed by the
+    duty, which the caller computes from the overall balance). Returns the
+    same profile dict as :func:`_solve_sum_rates`."""
+    floor = _FLOW_FLOOR_FRAC * F
+    z = {c: f[c] / F for c in active}
+    cum = [F if j >= f0 else 0.0 for j in range(N)]   # feed at or above stage j
+    A = [cum[j] - V_top for j in range(N)]            # L_j = V_{j+1} + A_j
+    B = F - V_top
+
+    x = [dict(row) for row in x0]
+    V = [V_top] * N
+    L = [max(V[j + 1] + A[j], floor) for j in range(N - 1)] + [max(B, floor)]
+    T, K, hL, hV, n_prop = _stage_bubble_points(unit_id, pp, P_j, x, active, 0)
+
+    omega = 1.0
+    dT_prev = math.inf
+    worsened = 0
+    converged = False
+    it = 0
+    dT = dV = math.inf
+    for it in range(1, max_iter + 1):
+        cols: dict[str, list[float]] = {}
+        for c in active:
+            a = [0.0] + [L[j - 1] for j in range(1, N)]
+            b = [-(L[j] + V[j] * K[j][c]) for j in range(N)]
+            cc = [V[j + 1] * K[j + 1][c] for j in range(N - 1)] + [0.0]
+            d = [-F * z[c] if j == f0 else 0.0 for j in range(N)]
+            cols[c] = _thomas(a, b, cc, d)
+        for j in range(N):
+            row = {c: max(cols[c][j], _X_FLOOR) for c in active}
+            x[j] = _normalized(row)
+
+        T_new, K, hL, hV, n_prop = _stage_bubble_points(
+            unit_id, pp, P_j, x, active, n_prop)
+        dT = max(abs(tn - to) for tn, to in zip(T_new, T))
+        T = T_new
+
+        if dT > dT_prev:
+            worsened += 1
+            if worsened >= 2:
+                omega = max(0.25, 0.5 * omega)
+                worsened = 0
+        else:
+            worsened = 0
+        dT_prev = dT
+
+        # Energy-balance recurrence for the vapor traffic, V_top fixed.
+        V_new = list(V)
+        for j in range(N - 1):
+            denom = hV[j + 1] - hL[j]
+            if denom <= 0.0:
+                raise AbsorberError(
+                    f"{unit_id}: degenerate energy balance on stage {j + 2} "
+                    f"(saturated vapor enthalpy below the liquid's, "
+                    f"dH={denom:.4g} J/mol) — the property package returned "
+                    f"an unphysical state"
+                )
+            feed_j = F * h_F if j == f0 else 0.0
+            if j == 0:
+                num = A[0] * hL[0] + V_new[0] * hV[0] - feed_j
+            else:
+                num = (A[j] * hL[j] - A[j - 1] * hL[j - 1] - feed_j
+                       + V_new[j] * (hV[j] - hL[j - 1]))
+            V_new[j + 1] = max(num / denom, floor)
+        dV = (max(abs(vn - vo) for vn, vo in zip(V_new[1:], V[1:]))
+              / max(V_new[1:]))
+        V = [V_top] + [max(vo + omega * (vn - vo), floor)
+                       for vo, vn in zip(V[1:], V_new[1:])]
+        L = [max(V[j + 1] + A[j], floor) for j in range(N - 1)] + \
+            [max(B, floor)]
+
+        if dT <= _TOL_T and dV <= _TOL_FLOW:
+            converged = True
+            break
+
+    if not converged:
+        raise AbsorberError(
+            f"{unit_id}: bubble-point iteration did not converge in "
+            f"{max_iter} iterations (max |dT|={dT:.3g} K vs {_TOL_T} K, "
+            f"max |dV|/V={dV:.3g} vs {_TOL_FLOW}, damping={omega}) for "
+            f"V_top={V_top:.4g} mol/s — check the spec, or raise 'max_iter'"
+        )
+    if any(lj <= floor for lj in L) or any(vj <= floor for vj in V):
+        raise AbsorberError(
+            f"{unit_id}: a column section dried up at the converged point "
+            f"(min L={min(L):.3g}, min V={min(V):.3g} mol/s) — "
+            f"V_top={V_top:.4g} mol/s is infeasible for this feed"
+        )
+
+    y = [_normalized({c: K[j][c] * x[j][c] for c in active}) for j in range(N)]
+    # Diagnostic: the reboiler-stage balance vs the overall-balance duty.
+    q_overall = V[0] * hV[0] + L[N - 1] * hL[N - 1] - F * h_F
+    q_stage = (V[N - 1] * hV[N - 1] + L[N - 1] * hL[N - 1]
+               - L[N - 2] * hL[N - 2])
+    e_scale = max(abs(q_overall), abs(q_stage), 1.0)
+    return {
+        "T": T, "L": L, "V": V, "x": x, "y": y, "hL": hL, "hV": hV,
+        "iterations": it, "max_dT": dT, "max_dF_rel": dV, "damping": omega,
+        "prop_calls": n_prop,
+        "energy_residual_rel": abs(q_overall - q_stage) / e_scale,
+        "F_total": F,
+    }
+
+
+def _stage_bubble_points(unit_id: str, pp: Any, P_j: list[float],
+                         x: list[dict[str, float]], active: list[str],
+                         n_prop: int):
+    """One saturated-liquid flash per stage: new temperatures, K-values and
+    saturated phase enthalpies (the bubble-point analog of the sum-rates
+    k_values + Newton-temperatures pair)."""
+    T: list[float] = []
+    K: list[dict[str, float]] = []
+    hL: list[float] = []
+    hV: list[float] = []
+    for j, row in enumerate(x):
+        res = pp.bubble_point(P_j[j], row)
+        n_prop += 1
+        if (res.y is None or res.H_liquid is None or res.H_vapor is None
+                or not math.isfinite(res.T)):
+            raise AbsorberError(
+                f"{unit_id}: bubble-point flash failed on stage {j + 1} "
+                f"(T={res.T!r}, composition {row}) at P={P_j[j]:.4g} Pa"
+            )
+        T.append(res.T)
+        K.append({c: res.y[c] / row[c] for c in active})
+        hL.append(res.H_liquid)
+        hV.append(res.H_vapor)
+    return T, K, hL, hV, n_prop
+
+
+# -- shared product / design assembly -----------------------------------------
+def _build_products(
+    uid: str, pp: Any, comps: list[str], active: list[str],
+    f_tot: dict[str, float], res: dict[str, Any], P_j: list[float],
+    feeds_enthalpy: float, q_added: float,
+    vapor_port: str, liquid_port: str,
+) -> tuple[dict[str, PortStream], dict[str, Any]]:
+    """Assemble the two product streams and the ``design`` dict from a
+    converged sum-rates result. Component mass balances close to machine
+    precision (the liquid product is the feed minus the vapor product); the
+    overall energy balance closes exactly (the liquid product enthalpy is
+    resolved from it, its temperature from a PH flash)."""
+    N = len(P_j)
+    T, L, V = res["T"], res["L"], res["V"]
+    x, y, hV = res["x"], res["y"], res["hV"]
+    F_total = res["F_total"]
+
+    v_flows = {c: V[0] * y[0][c] for c in active}
+    l_flows = {c: f_tot[c] - v_flows[c] for c in active}
+    neg = min(l_flows.values())
+    if neg < -1e-7 * F_total:
+        raise AbsorberError(
+            f"{uid!r}: converged overhead vapor would carry more of a "
+            f"component than the feeds supply (liquid flow {neg:.3g} mol/s) "
+            f"— tighten tolerances or check the specs"
+        )
+    if neg < 0.0:
+        l_flows = {c: max(v, 0.0) for c, v in l_flows.items()}
+        scale = (F_total - V[0]) / sum(l_flows.values())
+        l_flows = {c: v * scale for c, v in l_flows.items()}
+    L_out = sum(l_flows.values())
+    x_out = {c: v / L_out for c, v in l_flows.items()}
+
+    vapor = Stream(
+        id=f"{uid}.{vapor_port}", components=comps,
+        T=T[0], P=P_j[0], molar_flow=V[0], z=_pad(y[0], comps),
+        H=hV[0], phase="vapor", vapor_fraction=1.0,
+    )
+    # Close the overall energy balance exactly: the liquid product carries
+    # whatever enthalpy the balance requires; its temperature follows from a
+    # PH flash (agrees with the converged stage-N temperature to within the
+    # energy-balance tolerance).
+    h_liq = (feeds_enthalpy + q_added - V[0] * hV[0]) / L_out
+    res_l = pp.flash_ph(P_j[-1], h_liq, x_out)
+    liquid = Stream(
+        id=f"{uid}.{liquid_port}", components=comps,
+        T=res_l.T, P=P_j[-1], molar_flow=L_out, z=_pad(x_out, comps),
+        H=h_liq, phase=res_l.phase, vapor_fraction=res_l.vapor_fraction,
+    )
+
+    design: dict[str, Any] = {
+        "P": P_j[0],
+        "n_stages": N,
+        "T_top": T[0], "T_bottom": res_l.T,
+        "V_top": V[0], "L_bottom": L_out,
+        "vapor_flows": dict(v_flows), "liquid_flows": dict(l_flows),
+        "x_bottom": dict(x_out), "y_top": dict(y[0]),
+        "T_profile": list(T), "P_profile": list(P_j),
+        "L_profile": list(L), "V_profile": list(V),
+        "x_profile": [_pad(row, comps) for row in x],
+        "y_profile": [_pad(row, comps) for row in y],
+        "iterations": res["iterations"], "max_dT": res["max_dT"],
+        "max_dF_rel": res["max_dF_rel"], "damping": res["damping"],
+        "prop_calls": res["prop_calls"],
+        "energy_residual_rel": res["energy_residual_rel"],
+    }
+    out: dict[str, PortStream] = {vapor_port: vapor, liquid_port: liquid}
+    return out, design
+
+
+def _copy_out(out: dict[str, PortStream]) -> dict[str, PortStream]:
+    return {
+        name: (s.with_() if isinstance(s, Stream)
+               else EnergyStream(id=s.id, duty=s.duty))
+        for name, s in out.items()
+    }
+
+
+def _copy_design(design: dict[str, Any]) -> dict[str, Any]:
+    return {k: (list(v) if isinstance(v, list) else
+                dict(v) if isinstance(v, dict) else v)
+            for k, v in design.items()}

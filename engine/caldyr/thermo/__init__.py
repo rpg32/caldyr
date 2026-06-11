@@ -1,5 +1,6 @@
 from .activity_pkg import ActivityPackage
 from .base import PhaseResult, PropertyPackage, ThreePhaseResult
+from .coolprop_pkg import CoolPropWaterPackage
 from .thermo_pkg import ThermoPackage
 
 # Which backend builds each `thermo:<method>` selector.
@@ -35,8 +36,18 @@ def make_package(spec: str, components: list[str]) -> PropertyPackage:
     Supported selectors:
       * ``thermo:PR`` / ``thermo:SRK`` — cubic EOS (non-polar systems).
       * ``thermo:NRTL`` — activity-coefficient liquid (polar systems, azeotropes).
+      * ``coolprop:Water`` — pure-water steam tables (CoolProp IAPWS-95);
+        single-component water flowsheets only.
     """
     backend, _, method = spec.partition(":")
+    if backend == "coolprop":
+        if (method or "").lower() != "water":
+            raise ValueError(
+                f"unknown coolprop method {method!r} in {spec!r}; the only "
+                f"supported coolprop selector is 'coolprop:Water'"
+            )
+        _validate_component_ids(components)
+        return CoolPropWaterPackage(components)
     if backend != "thermo":
         raise ValueError(f"unknown property package backend in {spec!r}")
     _validate_component_ids(components)
@@ -57,5 +68,6 @@ __all__ = [
     "PropertyPackage",
     "ThermoPackage",
     "ActivityPackage",
+    "CoolPropWaterPackage",
     "make_package",
 ]

@@ -54,6 +54,8 @@ export interface SolveReport {
 export interface SolveResponse {
   report: SolveReport;
   streams: Record<string, StreamState>;
+  // per-unit design results (column profiles, FUG numbers, fuel duty, ...)
+  designs?: Record<string, Record<string, unknown>>;
 }
 
 export interface CostResponse {

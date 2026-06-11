@@ -7,6 +7,7 @@ that flasher is built is identical, and lives here.
 """
 from __future__ import annotations
 
+import math
 import warnings
 from typing import Any
 
@@ -191,6 +192,55 @@ class FlasherPackage:
         (``y``, so K_i = y_i/x_i) and both saturated phase enthalpies. See
         :meth:`caldyr.thermo.base.PropertyPackage.bubble_point`."""
         return self._result(self._flasher.flash(P=P, VF=0.0, zs=self._zs(x)))
+
+    # -- per-phase properties at an arbitrary (T, P) -------------------------
+    # Evaluated directly on the flasher's phase models (no stability analysis,
+    # no flash iteration), so a liquid can be evaluated above its bubble point
+    # and a vapor below its dew point. This is exactly what energy-balance-
+    # driven MESH methods (sum-rates absorbers; Seader, Henley & Roper 3e
+    # ch. 10.4) and tray hydraulic sizing need: stage temperatures there are
+    # set by heat balances, not by saturation.
+    def _phase_models(self) -> tuple[Any, Any]:
+        """``(liquid_phase, gas_phase)`` model objects of the wrapped flasher."""
+        gas = self._flasher.gas
+        liq = getattr(self._flasher, "liquid", None)
+        if liq is None:
+            liq = self._flasher.liquids[0]
+        return liq, gas
+
+    def k_values(self, T: float, P: float, x: dict[str, float],
+                 y: dict[str, float]) -> dict[str, float]:
+        """Phi-phi K-values K_i = phi_i^L(T,P,x)/phi_i^V(T,P,y) — the liquid
+        fugacity coefficient at composition ``x`` over the vapor's at ``y``.
+        For the gamma-phi (activity) package the liquid lnphi already folds in
+        gamma_i * Psat_i / P, so the same expression is correct there too."""
+        liq, gas = self._phase_models()
+        lnphi_l = liq.to(T=T, P=P, zs=self._zs(x)).lnphis()
+        lnphi_v = gas.to(T=T, P=P, zs=self._zs(y)).lnphis()
+        return {c: math.exp(float(ll) - float(lv))
+                for c, ll, lv in zip(self.components, lnphi_l, lnphi_v)}
+
+    def enthalpy_liquid(self, T: float, P: float, x: dict[str, float]) -> float:
+        """Molar enthalpy (J/mol, formation-inclusive) of ``x`` as a liquid."""
+        liq, _ = self._phase_models()
+        xs = self._zs(x)
+        return float(liq.to(T=T, P=P, zs=xs).H()) + self._hf_mix(xs)
+
+    def enthalpy_vapor(self, T: float, P: float, y: dict[str, float]) -> float:
+        """Molar enthalpy (J/mol, formation-inclusive) of ``y`` as a vapor."""
+        _, gas = self._phase_models()
+        ys = self._zs(y)
+        return float(gas.to(T=T, P=P, zs=ys).H()) + self._hf_mix(ys)
+
+    def volume_liquid(self, T: float, P: float, x: dict[str, float]) -> float:
+        """Molar volume (m^3/mol) of ``x`` as a liquid at (T, P)."""
+        liq, _ = self._phase_models()
+        return float(liq.to(T=T, P=P, zs=self._zs(x)).V())
+
+    def volume_vapor(self, T: float, P: float, y: dict[str, float]) -> float:
+        """Molar volume (m^3/mol) of ``y`` as a vapor at (T, P)."""
+        _, gas = self._phase_models()
+        return float(gas.to(T=T, P=P, zs=self._zs(y)).V())
 
     # -- three-phase (VLLE) flashes -----------------------------------------
     # Built on `thermo`'s FlashVLN (two trial liquids + a gas). Only the

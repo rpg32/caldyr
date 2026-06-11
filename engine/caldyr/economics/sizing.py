@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..unitops.heat_exchanger import HeatExchanger
-from . import data
+from . import data, tray_sizing
 
 _MIN_APPROACH = 10.0   # K, minimum temperature approach when picking a utility
 
@@ -59,6 +59,11 @@ class SizingOptions:
     # Design air-side temperature rise across the tube bundle (typical ACHE
     # design rise of ~10-15 K; GPSA Section 10).
     air_cooler_air_rise: float = 10.0    # K
+    # Tray-column hydraulic design point: fraction of the Fair flooding
+    # velocity (80% is the classic sieve-tray design point; Seader 3e
+    # sec. 6.6) and the downcomer share of the tower cross-section.
+    tray_flood_fraction: float = 0.8
+    tray_downcomer_frac: float = 0.10
 
 
 def _pa_to_barg(p_pa: float) -> float:
@@ -302,6 +307,36 @@ def _three_phase_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
                         orientation="vessel_horizontal")
 
 
+@register_sizer("Balance")
+def _balance_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Balance is a logical (bookkeeping) operation — no physical equipment."""
+    return []
+
+
+@register_sizer("Evaporator")
+def _evaporator_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Evaporator: a vertical vessel (residence-time heuristic, like a flash
+    drum) whose heating duty draws the cheapest hot utility able to reach the
+    boiling temperature — typically steam, mirroring the steam-heated
+    evaporator of Hameed (2025) §5.2. The heating surface (calandria) is not
+    itemized separately; capital = vessel, opex = the heating utility."""
+    sizes = _vessel_size(unit, ctx, ctx.opts.vessel_residence_s)
+    duty = ctx.duty(unit)
+    if duty > 0.0:
+        temps = [s.T for s in ctx.outs.values()
+                 if getattr(s, "T", None) is not None]
+        t_boil = max(temps) if temps else next(iter(ctx.ins.values())).T
+        util = _select_utility("heat", t_boil)
+        vessel = sizes[0]
+        vessel.utility = util
+        vessel.utility_duty_W = duty
+        vessel.notes.append(
+            f"evaporator duty {duty / 1e3:.0f} kW heated with {util} "
+            f"(boiling at {t_boil:.1f} K)"
+        )
+    return sizes
+
+
 @register_sizer("ConversionReactor", "EquilibriumReactor", "GibbsReactor")
 def _reactor_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
     return _vessel_size(unit, ctx, ctx.opts.reactor_residence_s)
@@ -324,21 +359,119 @@ def _kinetic_reactor_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
     )]
 
 
-# -- shortcut distillation column --------------------------------------------
-# Design heuristics for the FUG column. The tower shell is costed with the
+# -- tray columns (distillation, absorption, stripping) -----------------------
+# Design heuristics for tray columns. The tower shell is costed with the
 # Turton vertical-vessel ("towers: tray and packed") correlation, the sieve
 # trays separately per tray area, and the condenser/reboiler as utility heat
 # exchangers — so both duties also show up as utility opex, exactly like a
 # Heater. This mirrors the Turton flow: tower + trays + auxiliary exchangers.
+# The diameter comes from Fair's flooding correlation at the governing tray
+# (see economics.tray_sizing) at opts.tray_flood_fraction (default 80%) of
+# flooding, replacing the earlier fixed F-factor (1.2 Pa^0.5) heuristic —
+# the two agree within ~10-15% on the benzene/toluene benchmark, but the
+# flooding form responds correctly to liquid load and pressure.
 TRAY_EFFICIENCY = 0.7        # overall column efficiency (typical aromatics ~0.7)
 TRAY_SPACING_M = 0.61        # 24 in tray spacing
 TOWER_EXTRA_HEIGHT_M = 3.0   # sump + disengagement allowance
-# Superficial-velocity F-factor u*sqrt(rho_V) ~ 1.2 Pa^0.5 — a typical design
-# vapor loading (~80% of flood) for sieve trays at 0.6 m spacing; Kister,
-# "Distillation Design" (1992); Towler & Sinnott, "Chemical Engineering
-# Design" 2e, Ch. 17. (An F-factor is the Souders-Brown form with the liquid
-# density folded into the constant.)
-TOWER_F_FACTOR = 1.2         # Pa^0.5
+# Stage efficiencies in absorption service are much poorer than in
+# distillation: "the efficiency in the absorption is low (<0.4) but that in
+# the stripping (desorption) is moderate" (Hameed 2025, sec. 9.1.3 — same
+# message as O'Connell's absorber correlation).
+ABSORBER_TRAY_EFFICIENCY = 0.40
+STRIPPER_TRAY_EFFICIENCY = 0.50
+
+
+def _column_loads(design) -> list[tray_sizing.StageLoad]:
+    """Candidate (governing) tray loads for a column: the top-most and
+    bottom-most *trays* from the converged stage profiles when the model
+    publishes them (RigorousColumn, Absorber, ReboiledAbsorber — the
+    condenser/reboiler end stages are skipped where present), else the
+    constant-molal-overflow section loads of the FUG design (ShortcutColumn;
+    the bottom vapor is approximated as saturated at the bottoms
+    composition)."""
+    if "V_profile" in design:
+        n = design["n_stages"]
+        top = 1 if design.get("Q_condenser") is not None else 0
+        bottom = n - 2 if design.get("Q_reboiler") is not None else n - 1
+        candidates = sorted({max(top, 0), max(bottom, top, 0)})
+        return tray_sizing.loads_from_profiles(design, candidates)
+    d_rate, b_rate = design["D"], design["B"]
+    f = d_rate + b_rate
+    v_top = design["V_top"]
+    v_bot = max(v_top - (1.0 - design["q"]) * f, 0.05 * f)
+    p = design["P"]
+    return [
+        tray_sizing.StageLoad(stage=2, V=v_top, L=design["R"] * d_rate,
+                              T=design["T_top_dew"], P=p,
+                              x=design["x_D"], y=design["x_D"]),
+        tray_sizing.StageLoad(stage=max(round(design["N"]), 2),
+                              V=v_bot, L=v_bot + b_rate,
+                              T=design["T_bottom"], P=p,
+                              x=design["x_B"], y=design["x_B"]),
+    ]
+
+
+def _tower_and_trays(unit_id: str, design, pp, opts: SizingOptions,
+                     efficiency: float) -> list[EquipmentSize]:
+    """Tower shell + sieve trays, diameter from Fair flooding at the
+    governing tray. Shared by every tray column (distillation, absorber,
+    reboiled absorber)."""
+    n_real = math.ceil(design["N"] / efficiency)
+    height = n_real * TRAY_SPACING_M + TOWER_EXTRA_HEIGHT_M
+    hyd = tray_sizing.governing_tray(
+        pp, _column_loads(design),
+        tray_spacing_m=TRAY_SPACING_M,
+        flood_fraction=opts.tray_flood_fraction,
+        downcomer_frac=opts.tray_downcomer_frac,
+    )
+    diameter, area = hyd.diameter_m, hyd.area_m2
+    volume = area * height
+    pbarg = _pa_to_barg(design["P"])
+
+    tower = EquipmentSize(
+        unit_id=unit_id, equipment_type="vessel_vertical",
+        attribute=volume, attribute_name="volume_m3",
+        pressure_barg=pbarg, material=opts.material, diameter_m=diameter,
+        notes=[f"tower: N={design['N']:.1f} ideal stages / {efficiency} eff "
+               f"= {n_real} trays; H={height:.1f} m, D={diameter:.2f} m",
+               *hyd.notes],
+    )
+    trays = EquipmentSize(
+        unit_id=f"{unit_id}.trays", equipment_type="tray_sieve",
+        attribute=area, attribute_name="area_m2",
+        pressure_barg=pbarg, material=opts.material, diameter_m=diameter,
+        quantity=n_real,
+        notes=[f"{n_real} sieve trays of {area:.2f} m^2"],
+    )
+    return [tower, trays]
+
+
+def _reboiler_size(unit_id: str, design, opts: SizingOptions,
+                   pbarg: float) -> EquipmentSize:
+    """Reboiler as a utility heat exchanger boiling the bottoms against a
+    (roughly isothermal) hot utility."""
+    q_reb = abs(design["Q_reboiler"])
+    util_r = _select_utility("heat", design["T_bottom"])
+    ur = data.UTILITIES[util_r]
+    lmtd_r = max(ur.T_supply - design["T_bottom"], 1.0)
+    return EquipmentSize(
+        unit_id=f"{unit_id}.reboiler", equipment_type="heat_exchanger",
+        attribute=q_reb / (ur.U * lmtd_r), attribute_name="area_m2",
+        pressure_barg=pbarg, material=opts.material,
+        utility=util_r, utility_duty_W=q_reb,
+        notes=[f"reboiler: heat with {util_r}; LMTD={lmtd_r:.1f} K, "
+               f"U={ur.U} W/m^2/K"],
+    )
+
+
+def _require_design(unit) -> dict:
+    design = getattr(unit, "design", None)
+    if not design:
+        raise ValueError(
+            f"{type(unit).__name__} {unit.id!r} has no design results; solve "
+            f"the flowsheet before sizing"
+        )
+    return design
 
 
 @register_sizer("ShortcutColumn", "RigorousColumn")
@@ -349,47 +482,9 @@ def _column_sizes(unit, ctx: SizerContext) -> list[EquipmentSize]:
     (``N`` is the equilibrium-stage count excluding a total condenser), so one
     sizer covers both."""
     pp, opts = ctx.pp, ctx.opts
-    design = getattr(unit, "design", None)
-    if not design:
-        raise ValueError(
-            f"{type(unit).__name__} {unit.id!r} has no design results; solve "
-            f"the flowsheet before sizing"
-        )
-
-    n_real = math.ceil(design["N"] / TRAY_EFFICIENCY)
-    height = n_real * TRAY_SPACING_M + TOWER_EXTRA_HEIGHT_M
-    p = design["P"]
-    x_d = design["x_D"]
-
-    # Vapor density of the saturated overhead at the top of the column.
-    # (data.molar_mass falls back to the chemicals database for components
-    # missing from the local table, so any resolvable component sizes cleanly.)
-    mw = sum(frac * data.molar_mass(comp)
-             for comp, frac in x_d.items() if frac > 0.0)
-    v_vap = pp.volume(design["T_top_dew"], p, x_d)        # m^3/mol, sat. vapor
-    rho_v = mw / v_vap                                     # kg/m^3
-    u_super = TOWER_F_FACTOR / math.sqrt(rho_v)            # m/s
-    q_vap = design["V_top"] * v_vap                        # m^3/s overhead vapor
-    area = q_vap / u_super
-    diameter = math.sqrt(4.0 * area / math.pi)
-    volume = area * height
-    pbarg = _pa_to_barg(p)
-
-    tower = EquipmentSize(
-        unit_id=unit.id, equipment_type="vessel_vertical",
-        attribute=volume, attribute_name="volume_m3",
-        pressure_barg=pbarg, material=opts.material, diameter_m=diameter,
-        notes=[f"tower: N={design['N']:.1f} ideal stages / {TRAY_EFFICIENCY} eff "
-               f"= {n_real} trays; H={height:.1f} m, D={diameter:.2f} m "
-               f"(F-factor {TOWER_F_FACTOR} Pa^0.5, rho_V={rho_v:.2f} kg/m^3)"],
-    )
-    trays = EquipmentSize(
-        unit_id=f"{unit.id}.trays", equipment_type="tray_sieve",
-        attribute=area, attribute_name="area_m2",
-        pressure_barg=pbarg, material=opts.material, diameter_m=diameter,
-        quantity=n_real,
-        notes=[f"{n_real} sieve trays of {area:.2f} m^2"],
-    )
+    design = _require_design(unit)
+    pbarg = _pa_to_barg(design["P"])
+    tower, trays = _tower_and_trays(unit.id, design, pp, opts, TRAY_EFFICIENCY)
 
     # Condenser: condensing overhead (T_dew -> T_top) against a cooling utility.
     q_cond = abs(design["Q_condenser"])
@@ -404,20 +499,32 @@ def _column_sizes(unit, ctx: SizerContext) -> list[EquipmentSize]:
         utility=util_c, utility_duty_W=q_cond,
         notes=[f"condenser: cool with {util_c}; LMTD={lmtd_c:.1f} K, U={uc.U} W/m^2/K"],
     )
-
-    # Reboiler: boiling the bottoms against a (roughly isothermal) hot utility.
-    q_reb = abs(design["Q_reboiler"])
-    util_r = _select_utility("heat", design["T_bottom"])
-    ur = data.UTILITIES[util_r]
-    lmtd_r = max(ur.T_supply - design["T_bottom"], 1.0)
-    reboiler = EquipmentSize(
-        unit_id=f"{unit.id}.reboiler", equipment_type="heat_exchanger",
-        attribute=q_reb / (ur.U * lmtd_r), attribute_name="area_m2",
-        pressure_barg=pbarg, material=opts.material,
-        utility=util_r, utility_duty_W=q_reb,
-        notes=[f"reboiler: heat with {util_r}; LMTD={lmtd_r:.1f} K, U={ur.U} W/m^2/K"],
-    )
+    reboiler = _reboiler_size(unit.id, design, opts, pbarg)
     return [tower, trays, condenser, reboiler]
+
+
+@register_sizer("Absorber")
+def _absorber_sizes(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Gas absorber / stripper: tower shell + sieve trays only (no condenser
+    or reboiler). The diameter comes from Fair flooding at the governing tray
+    of the converged stage profiles; the tray count uses the (low) absorption
+    stage efficiency."""
+    design = _require_design(unit)
+    return _tower_and_trays(unit.id, design, ctx.pp, ctx.opts,
+                            ABSORBER_TRAY_EFFICIENCY)
+
+
+@register_sizer("ReboiledAbsorber")
+def _reboiled_absorber_sizes(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Reboiled absorber (stripping tower): tower shell + sieve trays + the
+    reboiler exchanger (no condenser). ``design['N']`` already excludes the
+    reboiler stage; stripping-service tray efficiency."""
+    design = _require_design(unit)
+    sizes = _tower_and_trays(unit.id, design, ctx.pp, ctx.opts,
+                             STRIPPER_TRAY_EFFICIENCY)
+    sizes.append(_reboiler_size(unit.id, design, ctx.opts,
+                                _pa_to_barg(design["P"])))
+    return sizes
 
 
 def size_flowsheet(fs, report, pp, options: SizingOptions | None = None) -> list[EquipmentSize]:

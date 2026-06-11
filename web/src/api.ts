@@ -1,7 +1,7 @@
 // Thin client over the engine API. All physics lives server-side.
 import type {
   BalanceResult, CostResponse, EnvelopeResponse, FlowDoc, OptimizeRequest,
-  OptimizeResponse, PropertyPackage, SolveResponse, UnitType,
+  OptimizeResponse, Port, PropertyPackage, SolveResponse, UnitType,
 } from "./types";
 
 const BASE = "/api";
@@ -30,6 +30,8 @@ export const api = {
   propertyPackages: () => get<PropertyPackage[]>("/property-packages"),
   components: () =>
     get<{ id: string; name: string; formula: string; cas: string }[]>("/components"),
+  ports: (type: string, params: Record<string, unknown>) =>
+    post<Port[]>("/ports", { type, params }),
   solve: (flow: FlowDoc, backend: string) =>
     post<SolveResponse>("/solve", { flow, backend }),
   cost: (flow: FlowDoc, product_component: string, monteCarlo = 0) =>

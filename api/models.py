@@ -86,6 +86,8 @@ class SolveReportModel(BaseModel):
 class SolveResponse(BaseModel):
     report: SolveReportModel
     streams: dict[str, StreamState]
+    # per-unit design results (column profiles, FUG numbers, fuel duty, ...)
+    designs: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class CostConfig(BaseModel):
