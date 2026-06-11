@@ -51,6 +51,7 @@ function useAutosave() {
         && state.solverHints === prev.solverHints
         && state.groups === prev.groups
         && state.viewMode === prev.viewMode
+        && state.calcs === prev.calcs
       ) return;
       window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => useStore.getState().autosaveNow(), 800);

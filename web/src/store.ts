@@ -24,7 +24,7 @@ import type {
   BalanceResult, CostResponse, FlowDoc, PropertyPackage, SolveResponse, UnitType,
 } from "./types";
 
-export type Tab = "params" | "streams" | "economics" | "optimize" | "study";
+export type Tab = "params" | "streams" | "economics" | "optimize" | "study" | "calc";
 export type Busy = "solve" | "cost" | null;
 export type ColorMode = "none" | "phase" | "temperature";
 export type ViewMode = "bfd" | "pfd" | "pid";
@@ -97,6 +97,7 @@ interface State {
   inspectorWidth: number;
   viewMode: ViewMode;
   groups: Group[];
+  calcs: { name: string; expr: string }[];
   // flowsheet-level logical ops + solver hints (round-tripped via .flow)
   logical: Record<string, unknown>[];
   solverHints: Record<string, unknown>;
@@ -164,6 +165,7 @@ interface State {
   ungroup: (groupId: string) => void;
   toggleGroupCollapse: (groupId: string) => void;
   moveGroup: (groupId: string, dx: number, dy: number) => void;
+  setCalcs: (rows: { name: string; expr: string }[]) => void;
   setLogical: (ops: Record<string, unknown>[]) => void;
   toggleChat: () => void;
   sendChat: (text: string) => Promise<void>;
@@ -246,6 +248,7 @@ export const useStore = create<State>((set, get) => {
     inspectorWidth: Math.min(640, Math.max(300, Number(loadPref("panelw")) || 360)),
     viewMode: "pfd",
     groups: [],
+    calcs: [],
     logical: [],
     solverHints: {},
     chatOpen: false,
@@ -613,6 +616,7 @@ export const useStore = create<State>((set, get) => {
           colorMode: (c.ui.color_mode as ColorMode) ?? get().colorMode,
           pinnedStreams: c.ui.pinned_streams ?? [],
           viewMode: (c.ui.view_mode as ViewMode) ?? "pfd",
+          calcs: c.ui.calcs ?? [],
           groups: (c.ui.groups as Group[]) ?? [],
           logical: c.extras.logical ?? [],
           solverHints: c.extras.solver_hints ?? {},
@@ -634,6 +638,7 @@ export const useStore = create<State>((set, get) => {
         color_mode: s.colorMode,
         pinned_streams: s.pinnedStreams,
         view_mode: s.viewMode,
+        calcs: s.calcs,
         groups: s.groups,
       }, { logical: s.logical, solver_hints: s.solverHints });
     },
@@ -778,6 +783,8 @@ export const useStore = create<State>((set, get) => {
     }),
 
     setViewMode: (m) => set({ viewMode: m }),
+
+    setCalcs: (rows) => set({ calcs: rows }),
 
     groupSelection: () => {
       const s = get();

@@ -8,6 +8,7 @@ import { api } from "../api";
 import { compositionSum, metaFor, validateParam } from "../lib/params";
 import { useStore, type Tab } from "../store";
 import type { EnvelopeResponse } from "../types";
+import { CalcPanel } from "./CalcPanel";
 import { DesignPanel } from "./DesignPanel";
 import { EconomicsPanel } from "./EconomicsPanel";
 import { LogicalEditor } from "./LogicalEditor";
@@ -22,6 +23,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "economics", label: "Econ" },
   { id: "optimize", label: "Opt" },
   { id: "study", label: "Study" },
+  { id: "calc", label: "Calc" },
 ];
 
 export function Inspector() {
@@ -50,6 +52,7 @@ export function Inspector() {
         {tab === "economics" && <EconomicsPanel />}
         {tab === "optimize" && <OptimizePanel />}
         {tab === "study" && <StudyPanel />}
+        {tab === "calc" && <CalcPanel />}
       </div>
     </aside>
   );

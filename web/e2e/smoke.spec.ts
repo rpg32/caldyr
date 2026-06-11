@@ -40,6 +40,24 @@ test("undo restores a deleted unit", async ({ page }) => {
   await expect(page.locator(".node")).toHaveCount(9);
 });
 
+test("calc panel evaluates expressions over the solved flowsheet", async ({ page }) => {
+  await page.goto("/");
+  await loadAmmoniaTemplate(page);
+  await page.getByRole("button", { name: "Solve" }).click();
+  // solve completion force-switches to the Streams tab — wait it out first
+  await expect(page.getByRole("status")).toContainText("Solved", { timeout: 30_000 });
+  await page.getByRole("tab", { name: "Calc" }).click();
+  await page.getByRole("button", { name: "formula" }).click();
+  await page.getByLabel("Calculation 1 expression")
+    .fill('n("PRODUCT") * z("PRODUCT","ammonia")');
+  // the ammonia product rate is ~44.6 mol/s at split 0.9
+  await expect(page.getByText(/^4[0-9]\./)).toBeVisible({ timeout: 30_000 });
+  // chained row referencing the first by name
+  await page.getByRole("button", { name: "formula" }).click();
+  await page.getByLabel("Calculation 2 expression").fill("calc1 * 17.03 / 1000");
+  await expect(page.getByText(/^0\.7[0-9]/)).toBeVisible(); // ~0.76 kg/s NH3
+});
+
 test("view modes and projects dialog", async ({ page }) => {
   await page.goto("/");
   await loadAmmoniaTemplate(page);
