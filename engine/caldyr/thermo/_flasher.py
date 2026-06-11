@@ -182,16 +182,168 @@ class FlasherPackage:
 
     def bubble_dew(self, P: float, z: dict[str, float]) -> tuple[float, float]:
         zs = self._zs(z)
-        bubble = float(self._flasher.flash(P=P, VF=0.0, zs=zs).T)
-        dew = float(self._flasher.flash(P=P, VF=1.0, zs=zs).T)
-        return bubble, dew
+        try:
+            bubble = float(self._flasher.flash(P=P, VF=0.0, zs=zs).T)
+        except Exception:  # thermo PVF crash / no strict bubble point
+            bubble = float(self.bubble_point(P, self._comp(zs)).T)
+        try:
+            dew = float(self._flasher.flash(P=P, VF=1.0, zs=zs).T)
+        except Exception:
+            dew = self._dew_point_bisect(P, self._comp(zs))
+        # The non-condensables bubble surrogate (used when no strict bubble
+        # point exists) can land above the true dew edge; keep the pair ordered
+        # so envelope consumers see a degenerate-but-sane interval.
+        return min(bubble, dew), dew
+
+    def _dew_point_bisect(self, P: float, zd: dict[str, float]) -> float:
+        """Dew temperature by bisecting the PT flash's vapor fraction for the
+        VF: <1 -> 1 transition (the all-vapor edge), scanning down from high T.
+        Fallback for thermo's PVF flash crashes; with permanent gases present
+        the mixture may never be all-liquid, but it is all-vapor above some T,
+        so the dew edge is well-defined whenever any condensable is present."""
+        def vf(T: float) -> float:
+            return float(self.flash_pt(T, P, zd).vapor_fraction or 0.0)
+
+        hi = 900.0
+        if vf(hi) < 1.0:
+            raise ValueError(
+                f"dew point of {zd} at P={P:.4g} Pa not below {hi:.0f} K")
+        lo = hi
+        while lo > 60.0 and vf(lo) >= 1.0:
+            hi = lo
+            lo -= 40.0
+        if vf(lo) >= 1.0:
+            raise ValueError(
+                f"no dew point: {zd} at P={P:.4g} Pa is all-vapor everywhere")
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            if vf(mid) >= 1.0:
+                hi = mid
+            else:
+                lo = mid
+            if hi - lo < 1e-4:
+                break
+        return hi
 
     def bubble_point(self, P: float, x: dict[str, float]) -> PhaseResult:
         """Saturated-liquid state of ``x`` at ``P``: a single VF=0 flash whose
         result carries the bubble temperature, the incipient vapor composition
         (``y``, so K_i = y_i/x_i) and both saturated phase enthalpies. See
-        :meth:`caldyr.thermo.base.PropertyPackage.bubble_point`."""
-        return self._result(self._flasher.flash(P=P, VF=0.0, zs=self._zs(x)))
+        :meth:`caldyr.thermo.base.PropertyPackage.bubble_point`.
+
+        thermo's PVF flash is known to crash (UnboundLocalError) when the
+        liquid carries supercritical components (e.g. dissolved H2 in a column
+        feed); in that case we fall back to the classical K-value bubble-point
+        iteration on the phase models directly, which has no such failure mode.
+        """
+        try:
+            return self._result(self._flasher.flash(P=P, VF=0.0, zs=self._zs(x)))
+        except Exception:
+            return self._bubble_point_bisect(P, x)
+
+    def _bubble_point_bisect(self, P: float, x: dict[str, float]) -> PhaseResult:
+        """Robust bubble point by bisecting the PT flash's vapor fraction.
+
+        The phase-model (phi-phi) shortcut is NOT usable here: outside the
+        cubic's two-root window both phase models return the same root, K_i
+        collapses to 1 and the bubble criterion degenerates. The full PT flash
+        carries stability analysis and is reliable everywhere, so we bisect the
+        first-vapor transition VF: 0 -> >0 in T. Slower (one flash per
+        bisection step) but only used when the PVF flash has already failed.
+        """
+        xd = self._comp(self._zs(x))
+
+        def vf(T: float) -> float:
+            return float(self.flash_pt(T, P, xd).vapor_fraction or 0.0)
+
+        # VF(T) need not be monotone: dissolved supercritical gases (H2, N2)
+        # are LESS soluble at low T, so a liquid can show VF>0 cold, VF=0 in a
+        # window, then boil. The bubble point is the UPPER transition: scan
+        # down from high T for the all-liquid window, then bisect the boiling
+        # edge between it and the grid point above.
+        t_hi = 800.0
+        t_zero = None
+        t_above = t_hi
+        T = t_hi
+        while T >= 80.0:
+            if vf(T) <= 0.0:
+                t_zero = T
+                break
+            t_above = T
+            T -= 25.0
+        if t_zero is None:
+            # No all-liquid window at any T: dissolved permanent gases (H2,
+            # N2, CH4...) keep VF > 0 everywhere. Classical treatment: bubble
+            # point of the CONDENSABLE submixture, with the light gases folded
+            # into the incipient vapor by their K-values at that temperature
+            # (Seader 3e sec. 4.4 non-condensable handling).
+            return self._bubble_point_condensables(P, xd)
+        lo, hi = t_zero, t_above
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            if vf(mid) > 0.0:
+                hi = mid
+            else:
+                lo = mid
+            if hi - lo < 1e-4:
+                break
+        # hi sits just inside the two-phase region: harvest the incipient vapor
+        just_above = self.flash_pt(hi, P, xd)
+        y = just_above.y or xd
+        return PhaseResult(
+            T=lo, P=float(P),
+            H=self.enthalpy_liquid(lo, P, xd),
+            phase="liquid", vapor_fraction=0.0,
+            x=xd, y=dict(y),
+            H_liquid=self.enthalpy_liquid(lo, P, xd),
+            H_vapor=self.enthalpy_vapor(lo, P, y),
+        )
+
+    _CONDENSABLE_TC_MIN = 240.0  # K: below this, treat as a permanent gas
+
+    def _bubble_point_condensables(self, P: float, xd: dict[str, float]) -> PhaseResult:
+        """Bubble point with permanent gases handled as non-condensables: take
+        the bubble T of the condensable submixture, then build the full-mixture
+        incipient vapor from phi-phi K-values at that T. Used for liquids that
+        have NO strict bubble point (VF > 0 at every T)."""
+        constants = getattr(self._flasher, "constants", None)
+        tcs = list(getattr(constants, "Tcs", []) or [])
+        if len(tcs) != len(self.components):
+            raise ValueError(
+                f"no bubble point for {xd} at P={P:.4g} Pa and no critical-"
+                f"temperature data to apply the non-condensable treatment")
+        cond = {c: xd[c] for c, tc in zip(self.components, tcs)
+                if float(tc) >= self._CONDENSABLE_TC_MIN and xd[c] > 0.0}
+        if not cond or len(cond) == len([c for c in xd if xd[c] > 0.0]):
+            raise ValueError(
+                f"no bubble point: {xd} at P={P:.4g} Pa has no all-liquid "
+                f"window and the non-condensable split is degenerate "
+                f"(condensables: {sorted(cond)})")
+        total = sum(cond.values())
+        sub = self.bubble_point(P, {c: v / total for c, v in cond.items()})
+
+        # Fold the lights back in: y_i ∝ K_i x_i over the FULL mixture at the
+        # condensables' bubble T, iterating y -> K(y) to consistency.
+        y = {c: (sub.y or {}).get(c, 0.0) for c in xd}
+        for c in xd:
+            if c not in cond and xd[c] > 0.0:
+                y[c] = 50.0 * xd[c]          # large-K starting guess
+        for _ in range(8):
+            K = self.k_values(sub.T, P, xd, y)
+            s = sum(K[c] * xd[c] for c in xd) or 1.0
+            y_new = {c: K[c] * xd[c] / s for c in xd}
+            if max(abs(y_new[c] - y[c]) for c in xd) < 1e-9:
+                y = y_new
+                break
+            y = y_new
+        return PhaseResult(
+            T=sub.T, P=float(P),
+            H=self.enthalpy_liquid(sub.T, P, xd),
+            phase="liquid", vapor_fraction=0.0,
+            x=dict(xd), y=y,
+            H_liquid=self.enthalpy_liquid(sub.T, P, xd),
+            H_vapor=self.enthalpy_vapor(sub.T, P, y),
+        )
 
     # -- per-phase properties at an arbitrary (T, P) -------------------------
     # Evaluated directly on the flasher's phase models (no stability analysis,
