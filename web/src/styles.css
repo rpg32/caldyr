@@ -1,0 +1,156 @@
+@import "tailwindcss";
+
+/* Design tokens. Runtime-themed via [data-theme]; Tailwind utilities map onto
+   them through @theme inline (e.g. bg-panel, text-muted, border-line). */
+:root, [data-theme="dark"] {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --panel2: #172033;
+  --line: #334155;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --ok: #22c55e;
+  --bad: #ef4444;
+  --warn: #f59e0b;
+  --energy: #f59e0b;
+  --edge: #64748b;
+}
+[data-theme="light"] {
+  --bg: #eef2f7;
+  --panel: #ffffff;
+  --panel2: #f1f5f9;
+  --line: #cbd5e1;
+  --text: #0f172a;
+  --muted: #64748b;
+  --accent: #0284c7;
+  --ok: #16a34a;
+  --bad: #dc2626;
+  --warn: #d97706;
+  --energy: #d97706;
+  --edge: #94a3b8;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-panel2: var(--panel2);
+  --color-line: var(--line);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-ok: var(--ok);
+  --color-bad: var(--bad);
+  --color-warn: var(--warn);
+  --color-energy: var(--energy);
+}
+
+:root {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+}
+body, #root { margin: 0; height: 100vh; }
+
+/* ---- data tables (streams, duties, economics) ---- */
+.data-table { width: 100%; border-collapse: collapse; margin: 6px 0; }
+.data-table th, .data-table td {
+  text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--line);
+}
+.data-table th:first-child, .data-table td:first-child { text-align: left; }
+.data-table th { color: var(--muted); font-weight: 600; }
+
+/* ---- flowsheet nodes ---- */
+.node {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel2); border: 1.5px solid var(--line); border-radius: 8px;
+  padding: 7px 12px; min-width: 110px; color: var(--text);
+}
+.node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); }
+.node-glyph { color: var(--muted); display: flex; flex: none; }
+.node.selected .node-glyph { color: var(--accent); }
+.node-text { text-align: left; min-width: 0; }
+.node-title { font-weight: 600; white-space: nowrap; }
+.node-sub { color: var(--muted); font-size: 10px; text-transform: lowercase; }
+.node-feed { border-color: var(--ok); }
+.node-feed .node-glyph { color: var(--ok); }
+.node-product { border-color: var(--muted); border-style: dashed; }
+.node-rename {
+  width: 110px; font: inherit; font-weight: 600;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px;
+}
+
+/* ---- stream edges: labels, callouts ---- */
+.edge-label {
+  position: absolute; pointer-events: none;
+  background: var(--panel); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 4px;
+  padding: 0 4px; font-size: 9.5px; line-height: 14px;
+}
+.edge-label.selected { color: var(--accent); border-color: var(--accent); }
+.edge-callout-anchor { position: absolute; z-index: 10; }
+.edge-callout {
+  pointer-events: all; margin-top: 8px;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 5px 8px; font-size: 10.5px; line-height: 1.5;
+  box-shadow: 0 4px 14px rgb(0 0 0 / .25); white-space: nowrap;
+}
+.edge-callout-head { display: flex; align-items: center; gap: 6px; }
+.edge-callout-head b { font-size: 11px; }
+.edge-callout-head button {
+  display: flex; margin-left: auto; padding: 1px; cursor: pointer;
+  background: none; border: 0; color: var(--muted);
+}
+.edge-callout-head button:hover { color: var(--bad); }
+
+/* ---- view modes & groups ---- */
+.node-bfd { min-width: 130px; min-height: 56px; justify-content: center; border-width: 2px; }
+.node-bfd .node-title { font-size: 14px; }
+.node-group {
+  border-style: double; border-width: 3.5px; border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel2));
+}
+
+/* ---- P&ID instrument bubbles ---- */
+.instrument-bubble {
+  position: absolute; pointer-events: all;
+  min-width: 30px; height: 30px; border-radius: 999px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 4px; font-size: 9px; font-weight: 700;
+  background: var(--panel); color: var(--warn);
+  border: 1.5px solid var(--warn);
+}
+
+/* ---- onboarding tour ---- */
+.tour-highlight {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+
+/* ---- accessibility ---- */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---- alignment guides ---- */
+.helper-line { position: absolute; background: var(--accent); z-index: 5; opacity: .7; }
+
+/* ---- canvas legend ---- */
+.legend {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 4px 10px; font-size: 11px; color: var(--muted);
+}
+.legend span { display: inline-flex; align-items: center; gap: 4px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.legend-grad {
+  width: 60px; height: 8px; border-radius: 4px;
+  background: linear-gradient(90deg, #3b82f6, #a855f7, #ef4444);
+}
+.legend-note { font-style: italic; }

@@ -1,0 +1,31 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+# node / web
+node_modules/
+web/dist/
+.vite/
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+# data / scratch
+*.local.json
+scratch/
+*.stackdump
+
+# docs build
+site/
+
+# playwright
+web/test-results/
+web/playwright-report/
+web/.last-run.json

@@ -1,0 +1,50 @@
+[project]
+name = "caldyr"
+version = "0.9.0"
+description = "Open-source, AI-native process simulation & techno-economic analysis"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "scipy",
+  "pydantic>=2",
+  "thermo",        # Caleb Bell: properties + EOS (MIT)
+  "chemicals",     # companion to thermo
+  "CoolProp",      # fast pure-fluid properties (MIT)
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+eo  = ["pyomo", "idaes-pse"]      # equation-oriented backend (M4+)
+kinetics = ["cantera"]            # equilibrium/kinetics reactors (M2+)
+api = ["fastapi", "uvicorn[standard]", "httpx"]
+ai = ["httpx", "mcp"]             # AI layer: local-LLM (Ollama/OpenAI) + MCP server
+anthropic = ["anthropic"]         # optional hosted backend (off by default)
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+
+# thermo / CoolProp / chemicals / fluids / scipy / pyomo / idaes ship no type stubs.
+[[tool.mypy.overrides]]
+module = ["thermo.*", "CoolProp.*", "chemicals.*", "fluids.*", "scipy.*",
+          "pyomo.*", "idaes.*", "cyipopt.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# The engine package lives under engine/ (see ARCHITECTURE.md). Mapping it here
+# lets `pip install -e .` from the repo root pick up `caldyr`.
+[tool.setuptools]
+package-dir = {"" = "engine"}
+
+[tool.setuptools.packages.find]
+where = ["engine"]
+include = ["caldyr*"]

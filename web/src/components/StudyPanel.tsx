@@ -1,0 +1,178 @@
+// Case study: sweep one unit parameter over a range, solving at each point
+// client-side, and chart any metric against it.
+import { Download, Play, Square } from "lucide-react";
+import { useRef, useState } from "react";
+import {
+  CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
+} from "recharts";
+import { api } from "../api";
+import { downloadCsv } from "../lib/csv";
+import { useStore } from "../store";
+import type { FlowDoc, MetricSpec, SolveResponse } from "../types";
+import { MetricEditor, metricLabel, metricValid } from "./MetricEditor";
+import { Button, Hint, PanelTitle } from "./ui";
+
+const sel = "rounded-md border border-line bg-panel2 px-1.5 py-1 text-text min-w-0";
+const num = "w-[76px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text";
+
+interface Point { x: number; y: number | null }
+
+function evalMetric(res: SolveResponse, m: MetricSpec): number | null {
+  if (m.type === "duty") return res.report.duties[m.stream] ?? null;
+  const s = res.streams[m.stream];
+  if (!s || s.molar_flow == null) return null;
+  if (m.type === "flow") return s.molar_flow;
+  const zsum = Object.values(s.z).reduce((a, b) => a + b, 0) || 1;
+  return s.molar_flow * ((s.z[m.component ?? ""] ?? 0) / zsum);
+}
+
+/** Deep-copied flow doc with one unit param overridden. */
+function withParam(flow: FlowDoc, unit: string, param: string, value: number): FlowDoc {
+  const doc = structuredClone(flow) as FlowDoc & {
+    units: { id: string; params: Record<string, unknown> }[];
+  };
+  const u = doc.units.find((x) => x.id === unit);
+  if (u) u.params = { ...u.params, [param]: value };
+  return doc;
+}
+
+export function StudyPanel() {
+  const nodes = useStore((s) => s.nodes);
+  const toFlowDoc = useStore((s) => s.toFlowDoc);
+  const backend = useStore((s) => s.backend);
+  const toast = useStore((s) => s.toast);
+
+  const [unit, setUnit] = useState("");
+  const [param, setParam] = useState("");
+  const [from, setFrom] = useState(0);
+  const [to, setTo] = useState(1);
+  const [steps, setSteps] = useState(8);
+  const [metric, setMetric] = useState<MetricSpec>({ type: "flow", stream: "" });
+  const [points, setPoints] = useState<Point[]>([]);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState("");
+  const abortRef = useRef(false);
+
+  const unitIds = nodes.filter((n) => n.data.kind === "unit").map((n) => n.id);
+  const paramsOf = (u: string): string[] => {
+    const n = nodes.find((x) => x.id === u);
+    return Object.entries(n?.data.params ?? {})
+      .filter(([, v]) => typeof v === "number").map(([k]) => k);
+  };
+
+  const valid = unit && param && metricValid(metric)
+    && Number.isFinite(from) && Number.isFinite(to) && from !== to
+    && steps >= 2 && steps <= 50;
+
+  const run = async () => {
+    setRunning(true);
+    setPoints([]);
+    abortRef.current = false;
+    const base = toFlowDoc();
+    const out: Point[] = [];
+    let failures = 0;
+    for (let i = 0; i < steps; i++) {
+      if (abortRef.current) break;
+      const x = from + ((to - from) * i) / (steps - 1);
+      setProgress(`${i + 1} / ${steps}  (${param} = ${x.toPrecision(4)})`);
+      try {
+        const res = await api.solve(withParam(base, unit, param, x), backend);
+        out.push({ x, y: res.report.converged ? evalMetric(res, metric) : null });
+        if (!res.report.converged) failures++;
+      } catch {
+        out.push({ x, y: null });
+        failures++;
+      }
+      setPoints([...out]);
+    }
+    setProgress("");
+    setRunning(false);
+    if (failures) toast("info", `${failures} of ${steps} sweep points failed to solve (shown as gaps).`);
+  };
+
+  const exportCsv = () => downloadCsv(
+    [[`${unit}.${param}`, metricLabel(metric)], ...points.map((p) => [p.x, p.y])],
+    "case_study.csv",
+  );
+
+  return (
+    <div>
+      <PanelTitle>Vary</PanelTitle>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <select className={sel} value={unit} aria-label="Unit"
+          onChange={(e) => { setUnit(e.target.value); setParam(""); }}>
+          <option value="">— unit —</option>
+          {unitIds.map((u) => <option key={u} value={u}>{u}</option>)}
+        </select>
+        <select className={sel} value={param} aria-label="Parameter"
+          onChange={(e) => setParam(e.target.value)}>
+          <option value="">— param —</option>
+          {paramsOf(unit).map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+        <input className={num} type="number" step="any" value={from} aria-label="From"
+          onChange={(e) => setFrom(parseFloat(e.target.value))} />
+        <span className="text-muted">→</span>
+        <input className={num} type="number" step="any" value={to} aria-label="To"
+          onChange={(e) => setTo(parseFloat(e.target.value))} />
+        <label className="flex items-center gap-1 text-[11px] text-muted">
+          steps
+          <input className="w-[52px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text"
+            type="number" min={2} max={50} value={steps} aria-label="Steps"
+            onChange={(e) => setSteps(parseInt(e.target.value) || 2)} />
+        </label>
+      </div>
+
+      <PanelTitle>Watch</PanelTitle>
+      <MetricEditor value={metric} onChange={setMetric} />
+
+      <div className="mt-3 flex items-center gap-2">
+        {!running ? (
+          <Button variant="primary" icon={<Play size={13} />} disabled={!valid}
+            onClick={() => void run()}>
+            Run sweep
+          </Button>
+        ) : (
+          <Button icon={<Square size={13} />} onClick={() => { abortRef.current = true; }}>
+            Stop
+          </Button>
+        )}
+        {points.length > 0 && !running && (
+          <Button variant="ghost" icon={<Download size={13} />} onClick={exportCsv}>CSV</Button>
+        )}
+        <span className="text-[11px] text-muted">{progress}</span>
+      </div>
+      {!valid && (
+        <Hint>Pick a unit parameter, a numeric range, and a metric to watch.
+          Each step is a full engine solve.</Hint>
+      )}
+
+      {points.length > 1 && (
+        <>
+          <PanelTitle>{metricLabel(metric)} vs {unit}.{param}</PanelTitle>
+          <div style={{ height: 180 }}>
+            <ResponsiveContainer>
+              <LineChart data={points} margin={{ top: 6, right: 10, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke="var(--line)" strokeDasharray="3 3" />
+                <XAxis dataKey="x" type="number" domain={["auto", "auto"]}
+                  tick={{ fill: "var(--muted)", fontSize: 10 }} stroke="var(--line)"
+                  tickFormatter={(v: number) => v.toPrecision(3)} />
+                <YAxis tick={{ fill: "var(--muted)", fontSize: 10 }} stroke="var(--line)"
+                  width={56} domain={["auto", "auto"]}
+                  tickFormatter={(v: number) => Number(v).toPrecision(3)} />
+                <Tooltip
+                  contentStyle={{
+                    background: "var(--panel)", border: "1px solid var(--line)",
+                    borderRadius: 6, fontSize: 11,
+                  }}
+                  labelFormatter={(v) => `${param} = ${Number(v).toPrecision(5)}`}
+                />
+                <Line type="monotone" dataKey="y" stroke="var(--accent)" strokeWidth={1.6}
+                  dot={{ r: 2.5 }} connectNulls={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
