@@ -30,6 +30,8 @@ nav:
   - Home: index.md
   - Getting started: getting-started.md
   - Using the app: ui-guide.md
+  - Unit operations: unit-operations.md
+  - Analysis tools: analysis-tools.md
   - AI copilot & MCP: ai.md
   - Data model (.flow): DATA_MODEL.md
   - Thermodynamics: THERMO.md

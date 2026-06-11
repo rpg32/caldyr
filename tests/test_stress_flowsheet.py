@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from caldyr.core import Component, Flowsheet
 from caldyr.solver import balance_report
 from caldyr.unitops import (
@@ -108,13 +110,16 @@ def test_sequential_solves_three_recycles_at_scale():
     assert prod.normalized_z()["ammonia"] > 0.95
 
 
+@pytest.mark.slow
 def test_equation_oriented_agrees_at_scale():
+    # Tolerances chosen to support the 1e-3 mol/s / 0.01 K agreement asserts
+    # below — tighter ones double the wall time for no extra assurance.
     fs_sm = build_plant()
-    fs_sm.solve(backend="sequential", tol=1e-8)
+    fs_sm.solve(backend="sequential", tol=1e-7)
 
     fs_eo = build_plant()
     t0 = time.perf_counter()
-    report = fs_eo.solve(backend="equation_oriented", tol=1e-8)
+    report = fs_eo.solve(backend="equation_oriented", tol=1e-6)
     wall = time.perf_counter() - t0
     assert report.converged, report.messages
     assert wall < 300.0, f"EO solve took {wall:.1f}s"

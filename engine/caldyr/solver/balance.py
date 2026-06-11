@@ -38,6 +38,10 @@ def _molar_mass(key: str) -> float:
 def _mw_map(fs) -> dict[str, float]:
     out: dict[str, float] = {}
     for c in fs.components:
+        pseudo = getattr(c, "pseudo", None)
+        if pseudo and "MW" in pseudo:        # assay pseudo-component
+            out[c.id] = float(pseudo["MW"])
+            continue
         try:
             out[c.id] = _molar_mass(c.cas or c.id)
         except Exception as exc:

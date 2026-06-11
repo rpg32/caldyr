@@ -26,7 +26,7 @@ jobs:
       - name: Type-check
         run: python -m mypy engine/caldyr
       - name: Tests
-        run: python -m pytest -q
+        run: python -m pytest -q -n 4
 
   web:
     runs-on: ubuntu-latest

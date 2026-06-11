@@ -33,7 +33,7 @@ from .models import (
     SolveResponse,
 )
 
-app = FastAPI(title="Caldyr API", version="0.9.0",
+app = FastAPI(title="Caldyr API", version="0.10.0",
               description="Open, scriptable process simulation + techno-economics.")
 
 # The web dev server (Vite) runs on a different origin.

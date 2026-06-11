@@ -116,6 +116,134 @@ export const cyclohexanePlant: FlowDoc = {
   },
 };
 
+// Book ch. 15.6 (Hameed 2025): vinyl chloride monomer by EDC cracking,
+// with the EDC recycle closed. 500 kmol/h EDC + recycle -> furnace-style
+// heater -> isothermal cracker (55% per pass) -> air cooler -> HCl tower
+// (25 bar) -> VCM tower (15 bar) -> EDC bottoms pumped back to the mixer.
+// Deviations from the book, both required by the closed recycle: (1) the
+// column draws are ratio specs (distillate_to_feed) instead of fixed rates,
+// so the recycle self-stabilizes (the book's fixed 275 / 272 kmol/h draws
+// are per-pass numbers — closing the loop roughly doubles production to
+// ~500 kmol/h of each product); (2) the HCl tower runs RR 3 (book: 1.5) —
+// the bubble-point MESH needs the extra reflux to keep near-critical HCl
+// (Tc = 324.7 K) out of the hot stage liquids.
+export const vcmPlant: FlowDoc = {
+  schema: "caldyr.flow/1",
+  meta: { ui: { product: "vinyl chloride" } },
+  components: [
+    { id: "1,2-dichloroethane" }, { id: "hydrogen chloride" },
+    { id: "vinyl chloride" },
+  ],
+  property_package: "thermo:SRK",
+  units: [
+    { id: "MIX", type: "Mixer", params: { dP: 0 }, xy: [60, 200] },
+    { id: "HEAT", type: "Heater",
+      params: { T_out: 443.15, dP: 50e3 }, xy: [250, 200] },
+    { id: "RXN", type: "ConversionReactor",
+      params: { reaction: { stoich: { "1,2-dichloroethane": -1,
+                                      "hydrogen chloride": 1,
+                                      "vinyl chloride": 1 },
+                            key: "1,2-dichloroethane" },
+                conversion: 0.55, T_out: 443.15, dP: 50e3 },
+      xy: [440, 200] },
+    { id: "ACOOL", type: "AirCooler",
+      params: { T_out: 343.15, dP: 50e3, t_air_in: 293.15 }, xy: [640, 200] },
+    { id: "T100", type: "RigorousColumn",
+      params: { n_stages: 8, feed_stage: 4, reflux_ratio: 3.0,
+                distillate_to_feed: 0.3475, P: 25e5 },
+      xy: [840, 200] },
+    { id: "T101", type: "RigorousColumn",
+      params: { n_stages: 8, feed_stage: 4, reflux_ratio: 1.5,
+                distillate_to_feed: 0.545, P: 15e5 },
+      xy: [1040, 320] },
+    { id: "P1", type: "Pump", params: { P_out: 30e5, eta: 0.75 }, xy: [540, 470] },
+  ],
+  streams: [
+    { id: "EDC_FEED", from: null, to: "MIX:in1",
+      spec: { T: 293.15, P: 30e5, molar_flow: 138.89,
+              z: { "1,2-dichloroethane": 1.0 } } },
+    { id: "S1", from: "MIX:out", to: "HEAT:in1" },
+    { id: "S2", from: "HEAT:out", to: "RXN:in1" },
+    { id: "S3", from: "RXN:out", to: "ACOOL:in1" },
+    { id: "S4", from: "ACOOL:out", to: "T100:in1" },
+    { id: "HCL", from: "T100:distillate", to: null },
+    { id: "S5", from: "T100:bottoms", to: "T101:in1" },
+    { id: "VCM", from: "T101:distillate", to: null },
+    { id: "S6", from: "T101:bottoms", to: "P1:in1" },
+    { id: "EDC_REC", from: "P1:out", to: "MIX:in2" },
+  ],
+  solver_hints: {
+    tear_guesses: {
+      EDC_REC: { T: 460, P: 30e5, molar_flow: 113.6,
+                 z: { "1,2-dichloroethane": 1.0 } },
+    },
+  },
+};
+
+// Book ch. 15.2 (Hameed 2025), simplified: DME by methanol dehydration.
+// Fresh methanol (260 kmol/h) is pumped to 13 atm, mixed with the methanol
+// recycle, vaporized/heated to 250 C, and converted adiabatically
+// (2 MeOH -> DME + H2O, 30% per pass, outlet ~295 C). The effluent is cooled
+// to 100 C, let down to 10 atm for the DME tower (DME overhead, ~47 C — a
+// cooling-water condenser), and the bottoms let down to 7 atm for the
+// methanol tower (MeOH overhead, recycled; water bottoms >99.9%). Property
+// package is thermo:PR — ChemSep carries no NRTL parameters for the
+// DME/methanol and DME/water pairs (NRTL would silently treat those pairs as
+// ideal), and the MeOH/water/DME system has no azeotrope for PR to miss.
+// Column draws are ratio specs so the recycle self-stabilizes.
+export const dmePlant: FlowDoc = {
+  schema: "caldyr.flow/1",
+  meta: { ui: { product: "dimethyl ether" } },
+  components: [{ id: "methanol" }, { id: "dimethyl ether" }, { id: "water" }],
+  property_package: "thermo:PR",
+  units: [
+    { id: "P1", type: "Pump", params: { P_out: 1317225, eta: 0.75 }, xy: [60, 200] },
+    { id: "MIX", type: "Mixer", params: { dP: 0 }, xy: [240, 200] },
+    { id: "HEAT", type: "Heater",
+      params: { T_out: 523.15, dP: 30e3 }, xy: [430, 200] },
+    { id: "RXN", type: "ConversionReactor",
+      params: { reaction: { stoich: { methanol: -2, "dimethyl ether": 1, water: 1 },
+                            key: "methanol" },
+                conversion: 0.30, dP: 50e3 },
+      xy: [620, 200] },
+    { id: "COOL", type: "Heater",
+      params: { T_out: 373.15, dP: 20e3 }, xy: [810, 200] },
+    { id: "VLV", type: "Valve", params: { P_out: 1013250 }, xy: [990, 200] },
+    { id: "T100", type: "RigorousColumn",
+      params: { n_stages: 14, feed_stage: 7, reflux_ratio: 2.5,
+                distillate_to_feed: 0.145, P: 1013250, max_iter: 600 },
+      xy: [1180, 200] },
+    { id: "VLV2", type: "Valve", params: { P_out: 709275 }, xy: [1180, 420] },
+    { id: "T101", type: "RigorousColumn",
+      params: { n_stages: 12, feed_stage: 6, reflux_ratio: 2.0,
+                distillate_to_feed: 0.838, P: 709275, max_iter: 600 },
+      xy: [1370, 420] },
+    { id: "P2", type: "Pump", params: { P_out: 1317225, eta: 0.75 }, xy: [620, 420] },
+  ],
+  streams: [
+    { id: "MEOH_FEED", from: null, to: "P1:in1",
+      spec: { T: 298.15, P: 101325, molar_flow: 72.22, z: { methanol: 1.0 } } },
+    { id: "S0", from: "P1:out", to: "MIX:in1" },
+    { id: "S1", from: "MIX:out", to: "HEAT:in1" },
+    { id: "S2", from: "HEAT:out", to: "RXN:in1" },
+    { id: "S3", from: "RXN:out", to: "COOL:in1" },
+    { id: "S4", from: "COOL:out", to: "VLV:in1" },
+    { id: "S5", from: "VLV:out", to: "T100:in1" },
+    { id: "DME", from: "T100:distillate", to: null },
+    { id: "S6", from: "T100:bottoms", to: "VLV2:in1" },
+    { id: "S7", from: "VLV2:out", to: "T101:in1" },
+    { id: "MEOH_REC", from: "T101:distillate", to: "P2:in1" },
+    { id: "WATER", from: "T101:bottoms", to: null },
+    { id: "REC", from: "P2:out", to: "MIX:in2" },
+  ],
+  solver_hints: {
+    tear_guesses: {
+      REC: { T: 410, P: 1317225, molar_flow: 168.5,
+             z: { methanol: 0.98, water: 0.02 } },
+    },
+  },
+};
+
 export interface Template {
   name: string;
   blurb: string;
@@ -134,4 +262,8 @@ export const TEMPLATES: Template[] = [
     product: "hydrogen", flow: smrHydrogen },
   { name: "Cyclohexane plant", blurb: "Book ch. 15.1: benzene hydrogenation with feed-effluent HX, H2 recycle, degasser, and column (two interlocked recycles — takes a minute).",
     product: "cyclohexane", flow: cyclohexanePlant },
+  { name: "VCM plant", blurb: "Book ch. 15.6: EDC cracked to vinyl chloride + HCl, separated in two pressure columns with the unconverted-EDC recycle closed (ratio draws and RR 3 on the HCl tower keep the closed loop solvable — see the doc comment).",
+    product: "vinyl chloride", flow: vcmPlant },
+  { name: "DME plant", blurb: "Book ch. 15.2 (simplified): methanol dehydrated to dimethyl ether over an adiabatic reactor, with a two-column separation and the methanol recycle closed (PR — ChemSep has no NRTL parameters for the DME pairs).",
+    product: "dimethyl ether", flow: dmePlant },
 ];

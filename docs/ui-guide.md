@@ -2,10 +2,17 @@
 
 ## Canvas
 
-- **Palette** (left): Feed/Product boundaries and all unit operations. Click to add.
+- **Palette** (left): Feed/Product boundaries and all 26 unit operations
+  (served live from the engine's registry — anything registered in
+  `caldyr.unitops` appears automatically; see the
+  [unit-operations reference](unit-operations.md)). Click to add.
 - **Connect** by dragging between ports — inlets on the left of a node, outlets
   on the right; energy ports are amber. Mismatched or occupied ports are refused
   with an explanation.
+- **Dynamic ports**: units whose ports derive from params grow handles as you
+  edit — a multi-feed `RigorousColumn` (`feeds`) gains `in1..inN`, side draws
+  gain `side1..sideN`, a `Balance` grows with `n_inlets`. The canvas refetches
+  the port list (`POST /ports`) whenever such params change.
 - **Rename** units by double-clicking; streams in the inspector.
 - **Views**: BFD (plain blocks, no duty lines), PFD (full detail), P&ID
   (adds an instrumentation overlay synthesized from your Set/Adjust logical ops).
@@ -33,6 +40,10 @@
   stream's state + phase envelope, or — with nothing selected — the flowsheet
   panel: components (with autocomplete), property package, costing product,
   groups, and the **logical ops editor** (Set/Adjust).
+  Below a solved unit's params, the **Design results** panel shows the
+  engine's `unit.design` output: scalar tables (FUG numbers, fired-heater fuel
+  duty, pipe friction breakdown...) and, for staged columns, the converged
+  stage profiles as charts — temperature and liquid-composition vs stage.
 - **Streams** — stream table (SI / Metric / Field unit sets, CSV export),
   duties, convergence plot, and the mass & energy **balance check**.
 - **Econ** — KPIs, installed equipment costs, interactive tornado, Monte-Carlo
@@ -43,9 +54,15 @@
 ## Projects
 
 The **Projects** dialog saves named flowsheets in your browser, and offers
-templates (ammonia loop, distillation, SMR hydrogen...). Your working canvas
-also autosaves continuously and restores on reload. `.flow` files saved to disk
-are plain JSON, engine-compatible, and git-friendly.
+templates — from a two-unit starter through the ammonia loop, shortcut
+distillation and SMR hydrogen up to three book-validated plants with closed
+recycles (Hameed 2025 ch. 15): the **cyclohexane plant** (benzene
+hydrogenation, feed-effluent HX, H2 recycle), the **VCM plant** (EDC cracking,
+two pressure columns, EDC recycle), and the **DME plant** (methanol
+dehydration, two-column train, methanol recycle). The recycle templates ship
+with `solver_hints` tear guesses and solve in seconds-to-a-minute. Your
+working canvas also autosaves continuously and restores on reload. `.flow`
+files saved to disk are plain JSON, engine-compatible, and git-friendly.
 
 ## Copilot
 

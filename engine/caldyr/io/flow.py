@@ -33,6 +33,9 @@ def to_dict(flowsheet: Flowsheet, meta: dict | None = None) -> dict:
             entry["formula"] = c.formula
         if c.cas is not None:
             entry["cas"] = c.cas
+        pseudo = getattr(c, "pseudo", None)
+        if pseudo:                       # assay pseudo-component constants
+            entry["pseudo"] = dict(pseudo)
         components.append(entry)
 
     units: list[dict[str, Any]] = []

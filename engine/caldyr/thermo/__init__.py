@@ -29,12 +29,30 @@ def _validate_component_ids(components: list[str]) -> None:
         )
 
 
+def _reject_pseudo_components(spec: str, components: list[str]) -> None:
+    """Pseudo-components (assay cuts) carry only Tc/Pc/omega/MW/Cp constants —
+    enough for a cubic EOS, but NRTL needs binary interaction parameters and
+    the CoolProp backend needs a reference EOS, neither of which can exist for
+    a lumped cut. Fail loudly with the supported alternative."""
+    from ..core.components_db import is_pseudo_component
+
+    pseudos = [c for c in components if is_pseudo_component(c)]
+    if pseudos:
+        raise ValueError(
+            f"property package {spec!r} does not support petroleum "
+            f"pseudo-components (got {pseudos}); use a cubic EOS package — "
+            f"'thermo:PR' or 'thermo:SRK'"
+        )
+
+
 def make_package(spec: str, components: list[str]) -> PropertyPackage:
     """Build the property package selected by a flowsheet's ``property_package``
     string for a given ordered component list.
 
     Supported selectors:
-      * ``thermo:PR`` / ``thermo:SRK`` — cubic EOS (non-polar systems).
+      * ``thermo:PR`` / ``thermo:SRK`` — cubic EOS (non-polar systems). Also the
+        only packages supporting petroleum pseudo-components (assay cuts; see
+        :mod:`caldyr.assay`).
       * ``thermo:NRTL`` — activity-coefficient liquid (polar systems, azeotropes).
       * ``coolprop:Water`` — pure-water steam tables (CoolProp IAPWS-95);
         single-component water flowsheets only.
@@ -46,6 +64,7 @@ def make_package(spec: str, components: list[str]) -> PropertyPackage:
                 f"unknown coolprop method {method!r} in {spec!r}; the only "
                 f"supported coolprop selector is 'coolprop:Water'"
             )
+        _reject_pseudo_components(spec, components)
         _validate_component_ids(components)
         return CoolPropWaterPackage(components)
     if backend != "thermo":
@@ -55,6 +74,7 @@ def make_package(spec: str, components: list[str]) -> PropertyPackage:
     if method in _CUBIC:
         return ThermoPackage(components, method)
     if method in _ACTIVITY:
+        _reject_pseudo_components(spec, components)
         return ActivityPackage(components, method)
     raise ValueError(
         f"unknown property method {method!r} in {spec!r}; "

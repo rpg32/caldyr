@@ -1,5 +1,12 @@
 from .component import Component
-from .components_db import COMMON_COMPONENTS, UnknownComponentError, resolve_component
+from .components_db import (
+    COMMON_COMPONENTS,
+    UnknownComponentError,
+    is_pseudo_component,
+    pseudo_constants,
+    register_pseudo_component,
+    resolve_component,
+)
 from .flowsheet import Connection, Flowsheet
 from .port import Port
 from .stream import EnergyStream, Stream
@@ -16,4 +23,7 @@ __all__ = [
     "COMMON_COMPONENTS",
     "UnknownComponentError",
     "resolve_component",
+    "register_pseudo_component",
+    "pseudo_constants",
+    "is_pseudo_component",
 ]

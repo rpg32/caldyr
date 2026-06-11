@@ -37,3 +37,12 @@ balance closes and/or agreeing with a cited reference.
   acetone/methanol azeotrope (0.789 under ChemSep NRTL) reaches 88 mol%
   acetone with water fed above the main feed (the book's phenol solvent has
   no ChemSep NRTL parameters; substitution documented in the example).
+- `19_crude_assay.py` — petroleum assay characterization (M14), Hameed (2025)
+  ch. 10 "Refinery Process": the sec. 10.2.1 worked crude assay (TBP + MW +
+  API curves, i-C4/n-C4/i-C5/n-C5 light ends) characterized by
+  `caldyr.assay.characterize_assay` into the book's 38 hypocomponents
+  (28 x 25 F + 8 x 50 F + 2 x 100 F cut scheme), each with NBP/SG/MW and
+  Kesler-Lee Tc/Pc/omega/Cp constants (citations in `caldyr/assay.py`); the
+  pseudo-components then run as ordinary PR species through the book's column
+  front end (450 F crude -> 650 F furnace -> 65 psia flash) with a monotone
+  light/heavy split and the resid staying in the liquid.

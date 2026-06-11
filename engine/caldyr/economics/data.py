@@ -143,6 +143,11 @@ PRESSURE: dict[str, Pressure] = {
                                "Turton 4e Table A.2, shell-and-tube"),
     "pump_centrifugal": Pressure(-0.3935, 0.3957, -0.00226, 10.0, 100.0,
                                  "Turton 4e Table A.2, centrifugal pump"),
+    # AUDIT NOTE (2026-06-11): this C-triple may belong to Table A.2's
+    # *pyrolysis furnace* row; the non-reactive fired-heater row is possibly
+    # (0.1347, -0.2368, 0.1021). Both give Fp ~ 1.0-1.15 below ~40 barg, so the
+    # impact is small at typical process pressures; verify against a physical
+    # Turton 4e before relying on >40 barg fired-heater costs.
     "fired_heater": Pressure(0.1017, -0.1957, 0.09403, 10.0, 200.0,
                              "Turton 4e Table A.2, non-reactive fired heater "
                              "(tube-side P, 10-200 barg)"),

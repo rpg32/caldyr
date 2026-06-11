@@ -19,20 +19,27 @@ analyzer, but git-native, scriptable, and with an LLM in the loop.*
 
 ## What's inside
 
-- **17 unit operations**, each validated against a cited reference: mixers,
-  heaters/coolers, splitters, valves, pumps, compressors, expanders, flash
-  drums, heat exchangers, three-phase separators, component splitters,
-  conversion / equilibrium / Gibbs (Cantera) / CSTR / PFR reactors, and
-  shortcut (FUG) distillation.
+- **26 unit operations**, each validated against a cited reference: mixers,
+  heaters/coolers, fired heaters, air coolers, splitters, valves, pipe
+  segments, pumps, compressors, expanders, flash drums, evaporators, heat
+  exchangers, three-phase separators, component splitters, conversion /
+  equilibrium / Gibbs (Cantera) / CSTR / PFR reactors, shortcut (FUG) and
+  rigorous (MESH) distillation, absorbers/strippers, reboiled absorbers,
+  liquid-liquid extraction columns, and the HYSYS-style Balance op — see the
+  [unit-operations reference](unit-operations.md).
 - **Two solvers, one physics**: sequential-modular (Wegstein-accelerated
   tearing) and equation-oriented (simultaneous), agreeing to ~1e-9.
-- **Logical operations**: HYSYS-style Set and Adjust, plus solver hints and
-  mass/energy balance diagnostics.
+- **Logical operations**: HYSYS-style Set, Adjust and Balance, plus solver
+  hints (tear seeding) and mass/energy balance diagnostics.
+- **Analysis tools**: pinch targeting, property tables, psychrometrics,
+  API 520/526 relief-valve sizing, phase envelopes, optimization, case
+  studies — see [Analysis tools](analysis-tools.md).
 - **Techno-economics**: Turton-correlation costing, CEPCI escalation,
   capital/opex roll-ups, NPV/IRR/LCOP, tornado sensitivity, Monte-Carlo.
 - **A polished web canvas**: BFD/PFD/P&ID views, phase/temperature stream
-  coloring, auto-layout, groups, optimization & case-study builders, plots,
-  and an AI copilot whose every edit arrives as a reviewable diff.
+  coloring, auto-layout, groups, optimization & case-study builders, column
+  stage-profile plots, a template gallery of book-validated plants, and an
+  AI copilot whose every edit arrives as a reviewable diff.
 
 Start with [Getting started](getting-started.md), then the
 [app guide](ui-guide.md). Architecture and roadmap live in the repository

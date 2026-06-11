@@ -26,6 +26,69 @@ class UnknownComponentError(ValueError):
     """A component identifier could not be resolved to a chemical species."""
 
 
+# -- petroleum pseudo-component registry --------------------------------------
+# Pseudo-components (assay boiling-point cuts; see caldyr.assay) have no entry
+# in the chemicals databank — their constants are supplied by the user or the
+# assay characterization. The registry maps component id -> constants dict
+# (keys documented on caldyr.core.component.Component.pseudo) and is consulted
+# by resolve_component / molar_mass and by the thermo layer when building
+# flashers. It is populated as a side effect of constructing a Component with
+# a `pseudo` payload (including `.flow` round-trips through Component(**c)).
+_PSEUDO_REGISTRY: dict[str, dict] = {}
+
+_PSEUDO_REQUIRED_KEYS = ("MW", "Tb", "SG", "Tc", "Pc", "omega")
+
+
+def register_pseudo_component(component_id: str, constants: dict) -> None:
+    """Register (or overwrite) the constants of a pseudo-component.
+
+    Validates the required keys (MW kg/mol, Tb K, SG, Tc K, Pc Pa, omega) are
+    present and positive where physical, raising ``ValueError`` naming the
+    offender — a typo here would otherwise surface as a cryptic flash failure.
+    """
+    missing = [k for k in _PSEUDO_REQUIRED_KEYS if k not in constants]
+    if missing:
+        raise ValueError(
+            f"pseudo-component {component_id!r} is missing required constant(s) "
+            f"{missing}; required: {list(_PSEUDO_REQUIRED_KEYS)} "
+            f"(MW kg/mol, Tb K, SG, Tc K, Pc Pa, omega)"
+        )
+    for key in ("MW", "Tb", "SG", "Tc", "Pc"):
+        if not float(constants[key]) > 0.0:
+            raise ValueError(
+                f"pseudo-component {component_id!r} has non-positive {key} = "
+                f"{constants[key]!r}"
+            )
+    _PSEUDO_REGISTRY[component_id] = dict(constants)
+
+
+def pseudo_constants(component_id: str) -> dict | None:
+    """The registered constants dict of a pseudo-component, or None if
+    ``component_id`` is not a registered pseudo-component."""
+    found = _PSEUDO_REGISTRY.get(component_id)
+    return dict(found) if found is not None else None
+
+
+def is_pseudo_component(component_id: str) -> bool:
+    return component_id in _PSEUDO_REGISTRY
+
+
+def _hashable(value):
+    return tuple(value) if isinstance(value, (list, tuple)) else float(value)
+
+
+def pseudo_signature(components: list[str] | tuple[str, ...]) -> tuple:
+    """A hashable signature of the registered pseudo constants among
+    ``components`` — () when none are pseudo. Used as part of thermo flasher
+    cache keys so re-characterizing an assay (same ids, new constants) can
+    never reuse a stale flasher."""
+    return tuple(
+        (cid, tuple(sorted((k, _hashable(v)) for k, v in _PSEUDO_REGISTRY[cid].items())))
+        for cid in components
+        if cid in _PSEUDO_REGISTRY
+    )
+
+
 @lru_cache(maxsize=1024)
 def _search(identifier: str) -> Any:
     """Cached `chemicals` metadata lookup (the chemicals index search is not
@@ -48,6 +111,9 @@ def resolve_component(identifier: str) -> Component:
     """
     if not identifier or not identifier.strip():
         raise UnknownComponentError("component identifier is empty")
+    pseudo = pseudo_constants(identifier)
+    if pseudo is not None:        # registered pseudo-component: no databank hit
+        return Component(id=identifier, name=identifier, pseudo=pseudo)
     try:
         meta = _search(identifier)
     except ValueError as exc:
@@ -66,7 +132,11 @@ def resolve_component(identifier: str) -> Component:
 
 def molar_mass(identifier: str) -> float:
     """Molar mass of ``identifier`` in **kg/mol**, from the `chemicals`
-    database. Raises :class:`UnknownComponentError` for unknown ids."""
+    database (or the pseudo-component registry for registered assay cuts).
+    Raises :class:`UnknownComponentError` for unknown ids."""
+    pseudo = pseudo_constants(identifier)
+    if pseudo is not None:
+        return float(pseudo["MW"])
     try:
         meta = _search(identifier)
     except ValueError as exc:
