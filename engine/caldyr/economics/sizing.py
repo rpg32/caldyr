@@ -64,6 +64,12 @@ class SizingOptions:
     # sec. 6.6) and the downcomer share of the tower cross-section.
     tray_flood_fraction: float = 0.8
     tray_downcomer_frac: float = 0.10
+    # Liquid-liquid extraction column capacity: combined (both phases)
+    # volumetric throughput per unit of tower cross-section. Sieve-tray
+    # extractors run ~20-30 m^3/(m^2 h) total (Seader 3e ch. 8, sieve-tray
+    # extraction columns; same order in Towler & Sinnott 2e ch. 11) — there
+    # is no vapor, so Fair flooding does not apply.
+    extractor_capacity_m3_m2_h: float = 25.0
 
 
 def _pa_to_barg(p_pa: float) -> float:
@@ -144,10 +150,10 @@ def register_sizer(*unit_types: str) -> Callable[[Sizer], Sizer]:
 
 
 # -- sizers ------------------------------------------------------------------
-@register_sizer("Mixer", "Splitter")
+@register_sizer("Mixer", "Splitter", "Valve")
 def _negligible_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
-    """Mixers and splitters contribute no significant equipment cost (just
-    piping/headers)."""
+    """Mixers, splitters and throttling valves contribute no significant
+    equipment cost (piping/header components)."""
     return []
 
 
@@ -313,6 +319,27 @@ def _balance_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
     return []
 
 
+@register_sizer("PipeSegment")
+def _pipe_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Straight pipe, costed per installed length with a diameter power law:
+    the ``pipe`` correlation in :mod:`caldyr.economics.data` (Sinnott, C&R
+    Vol. 6, 4e, sec. 5.5) takes the composite attribute A = L * D^0.74 in
+    metres, and the Sinnott figure is already an *installed* cost (Fbm = 1).
+    Length and diameter are the pipe's own design parameters — no stream data
+    needed beyond the operating pressure."""
+    length = float(unit.params["length"])
+    diameter = float(unit.params["diameter"])
+    outlet = ctx.outs.get("out")
+    pbarg = _pa_to_barg(outlet.P) if outlet is not None else 0.0
+    return [EquipmentSize(
+        unit_id=unit.id, equipment_type="pipe",
+        attribute=length * diameter ** 0.74, attribute_name="L_m_x_D_m^0.74",
+        pressure_barg=pbarg, material=ctx.opts.material, diameter_m=diameter,
+        notes=[f"pipe: L={length:.1f} m, D={diameter * 1000:.1f} mm "
+               f"(installed-cost correlation, Fbm=1)"],
+    )]
+
+
 @register_sizer("Evaporator")
 def _evaporator_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
     """Evaporator: a vertical vessel (residence-time heuristic, like a flash
@@ -379,6 +406,9 @@ TOWER_EXTRA_HEIGHT_M = 3.0   # sump + disengagement allowance
 # message as O'Connell's absorber correlation).
 ABSORBER_TRAY_EFFICIENCY = 0.40
 STRIPPER_TRAY_EFFICIENCY = 0.50
+# Liquid-liquid sieve-tray extractors are poorer still: overall stage
+# efficiencies of 10-30% are typical (Seader 3e ch. 8.4).
+EXTRACTOR_TRAY_EFFICIENCY = 0.25
 
 
 def _column_loads(design) -> list[tray_sizing.StageLoad]:
@@ -525,6 +555,47 @@ def _reboiled_absorber_sizes(unit, ctx: SizerContext) -> list[EquipmentSize]:
     sizes.append(_reboiler_size(unit.id, design, ctx.opts,
                                 _pa_to_barg(design["P"])))
     return sizes
+
+
+@register_sizer("ExtractionColumn")
+def _extraction_column_sizes(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Liquid-liquid extraction column: tower shell + sieve trays (no
+    condenser, reboiler or vapor traffic). There is no vapor, so the Fair
+    flooding correlation does not apply; the diameter comes from the combined
+    liquid throughput of both phases at the design capacity
+    ``opts.extractor_capacity_m3_m2_h`` (sieve-tray extractors run ~20-30
+    m^3/(m^2 h) total; Seader 3e ch. 8). Tray count from the (low)
+    liquid-liquid stage efficiency ``EXTRACTOR_TRAY_EFFICIENCY``."""
+    opts = ctx.opts
+    design = _require_design(unit)
+    t, p = design["T"], design["P"]
+    vol_flow = (design["extract_total"]
+                * ctx.pp.volume_liquid(t, p, design["x_extract"])
+                + design["raffinate_total"]
+                * ctx.pp.volume_liquid(t, p, design["x_raffinate"]))
+    area = vol_flow / (opts.extractor_capacity_m3_m2_h / 3600.0)
+    diameter = math.sqrt(4.0 * area / math.pi)
+    n_real = math.ceil(design["N"] / EXTRACTOR_TRAY_EFFICIENCY)
+    height = n_real * TRAY_SPACING_M + TOWER_EXTRA_HEIGHT_M
+    pbarg = _pa_to_barg(p)
+    tower = EquipmentSize(
+        unit_id=unit.id, equipment_type="vessel_vertical",
+        attribute=area * height, attribute_name="volume_m3",
+        pressure_barg=pbarg, material=opts.material, diameter_m=diameter,
+        notes=[f"extraction tower: N={design['N']:.1f} ideal stages / "
+               f"{EXTRACTOR_TRAY_EFFICIENCY} eff = {n_real} trays; "
+               f"H={height:.1f} m, D={diameter:.2f} m from "
+               f"{vol_flow * 3600.0:.2f} m^3/h combined liquid at "
+               f"{opts.extractor_capacity_m3_m2_h} m^3/(m^2 h)"],
+    )
+    trays = EquipmentSize(
+        unit_id=f"{unit.id}.trays", equipment_type="tray_sieve",
+        attribute=area, attribute_name="area_m2",
+        pressure_barg=pbarg, material=opts.material, diameter_m=diameter,
+        quantity=n_real,
+        notes=[f"{n_real} sieve trays of {area:.2f} m^2"],
+    )
+    return [tower, trays]
 
 
 def size_flowsheet(fs, report, pp, options: SizingOptions | None = None) -> list[EquipmentSize]:

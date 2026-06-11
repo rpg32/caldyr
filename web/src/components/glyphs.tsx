@@ -74,6 +74,16 @@ export const GLYPHS: Record<string, ReactNode> = {
     <rect x="9" y="2" width="10" height="24" rx="4" />
     <path d="M10 8 h8 M10 13 h8 M10 18 h8" />
   </>),
+  PipeSegment: svg(<>
+    <path d="M2 11 L18 11 C21 11 21 14 18 14 L10 14 C7 14 7 17 10 17 L26 17" />
+    <path d="M2 8 L2 14 M26 14 L26 20" />
+  </>),
+  ExtractionColumn: svg(<>
+    <rect x="9" y="2" width="10" height="24" rx="4" />
+    <circle cx="12.5" cy="8" r="1.2" /><circle cx="15.5" cy="12" r="1.2" />
+    <circle cx="12.5" cy="16" r="1.2" /><circle cx="15.5" cy="20" r="1.2" />
+    <path d="M5 5 L9 5 M19 23 L23 23" />
+  </>),
   Absorber: svg(<>
     <rect x="9" y="2" width="10" height="24" rx="4" />
     <path d="M10 7.5 h8 M10 12 h8 M10 16.5 h8 M10 21 h8" strokeDasharray="2 1.5" />

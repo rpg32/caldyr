@@ -9,6 +9,7 @@ from .cstr import CSTR, KineticSolveError
 from .equilibrium_reactor import EquilibriumReactor
 from .evaporator import Evaporator
 from .expander import Expander
+from .extraction_column import ExtractionColumn, ExtractionColumnError
 from .fired_heater import FiredHeater
 from .flash import FlashDrum
 from .gibbs_reactor import CanteraSpeciesError, GibbsReactor
@@ -16,6 +17,7 @@ from .heat_exchanger import HeatExchanger
 from .heater import Heater
 from .mixer import Mixer
 from .pfr import PFR
+from .pipe import PipeFlowError, PipeSegment
 from .pump import Pump
 from .reaction import KineticReaction, Reaction
 from .rigorous_column import RigorousColumn, RigorousColumnError
@@ -37,6 +39,8 @@ __all__ = [
     "Splitter",
     "ComponentSplitter",
     "Valve",
+    "PipeSegment",
+    "PipeFlowError",
     "Pump",
     "Compressor",
     "Expander",
@@ -59,4 +63,6 @@ __all__ = [
     "Absorber",
     "ReboiledAbsorber",
     "AbsorberError",
+    "ExtractionColumn",
+    "ExtractionColumnError",
 ]

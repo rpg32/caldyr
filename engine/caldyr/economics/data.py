@@ -122,6 +122,19 @@ PURCHASED: dict[str, Purchased] = {
     "air_cooler": Purchased(
         4.0336, 0.2341, 0.0497, 10.0, 10_000.0, "area_m2",
         "Turton 4e Table A.1, air cooler (10-10,000 m^2 bare-tube area)"),
+    # Straight pipe, costed per length with a diameter power law. The attribute
+    # is A = L_m * (D_m)^0.74, so the linear correlation (K2=1, K3=0) gives
+    # Cp0 = 1416 * L * D^0.74 on the CEPCI-397 basis. Source: installed cost of
+    # carbon-steel pipe ~ 880 * (D, m)^0.74 GBP/m (R.K. Sinnott, Coulson &
+    # Richardson's Chemical Engineering Vol. 6, 4th ed. 2005, sec. 5.5 piping
+    # costs; 2004 price basis, erection/fittings included), converted at
+    # 1.8 USD/GBP and deflated from CEPCI 444 (2004) to the 397 (2001) basis:
+    # 880 * 1.8 * 397/444 = 1416 USD per (m * m^0.74). Order-of-magnitude data
+    # meant for sensitivity sweeps, like the price tables below.
+    "pipe": Purchased(
+        3.1510, 1.0, 0.0, 1e-3, 1e9, "L_m_x_D_m^0.74",
+        "Sinnott, C&R Vol. 6, 4e (2005), sec. 5.5: installed CS pipe "
+        "880*(D m)^0.74 GBP2004/m -> 1416 USD2001 per m*D^0.74"),
 }
 
 # -- Pressure-factor correlations (Turton 4e Table A.2) ---------------------
@@ -160,6 +173,10 @@ FBM_DIRECT: dict[str, FbmDirect] = {
     # Cbm = Cp0 * Fbm * Fp (Turton 4e Eq. A.6 for fired equipment; the steam-
     # superheat factor Ft does not apply to process fired heaters, Ft = 1).
     "fired_heater": FbmDirect(2.13, "Turton 4e Table A.7, non-reactive fired heater, CS"),
+    # The pipe correlation is an *installed* cost (erection, fittings and
+    # supports already included in the Sinnott figure), so Fbm = 1.
+    "pipe": FbmDirect(1.0, "Sinnott C&R Vol. 6 4e sec. 5.5 — correlation is "
+                           "already an installed cost"),
 }
 
 # Quantity factor for stacked/multiple identical items (trays): Turton 4e

@@ -28,14 +28,19 @@ def test_registry_covers_every_previously_dispatched_unit_type():
 
 
 def test_unsized_unit_type_still_raises_the_same_error():
-    """A Valve has no sizer (exactly as before the refactor)."""
+    """An unregistered unit type raises the same typed error as before the
+    refactor. (Valve itself gained a negligible-cost sizer in M13, so the
+    probe is a deliberately unregistered subclass.)"""
+    class UnsizedThrottle(Valve):
+        pass
+
     fs = Flowsheet(components=[Component("nitrogen")], property_package="thermo:PR")
-    fs.add(Valve("V1", {"P_out": 1.0e5}))
+    fs.add(UnsizedThrottle("V1", {"P_out": 1.0e5}))
     fs.feed("FEED", "V1:in1", T=300.0, P=5.0e5, molar_flow=10.0, z={"nitrogen": 1.0})
     fs.connect("OUT", "V1:out", None)
     rep = fs.solve()
     pp = make_package(fs.property_package, fs.component_ids)
-    with pytest.raises(ValueError, match="no sizer for unit type 'Valve'"):
+    with pytest.raises(ValueError, match="no sizer for unit type 'UnsizedThrottle'"):
         size_flowsheet(fs, rep, pp)
 
 
