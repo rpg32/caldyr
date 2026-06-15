@@ -15,20 +15,27 @@ back with the flash vapor -> the combined stream into the tower.
 DEVIATIONS FROM THE BOOK (stated honestly — a verification panel re-checks
 these):
 
-1. **Light crude, not the book's sec. 10.2.1 assay.** The book's crude runs to
-   a 1410 F TBP endpoint (resid pseudo-components up to NBP ~736 C, MW ~838).
-   With the cubic-EOS ``thermo`` backend a bubble-point flash of a near-pure
-   heavy pseudo-component returns an *unphysical* saturated state with the
-   vapor molar enthalpy BELOW the liquid's (negative latent heat) once the NBP
-   climbs past roughly the light-gas-oil range — verified directly: e.g. an
-   NBP ~345 C cut flashes to hV < hL. No energy-balance MESH method (this
-   one, the trusted reboiled Wang-Henke recurrence, or sum-rates) can resolve
-   a column whose stages need that quantity to be positive. So this test uses
-   a *light* synthetic crude (TBP 95-435 F, naphtha-through-light-gas-oil)
-   whose every pseudo-component stays in the property package's physically
-   valid range. A full resid-bearing crude needs a property backend with
-   corrected pseudo-component enthalpies, which is out of scope for the column
-   solver (and lives below the PropertyPackage boundary).
+1. **Light crude, not the book's sec. 10.2.1 assay — a METHOD limit, not a
+   thermo limit.** The book's crude runs to a 1410 F TBP endpoint (resid
+   pseudo-components up to NBP ~736 C). The bubble-point MESH method assigns
+   every stage *its liquid's bubble temperature*. That holds for a light crude
+   (TBP 95-435 F): every cut boils within the tower's temperature range, so
+   each stage genuinely sits at its liquid's bubble point. It FAILS for a
+   resid-bearing crude: the bottom-stage liquid is non-volatile resid whose
+   bubble point at the ~1.4 bar tower pressure lies far above any real stage
+   temperature — and in a steam-stripped tower the bottom vapor is the
+   stripping *steam*, not boiled resid, so that stage is not at its liquid's
+   bubble point at all. The per-stage bubble search then has no solution
+   (verified: a resid-rich stage liquid raises ``RigorousColumnError: no
+   K-value bubble point ... ln sum Kx`` — Sum(K_i x_i) never reaches 1 in
+   range). The robust method for resid-bearing steam-stripped towers is
+   sum-rates / inside-out, which does NOT assume stage T = liquid bubble point;
+   this implementation's ``sum_rates`` limit-cycles (see deviation 3), so the
+   honest scope here is a light synthetic crude. (NB: the cubic-EOS heavy
+   pseudo-components are themselves thermodynamically fine — a heavy cut at its
+   own bubble point has a proper positive latent heat; the bubble_point path's
+   formation-offset conditioning already handles the separate steam-over-resid
+   enthalpy-basis effect. The operative limit is the method, not the backend.)
 2. **Side draws, not side strippers; pumparounds as stage duties.** The book's
    kerosene/diesel/AGO are reboiled/steam-stripped side *columns*; here they
    are direct liquid side draws at the book's draw stages, and the three

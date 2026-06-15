@@ -18,15 +18,20 @@ specification is the distillate rate; the reflux ratio is an OUTPUT.
 
 SCOPE / DEVIATIONS FROM THE BOOK (stated honestly):
 
-* **Light crude.** The book's crude runs to a 1410 F endpoint (resid up to
-  NBP ~736 C). With the cubic-EOS `thermo` backend, a bubble-point flash of a
-  near-pure heavy petroleum pseudo-component returns an UNPHYSICAL saturated
-  state (vapor enthalpy below the liquid's) once the NBP passes ~light gas oil,
-  which no energy-balance MESH method can resolve. This example therefore uses
-  a *light* synthetic crude (TBP 95-435 F) whose every cut stays in the
-  property package's physically valid range. A full resid-bearing crude needs
-  a property backend with corrected pseudo-component enthalpies (out of scope
-  for the column solver, which sits above the PropertyPackage boundary).
+* **Light crude — a METHOD limit, not a thermo limit.** The book's crude runs
+  to a 1410 F endpoint (resid up to NBP ~736 C). The bubble-point MESH method
+  assigns each stage its liquid's bubble temperature; that holds for a light
+  crude (every cut boils within the tower range) but breaks for a resid bottom:
+  a steam-stripped tower's bottom liquid is non-volatile resid whose bubble
+  point at ~1.4 bar is far above any stage temperature, and its vapor is the
+  stripping steam, not boiled resid — so the per-stage bubble search has no
+  solution (a resid-rich stage raises RigorousColumnError "no K-value bubble
+  point"). This example therefore uses a *light* synthetic crude (TBP 95-435 F).
+  The robust fix for a resid-bearing tower is a sum-rates / inside-out method
+  that does not assume stage T = liquid bubble point; this implementation's
+  `method='sum_rates'` limit-cycles (below), so that is the real future work.
+  (The cubic-EOS heavy pseudo-components are themselves fine — a heavy cut at
+  its own bubble point has a proper positive latent heat.)
 * **Side draws, not side strippers; pumparounds as stage duties** (the book's
   kerosene/diesel are reboiled/steam-stripped side columns).
 * **No book product table.** Sec. 10.2.1 ends at "Click Run and see the
