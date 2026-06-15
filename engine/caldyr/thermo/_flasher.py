@@ -79,6 +79,15 @@ class FlasherPackage:
     def _hf_mix(self, zs: list[float]) -> float:
         return sum(zi * hi for zi, hi in zip(zs, self._hf))
 
+    def formation_enthalpies(self) -> dict[str, float]:
+        """Per-component ideal-gas formation enthalpy (J/mol) — the constant
+        offsets baked into this package's absolute enthalpy basis. Energy-
+        balance solvers may subtract them to work on a sensible basis (a
+        per-component constant shift cancels in any reaction-free balance),
+        which conditions their equations much better when stage compositions
+        change sharply (e.g. steam under a resid liquid in a crude tower)."""
+        return {c: hf for c, hf in zip(self.components, self._hf)}
+
     # -- internals ---------------------------------------------------------
     def _zs(self, z: dict[str, float]) -> list[float]:
         """Project a composition dict onto this package's ordered components,
@@ -369,7 +378,11 @@ class FlasherPackage:
         liq, gas = self._phase_models()
         lnphi_l = liq.to(T=T, P=P, zs=self._zs(x)).lnphis()
         lnphi_v = gas.to(T=T, P=P, zs=self._zs(y)).lnphis()
-        return {c: math.exp(float(ll) - float(lv))
+        # ln K is clamped to +-300 (K within 1e+-130): far outside any
+        # physically meaningful range, but it keeps exp() from overflowing
+        # when an iterating column probes extreme temperatures for a heavy
+        # pseudo-component liquid.
+        return {c: math.exp(min(max(float(ll) - float(lv), -300.0), 300.0))
                 for c, ll, lv in zip(self.components, lnphi_l, lnphi_v)}
 
     def enthalpy_liquid(self, T: float, P: float, x: dict[str, float]) -> float:

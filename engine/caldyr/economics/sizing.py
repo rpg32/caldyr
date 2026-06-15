@@ -598,6 +598,68 @@ def _extraction_column_sizes(unit, ctx: SizerContext) -> list[EquipmentSize]:
     return [tower, trays]
 
 
+# -- solids operations (Hameed 2025 ch. 12) -----------------------------------
+@register_sizer("Cyclone")
+def _cyclone_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Gas cyclone: costed per cyclone on the actual gas volumetric flow each
+    parallel unit handles (the Couper/Walas heavy-duty correlation in
+    economics.data — order-of-magnitude, see the source note there). The
+    parallel count rides on ``quantity``."""
+    design = _require_design(unit)
+    inlet = ctx.ins.get("gas_in")
+    pbarg = _pa_to_barg(inlet.P) if inlet is not None else 0.0
+    n = int(design["n_cyclones"])
+    return [EquipmentSize(
+        unit_id=unit.id, equipment_type="cyclone",
+        attribute=design["Q_per_cyclone_m3_s"], attribute_name="gas_m3_s",
+        pressure_barg=pbarg, material=ctx.opts.material,
+        diameter_m=design["body_diameter_m"], quantity=n,
+        notes=[f"{n} x {design['geometry']} cyclone(s), "
+               f"D={design['body_diameter_m']:.2f} m, "
+               f"{design['Q_per_cyclone_m3_s']:.2f} m^3/s each, "
+               f"dP={design['dP_Pa'] / 1e3:.2f} kPa "
+               f"(order-of-magnitude cost correlation)"],
+    )]
+
+
+@register_sizer("RotaryVacuumFilter")
+def _rotary_vacuum_filter_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Rotary vacuum drum filter: costed on the filtration area the unit's
+    cake-filtration design computed (order-of-magnitude correlation in
+    economics.data — see the source note there)."""
+    design = _require_design(unit)
+    inlet = ctx.ins.get("slurry_in")
+    pbarg = _pa_to_barg(inlet.P) if inlet is not None else 0.0
+    return [EquipmentSize(
+        unit_id=unit.id, equipment_type="rotary_vacuum_filter",
+        attribute=design["area_m2"], attribute_name="area_m2",
+        pressure_barg=pbarg, material=ctx.opts.material,
+        diameter_m=2.0 * design["drum_radius_m"],
+        notes=[f"rotary drum filter: A={design['area_m2']:.2f} m^2 "
+               f"(R={design['drum_radius_m']:.2f} m x "
+               f"W={design['drum_width_m']:.2f} m), "
+               f"dP={design['pressure_drop_Pa'] / 1e3:.1f} kPa "
+               f"(order-of-magnitude cost correlation)"],
+    )]
+
+
+@register_sizer("BaghouseFilter")
+def _baghouse_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Baghouse: costed on the gross cloth area (A = Q / face velocity; EPA
+    Cost Manual correlation in economics.data)."""
+    design = _require_design(unit)
+    inlet = ctx.ins.get("gas_in")
+    pbarg = _pa_to_barg(inlet.P) if inlet is not None else 0.0
+    return [EquipmentSize(
+        unit_id=unit.id, equipment_type="baghouse",
+        attribute=design["cloth_area_m2"], attribute_name="area_m2",
+        pressure_barg=pbarg, material=ctx.opts.material,
+        notes=[f"baghouse: {design['cloth_area_m2']:.0f} m^2 cloth at "
+               f"{design['face_velocity_m_s'] * 1e2:.1f} cm/s air-to-cloth, "
+               f"~{design['n_bags']} bags"],
+    )]
+
+
 def size_flowsheet(fs, report, pp, options: SizingOptions | None = None) -> list[EquipmentSize]:
     """Size every cost-bearing unit in a solved flowsheet."""
     opts = options or SizingOptions()

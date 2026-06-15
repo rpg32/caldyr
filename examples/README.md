@@ -46,3 +46,26 @@ balance closes and/or agreeing with a cited reference.
   pseudo-components then run as ordinary PR species through the book's column
   front end (450 F crude -> 650 F furnace -> 65 psia flash) with a monotone
   light/heavy split and the resid staying in the liquid.
+- `20_crude_tower.py` — steam-stripped crude atmospheric tower (M15), after
+  Hameed (2025) sec. 10.2.1: preflash drum -> furnace -> a partial-condenser,
+  NO-reboiler RigorousColumn with open stripping steam, kerosene/diesel liquid
+  side draws and pumparounds (as `stage_duties`). Runs the non-reboiled
+  bubble-point MESH (formation-offset-conditioned envelope energy balances, the
+  open-steam bottom damped out of its limit cycle); the reflux ratio is an
+  OUTPUT, the mass balance closes machine-exact, and the naphtha cut lands
+  within ~3% of the assay's TBP-implied yield. Honestly scoped: a *light*
+  synthetic crude (the cubic-EOS `thermo` backend returns unphysical hV < hL
+  bubble states for resid-range pseudo-components, which no MESH method can
+  resolve), side draws not side strippers, and `method='sum_rates'` limit-
+  cycles (documented in the example/test).
+- `21_solids.py` — solids operations (M15), Hameed (2025) ch. 12 "Solid
+  Operation": the sec. 12.1 cyclone (Lapple cut-diameter + grade efficiency at
+  the book's Stairmand "High Output" geometry: 98.4% vs the book's 95% design
+  spec, with Shepherd-Lapple dP), the sec. 12.2 rotary vacuum filter (McCabe
+  continuous cake filtration; reproduces the book's 2.4368 m^2 area and
+  0.96957 m drum width with the backed-out cake resistance), the sec. 12.3
+  baghouse (air-to-cloth sizing + filter-drag filtration time to a 2 kPa
+  dirty-bag limit), and the book's p. 409 cyclone+baghouse kaolin train
+  (500 kg/h past the 75% cyclone, ~100% final capture). Solids ride as
+  ordinary components; the PSD is a *unit* param (v1 particle model — see
+  `caldyr/unitops/solids.py`).

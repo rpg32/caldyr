@@ -22,6 +22,7 @@ from .pump import Pump
 from .reaction import KineticReaction, Reaction
 from .rigorous_column import RigorousColumn, RigorousColumnError
 from .shortcut_column import ShortcutColumn, ShortcutColumnError
+from .solids import BaghouseFilter, Cyclone, RotaryVacuumFilter, SolidsOperationError
 from .splitter import Splitter
 from .three_phase_separator import ThreePhaseSeparator
 from .valve import Valve
@@ -65,4 +66,8 @@ __all__ = [
     "AbsorberError",
     "ExtractionColumn",
     "ExtractionColumnError",
+    "Cyclone",
+    "RotaryVacuumFilter",
+    "BaghouseFilter",
+    "SolidsOperationError",
 ]

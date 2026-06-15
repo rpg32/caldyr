@@ -67,6 +67,52 @@ Absorber/stripper mode (no condenser/reboiler) lives in
 :mod:`caldyr.unitops.absorber` (sum-rates method — the bubble-point method
 here is for narrow/medium-boiling distillation). Out of scope (this round):
 pumparounds.
+
+**Steam-stripped main fractionator** (``reboiled=False``): a crude atmospheric
+tower (after Hameed 2025 sec. 10.2.1) has a condenser but NO reboiler — the
+bottom vapor is open stripping steam fed on the bottom stage, and the tower has
+liquid side draws and pumparounds (modeled as ``stage_duties``). The single
+specification is the distillate rate; the reflux ratio is an OUTPUT
+(``reflux_ratio`` only seeds the initial traffic), reported in ``design['R']``.
+
+The recommended method for this form is ``method="bubble_point"`` (the default).
+Each stage's temperature is the K-value bubble point of its liquid
+(:func:`_bubble_T_kvalues` — a secant on ln(sum K x) with phi-phi K-values, no
+flash object, so it is fast and immune to the PVF-flash failure modes on
+wide-boiling pseudo-component + water liquids). The vapor traffic comes from
+*envelope* energy balances (each V_j from its own around-stage-j-down-to-the-
+bottom balance) on a sensible basis: each molar enthalpy has its
+composition-weighted formation-enthalpy offset subtracted, which keeps the
+envelope pivot hLs_{j-1} - hVs_j ~ -(latent heat) < 0 even across the steam
+stage (where the raw formation-inclusive offsets — water -242 kJ/mol vs the
+pseudo-components 0 — would make it sign-indefinite). Both the temperature and
+the traffic updates are under-relaxed, with the damping reduced whenever the
+combined temperature+traffic change stalls, which is what lets the iteration
+escape the period-2 limit cycle the open-steam bottom stage otherwise sits in.
+
+A second method, ``method="sum_rates"`` (Burningham-Otto: liquid traffic from
+the component-flow sums, temperatures from a simultaneous Newton solve of the
+stage energy balances), is also provided but is **not recommended** — it
+limit-cycles on equilibrium-dominated sections (the documented Seader 3e ch.
+10.4 division of labor). Use ``bubble_point``.
+
+The condenser stage is pinned to saturation (the bubble temperature of the
+distillate liquid), its energy balance absorbed by the condenser duty. The
+bottoms leave as liquid at the converged bottom-stage temperature (a
+steam-stripped liquid is below its dry-EOS bubble point, so no saturation flash
+is imposed). Mass balances close machine-exact by difference; the condenser
+duty closes the overall energy balance exactly, and the independently computed
+condenser-stage balance is reported in ``design['energy_residual_rel']``.
+
+**Property-package range.** Because the energy balances need the saturated
+vapor enthalpy to exceed the liquid's (positive latent heat), this mode is only
+as good as the property package's pseudo-component enthalpies: with the cubic-
+EOS ``thermo`` backends, heavy petroleum pseudo-components (NBP above roughly
+the light-gas-oil range) can return an unphysical hV < hL from a bubble-point
+flash, which no MESH method can resolve. The crude-tower example and test
+therefore use a *light* crude (naphtha-through-light-gas-oil), whose cuts stay
+in the physically valid range; a full resid-bearing crude needs a property
+backend with corrected pseudo-component enthalpies (out of scope here).
 """
 from __future__ import annotations
 
@@ -93,13 +139,27 @@ _V_FLOOR_FRAC = 1e-8     # vapor/liquid traffic floor, as a fraction of the feed
 _WARM_Z_TOL = 0.1        # max |dz| of the feed for warm-starting from last solve
 _FENSKE_CLAMP = 50.0     # caps the logistic exponent in the Fenske initializer
 
+# sum-rates mode (steam-stripped / non-reboiled main fractionator)
+_SR_TOL_FLOW = 1e-7      # relative traffic convergence
+_SR_ENERGY_TOL = 1e-9    # relative stage-energy residual required at convergence
+_SR_NEWTON_MAX = 30      # inner Newton iterations on the energy balances
+_SR_NEWTON_TOL = 1e-10   # inner Newton relative residual target
+_SR_STEP_MAX = 15.0      # K, per-stage Newton step clamp
+_SR_DH_DT = 0.05         # K, finite-difference step for dh/dT
+_SR_T_OUTER_MAX = 30.0   # K, per-stage temperature move per OUTER iteration
+_SR_L_RATIO = 4.0        # max factor the liquid traffic may move per iteration
+_SR_DUTY_RAMP = 12       # iterations over which stage duties ramp to full
+_BUBBLE_T_LO = 150.0     # K, admissible window for the K-value bubble secant
+_BUBBLE_T_HI = 1500.0
+
 
 class _NoVLEError(ValueError):
     """Internal: the feed has no two-phase state at the given pressure."""
 
 
 def fenske_profile(pp, P: float, f: dict[str, float], D: float,
-                   N: int) -> list[dict[str, float]]:
+                   N: int, K_feed: dict[str, float] | None = None,
+                   ) -> list[dict[str, float]]:
     """Initial stage liquid-composition profile for an N-stage column from a
     Fenske-style split: d_i/b_i proportional to alpha_i^N_min with the split
     factor solved so sum(d) = D (Fenske 1932; Seader 3e eq. 9-12 rearranged),
@@ -107,14 +167,17 @@ def fenske_profile(pp, P: float, f: dict[str, float], D: float,
     the shortcut initialization the tray-by-tray methods call for.
 
     ``f`` carries the (total) component feed flows in mol/s; ``D`` the
-    overhead product rate. Shared by the RigorousColumn and the
-    ReboiledAbsorber initializers.
+    overhead product rate. ``K_feed`` optionally supplies the feed K-values
+    (e.g. from an already-computed feed flash) so no bubble-point flash is
+    needed here. Shared by the RigorousColumn and the ReboiledAbsorber
+    initializers.
     """
     active = list(f)
-    res = pp.bubble_point(P, {c: v / sum(f.values()) for c, v in f.items()})
-    if res.y is None or res.x is None:
-        raise _NoVLEError(f"no VLE for the feed at P={P:.4g} Pa")
-    K_feed = {c: res.y[c] / res.x[c] for c in active}
+    if K_feed is None:
+        res = pp.bubble_point(P, {c: v / sum(f.values()) for c, v in f.items()})
+        if res.y is None or res.x is None:
+            raise _NoVLEError(f"no VLE for the feed at P={P:.4g} Pa")
+        K_feed = {c: res.y[c] / res.x[c] for c in active}
     k_min = min(K_feed.values())
     ln_alpha = {c: math.log(K_feed[c] / k_min) for c in active}
     n_min = max(2.0, 0.5 * (N - 1))      # effective Fenske stages (N ~ 2 N_min)
@@ -165,6 +228,150 @@ def _thomas(a: list[float], b: list[float], c: list[float],
     return x
 
 
+def _bubble_T_kvalues(pp, P: float, x: dict[str, float], T0: float,
+                      ) -> tuple[float, dict[str, float], dict[str, float]]:
+    """Bubble temperature of liquid ``x`` at ``P`` by a secant iteration on
+    ``ln(sum_i K_i x_i) = 0`` with phi-phi K-values (``pp.k_values``) and the
+    incipient vapor refreshed as ``y_i = K_i x_i / sum`` each evaluation — the
+    classical K-value bubble point (Seader 3e sec. 4.4). No flash object is
+    built, so it is both fast (two lnphi evaluations per step) and immune to
+    the PVF-flash failure modes on wide-boiling pseudo-component + water
+    liquids. Returns ``(T, K, y)``.
+    """
+    T = min(max(float(T0), _BUBBLE_T_LO + 1.0), _BUBBLE_T_HI - 1.0)
+    y = {c: max(v, _X_FLOOR) for c, v in x.items()}
+    tot = sum(y.values())
+    y = {c: v / tot for c, v in y.items()}
+
+    def eval_at(t: float):
+        # settle the incipient-vapor composition so f(T) is single-valued
+        nonlocal y
+        s, K = 1.0, {}
+        for _ in range(4):
+            K = pp.k_values(t, P, x, y)
+            s = sum(K[c] * x[c] for c in x)
+            y_new = {c: max(K[c] * x[c], _X_FLOOR) / s for c in x}
+            dy = max(abs(y_new[c] - y[c]) for c in x)
+            y = y_new
+            if dy < 1e-12:
+                break
+        return math.log(s), K
+
+    # f = ln(sum K x) rises with T (more volatility); bracket the zero by
+    # marching, then close in with Illinois regula falsi.
+    f, K = eval_at(T)
+    if abs(f) <= 1e-9:
+        return T, K, y
+    t_a, f_a = T, f
+    step = 25.0 if f < 0.0 else -25.0
+    bracketed = False
+    for _ in range(80):
+        t_b = min(max(t_a + step, _BUBBLE_T_LO), _BUBBLE_T_HI)
+        f_b, K = eval_at(t_b)
+        if abs(f_b) <= 1e-9:
+            return t_b, K, y
+        if (f_a < 0.0) != (f_b < 0.0):
+            bracketed = True
+            break
+        if t_b in (_BUBBLE_T_LO, _BUBBLE_T_HI):
+            raise RigorousColumnError(
+                f"no K-value bubble point for the stage liquid at "
+                f"P={P:.4g} Pa within {_BUBBLE_T_LO:.0f}-{_BUBBLE_T_HI:.0f} K "
+                f"(ln sum Kx = {f_b:.3g} at the bound)"
+            )
+        t_a, f_a = t_b, f_b
+    if not bracketed:
+        raise RigorousColumnError(
+            f"K-value bubble-point bracketing failed at P={P:.4g} Pa "
+            f"(last ln sum Kx = {f_b:.3g} at T={t_b:.1f} K)"
+        )
+    if t_a > t_b:
+        t_a, f_a, t_b, f_b = t_b, f_b, t_a, f_a
+    side = 0
+    t_m, K_m = t_a, K
+    for _ in range(80):
+        t_m = t_a + (t_b - t_a) * (-f_a) / (f_b - f_a)
+        if not (t_a < t_m < t_b):
+            t_m = 0.5 * (t_a + t_b)
+        f_m, K_m = eval_at(t_m)
+        if abs(f_m) <= 1e-9 or (t_b - t_a) < 1e-8:
+            return t_m, K_m, y
+        if (f_m < 0.0) == (f_a < 0.0):
+            t_a, f_a = t_m, f_m
+            if side == -1:
+                f_b *= 0.5            # Illinois: halve the stagnant end
+            side = -1
+        else:
+            t_b, f_b = t_m, f_m
+            if side == 1:
+                f_a *= 0.5
+            side = 1
+    return t_m, K_m, y
+
+
+def _newton_T_draws(
+    pp, N: int, P_j: list[float],
+    x: list[dict[str, float]], y: list[dict[str, float]],
+    L: list[float], V: list[float],
+    fh_stage: list[float], u: list[float], w: list[float],
+    T0: list[float], t_bounds: tuple[float, float],
+) -> tuple[list[float], list[float], list[float], float, int]:
+    """Solve the stage energy balances of stages 2..N (0-based 1..N-1) for
+    their temperatures by Newton's method with a tridiagonal Jacobian — the
+    Burningham-Otto temperature step (Seader 3e eqs. 10-65..10-67) extended
+    with liquid/vapor side draws (``u``/``w``) and a *fixed* stage-1
+    temperature (the condenser, pinned to saturation; its balance is absorbed
+    by the condenser duty). Best-effort: returns the lowest-residual iterate —
+    the outer sum-rates loop requires a tight residual before declaring
+    convergence. Returns ``(T, hL, hV, residual_rel, n_prop_calls)``.
+    """
+    T = list(T0)
+    t_lo, t_hi = t_bounds
+    n_prop = 0
+    best: tuple[float, list[float], list[float], list[float]] | None = None
+    for _ in range(_SR_NEWTON_MAX):
+        hL = [pp.enthalpy_liquid(T[j], P_j[j], x[j]) for j in range(N)]
+        hV = [pp.enthalpy_vapor(T[j], P_j[j], y[j]) for j in range(N)]
+        cpL = [0.0] + [
+            (pp.enthalpy_liquid(T[j] + _SR_DH_DT, P_j[j], x[j]) - hL[j]) / _SR_DH_DT
+            for j in range(1, N)]
+        cpV = [0.0] + [
+            (pp.enthalpy_vapor(T[j] + _SR_DH_DT, P_j[j], y[j]) - hV[j]) / _SR_DH_DT
+            for j in range(1, N)]
+        n_prop += 4 * N - 2
+
+        H = [0.0] * N
+        scale = [1.0] * N
+        for j in range(1, N):
+            inflow = (L[j - 1] * hL[j - 1]
+                      + (V[j + 1] * hV[j + 1] if j < N - 1 else 0.0)
+                      + fh_stage[j])
+            outflow = (L[j] + u[j]) * hL[j] + (V[j] + w[j]) * hV[j]
+            H[j] = inflow - outflow
+            scale[j] = max(abs((L[j] + u[j]) * hL[j]),
+                           abs((V[j] + w[j]) * hV[j]),
+                           abs(fh_stage[j]), 1.0)
+        resid_rel = max(abs(H[j]) / scale[j] for j in range(1, N))
+        if best is None or resid_rel < best[0]:
+            best = (resid_rel, list(T), hL, hV)
+        if resid_rel <= _SR_NEWTON_TOL:
+            return T, hL, hV, resid_rel, n_prop
+
+        # Tridiagonal Newton system over stages 1..N-1 (0-based); the
+        # coupling of stage 1 to the fixed condenser temperature is dropped.
+        a = [0.0] + [L[j - 1] * cpL[j - 1] for j in range(2, N)]
+        b = [-((L[j] + u[j]) * cpL[j] + (V[j] + w[j]) * cpV[j])
+             for j in range(1, N)]
+        c = [V[j + 1] * cpV[j + 1] for j in range(1, N - 1)] + [0.0]
+        dT = _thomas(a, b, c, [-H[j] for j in range(1, N)])
+        T = [T[0]] + [
+            min(max(tj + max(min(d, _SR_STEP_MAX), -_SR_STEP_MAX), t_lo), t_hi)
+            for tj, d in zip(T[1:], dT)]
+    assert best is not None
+    resid_rel, T, hL, hV = best
+    return T, hL, hV, resid_rel, n_prop
+
+
 @register("RigorousColumn")
 class RigorousColumn(UnitOp):
     """Rigorous (MESH, bubble-point) distillation column. See the module
@@ -190,6 +397,46 @@ class RigorousColumn(UnitOp):
       * ``partial_condenser`` — vapor distillate at its dew point (default
         False: total condenser, liquid distillate at its bubble point).
       * ``max_iter`` — MESH iteration cap (default 200).
+      * ``reboiled`` — default True. ``False`` removes the reboiler: stage
+        ``n_stages`` becomes an ordinary (adiabatic) stage that may receive a
+        feed — open stripping steam, the crude-tower configuration. The
+        column then has a single specification (the distillate rate);
+        ``reflux_ratio`` only seeds the initial traffic and the converged
+        reflux ratio is reported in ``design['R']``. Requires
+        ``method="sum_rates"``.
+      * ``method`` — the MESH temperature/traffic update. Three supported
+        combinations (validated by the test suite):
+
+        - ``"bubble_point"`` + ``reboiled=True`` (the **default**): the
+          Wang-Henke bubble-point method — a saturated-liquid flash per stage
+          sets the temperature and the vapor traffic comes from a forward
+          energy recurrence. The narrow/medium-boiling distillation workhorse.
+        - ``"bubble_point"`` + ``reboiled=False``: the same per-stage K-value
+          bubble temperatures, but the vapor traffic comes from *envelope*
+          energy balances (each V_j from its own around-stage-j-to-bottom
+          balance) run on a formation-offset-conditioned sensible basis. This
+          is the **robust method for a steam-stripped main fractionator**
+          (open stripping steam, side draws, pumparound stage duties); it
+          converges the crude atmospheric tower (see ``examples/20_crude_tower``
+          and ``tests/test_m15_crude_column``).
+        - ``"sum_rates"`` + ``reboiled=False``: a Burningham-Otto variant
+          (liquid traffic from the component-flow sums; temperatures from a
+          simultaneous Newton solve of the stage energy balances). **Provided
+          but not recommended**: on equilibrium-dominated (distillation-like)
+          sections it limit-cycles — the documented Seader 3e ch. 10.4
+          division of labor. Prefer ``"bubble_point"`` for non-reboiled towers.
+
+        ``reboiled=True`` with ``"sum_rates"`` is rejected.
+      * ``stage_duties`` — ``[{"stage": j, "duty": W}, ...]``: heat added
+        (negative = removed) directly on stage j (2..n_stages-1). This is
+        the standard reduced model of a **pumparound**: the circulating
+        liquid's net effect on the column is heat removal at the draw/return
+        stages, which condenses the internal liquid the side draws need
+        (Kister, *Distillation Design*, ch. 13 treats pumparounds as
+        intermediate condensers). Requires ``reboiled=False`` (the reboiled
+        bubble-point vapor recurrence does not carry stage duties); it is
+        honored by both non-reboiled methods, which fold the (ramped) duty
+        into each stage's feed-enthalpy flow.
     """
 
     design: dict[str, Any] | None = None
@@ -244,6 +491,24 @@ class RigorousColumn(UnitOp):
                 f"(stage n_stages), so 3 is one tray plus condenser and reboiler"
             )
 
+        method = str(self.params.get("method", "bubble_point"))
+        if method not in ("bubble_point", "sum_rates"):
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: method={method!r} must be "
+                f"'bubble_point' or 'sum_rates'"
+            )
+        reboiled = bool(self.params.get("reboiled", True))
+        if reboiled and method == "sum_rates":
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: method='sum_rates' is "
+                f"implemented for the non-reboiled (steam-stripped main "
+                f"fractionator) form only — set reboiled=False, or use the "
+                f"default bubble_point method for a reboiled column"
+            )
+        # a non-reboiled column's bottom stage is an ordinary stage and may
+        # receive a feed (the stripping steam)
+        max_feed_stage = n_stages if not reboiled else n_stages - 1
+
         feeds_param = self.params.get("feeds")
         if feeds_param is not None:
             if self.params.get("feed_stage") is not None:
@@ -277,12 +542,13 @@ class RigorousColumn(UnitOp):
                     f"feed_stage={self.params.get('feed_stage')!r})"
                 ) from exc
         for stage in feed_stages:
-            if not 2 <= stage <= n_stages - 1:
+            if not 2 <= stage <= max_feed_stage:
                 raise RigorousColumnError(
                     f"RigorousColumn {self.id!r}: feed_stage={stage} is out of "
                     f"range — it must lie between stage 2 (below the condenser) "
-                    f"and stage {n_stages - 1} (above the reboiler) for "
-                    f"n_stages={n_stages}"
+                    f"and stage {max_feed_stage} "
+                    f"({'the bottom stage' if not reboiled else 'above the reboiler'}) "
+                    f"for n_stages={n_stages}"
                 )
 
         draws: list[tuple[int, str, float]] = []
@@ -315,13 +581,43 @@ class RigorousColumn(UnitOp):
                 )
             draws.append((stage, phase, rate))
 
-        try:
-            R = float(self.params["reflux_ratio"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RigorousColumnError(
-                f"RigorousColumn {self.id!r}: 'reflux_ratio' is required "
-                f"(got {self.params.get('reflux_ratio')!r})"
-            ) from exc
+        duties: list[tuple[int, float]] = []
+        for k, entry in enumerate(self.params.get("stage_duties") or []):
+            try:
+                stage = int(entry["stage"])
+                duty = float(entry["duty"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: stage_duties[{k}] needs an "
+                    f"integer 'stage' and a numeric 'duty' in W "
+                    f"(got {entry!r})"
+                ) from exc
+            if reboiled:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: 'stage_duties' (pumparound "
+                    f"heat) is supported on the non-reboiled form only — set "
+                    f"reboiled=False (the classic reboiled vapor recurrence "
+                    f"does not carry stage duties)"
+                )
+            if not 2 <= stage <= n_stages - 1:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: stage_duties[{k}] "
+                    f"stage={stage} is out of range — duties go on a tray "
+                    f"(2..{n_stages - 1}); the condenser duty is computed and "
+                    f"a bottom-stage duty would be a reboiler"
+                )
+            duties.append((stage, duty))
+
+        if not reboiled and self.params.get("reflux_ratio") is None:
+            R = 1.0          # initial-traffic seed only; the converged R is an output
+        else:
+            try:
+                R = float(self.params["reflux_ratio"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: 'reflux_ratio' is required "
+                    f"(got {self.params.get('reflux_ratio')!r})"
+                ) from exc
         if R <= 0.0:
             raise RigorousColumnError(
                 f"RigorousColumn {self.id!r}: reflux_ratio={R} must be > 0 — "
@@ -362,7 +658,8 @@ class RigorousColumn(UnitOp):
             )
         partial = bool(self.params.get("partial_condenser", False))
         max_iter = int(self.params.get("max_iter", _MAX_ITER))
-        return n_stages, feed_stages, draws, R, D, P, dP, partial, max_iter
+        return (n_stages, feed_stages, draws, R, D, P, dP, partial, max_iter,
+                method, reboiled, duties)
 
     # -- solve -------------------------------------------------------------------
     def solve(self, inlets: dict[str, Stream], pp) -> dict[str, PortStream]:
@@ -387,8 +684,8 @@ class RigorousColumn(UnitOp):
         z = {c: sum(Fi * zi.get(c, 0.0) for Fi, zi in zip(F_k, z_k)) / F
              for c in comps}                              # combined feed
         P_in = feed_streams[0].require_state()[1]
-        n_stages, feed_stages, draws, R, D, P, dP, partial, max_iter = \
-            self._read_params(F, P_in)
+        (n_stages, feed_stages, draws, R, D, P, dP, partial, max_iter,
+         method, reboiled, duties) = self._read_params(F, P_in)
 
         # Exact-repeat cache (see __init__): same params + same inlet states
         # -> return copies of the previous result without re-iterating MESH.
@@ -428,6 +725,7 @@ class RigorousColumn(UnitOp):
         fz_stage: list[dict[str, float]] = [{} for _ in range(N)]
         fh_stage = [0.0] * N
         feed_info: list[tuple[int, float, float]] = []   # (stage0, F_k, q_k)
+        feed_flashes = []                                # PhaseResults, same order
         for stage, Fi, zi, Hi in zip(feed_stages, F_k, z_k, H_k):
             j = stage - 1
             for c in active:
@@ -437,6 +735,7 @@ class RigorousColumn(UnitOp):
             res_k = pp.flash_ph(P_j[j], Hi,
                                 {c: zi[c] for c in active if zi.get(c, 0.0) > 0.0})
             feed_info.append((j, Fi, 1.0 - res_k.vapor_fraction))
+            feed_flashes.append(res_k)
         q = feed_info[0][2]                              # first feed's quality
 
         # Per-stage liquid/vapor side draws (mol/s; never on stage 1 or N).
@@ -447,6 +746,16 @@ class RigorousColumn(UnitOp):
                 u[stage - 1] += rate
             else:
                 w[stage - 1] += rate
+
+        if not reboiled:
+            feed_h = sum(Fi * Hi for Fi, Hi in zip(F_k, H_k))
+            out: dict[str, PortStream] = self._solve_nonreboiled(
+                pp, comps, active, N, P_j, F, f, fz_stage, fh_stage,
+                feed_info, feed_flashes, u, w, draws, duties, R, D, B, q,
+                partial, max_iter, feed_h, method)
+            self._store_cache(key, out)
+            return out
+
         # Cumulative (feeds - draws - distillate) above-and-including stage j:
         # the total balance reads L_j = V_{j+1} + A_j (A_{N-1} = B).
         A = [0.0] * N
@@ -639,7 +948,7 @@ class RigorousColumn(UnitOp):
             "damping": omega, "flash_calls": n_flash,
             "energy_residual_rel": energy_residual,
         }
-        out: dict[str, PortStream] = {
+        out = {
             "distillate": distillate,
             "bottoms": bottoms,
             "condenser_duty": EnergyStream(id=f"{self.id}.condenser_duty", duty=q_cond),
@@ -647,6 +956,12 @@ class RigorousColumn(UnitOp):
         }
         for i, s in enumerate(side_streams):
             out[f"side{i + 1}"] = s
+        self._store_cache(key, out)
+        return out
+
+    def _store_cache(self, key: tuple, out: dict[str, PortStream]) -> None:
+        """Record the exact-repeat cache entry for this solve."""
+        assert self.design is not None
         self._cache_key = key
         self._cache_out = {
             name: (s.with_() if isinstance(s, Stream)
@@ -656,7 +971,523 @@ class RigorousColumn(UnitOp):
         self._cache_design = {k: (list(v) if isinstance(v, list) else
                                   dict(v) if isinstance(v, dict) else v)
                               for k, v in self.design.items()}
+
+    # -- non-reboiled mode (steam-stripped main fractionator) --------------------
+    def _solve_nonreboiled(self, pp, comps: list[str], active: list[str],
+                           N: int, P_j: list[float], F: float,
+                           f: dict[str, float],
+                           fz_stage: list[dict[str, float]],
+                           fh_stage: list[float],
+                           feed_info: list[tuple[int, float, float]],
+                           feed_flashes: list,
+                           u: list[float], w: list[float],
+                           draws: list[tuple[int, str, float]],
+                           duties: list[tuple[int, float]],
+                           R0: float, D: float, B: float, q: float,
+                           partial: bool, max_iter: int,
+                           feed_h: float, method: str) -> dict[str, PortStream]:
+        """MESH for the non-reboiled column (condenser, open stripping steam,
+        side draws, pumparound stage duties): see the module docstring.
+
+        Two temperature/traffic updates share the same component-balance
+        (Thomas) core, selected by ``method``:
+
+        * ``"bubble_point"`` (the robust non-reboiled method) — stage
+          temperatures from K-value bubble points of the stage liquids
+          (:func:`_bubble_T_kvalues`); the vapor traffic from *envelope*
+          energy balances (each V_j from its own around-stage-j-down-to-the-
+          bottom balance, so there is no stage-to-stage error accumulation),
+          evaluated on a sensible basis by subtracting each stream's
+          composition-weighted formation-enthalpy offset (``hf_mix``) — which
+          keeps the envelope pivot hLs_{j-1} - hVs_j ~ -(latent heat) < 0 even
+          across the steam stage, where the formation-inclusive offsets of
+          water (-242 kJ/mol) and the pseudo-components (0) would otherwise
+          make it sign-indefinite. The reflux follows from the condenser total
+          balance, so the distillate-rate spec is the column's single
+          specification. The temperature move and traffic update are both
+          under-relaxed, with the damping reduced whenever the *combined*
+          temperature+traffic change stalls — the open-steam bottom stage can
+          otherwise sit in a period-2 limit cycle (the energy balance flipping
+          the bottom traffic between two states each iteration).
+        * ``"sum_rates"`` — Burningham-Otto: liquid traffic from the
+          component-flow sums, temperatures from a simultaneous Newton solve
+          of the stage energy balances (:func:`_newton_T_draws`), condenser
+          pinned to saturation. NOT recommended: on towers where stage
+          temperatures are equilibrium-dominated (every distillation-like
+          section) this update limit-cycles — the documented Seader 3e ch.
+          10.4 division of labor; ``bubble_point`` is the robust choice here
+          and is what the crude-tower example/test use.
+
+        In both, the condenser duty absorbs the stage-1 energy balance and
+        closes the overall balance exactly; mass balances close by
+        difference, machine-exact."""
+        u0 = 0.0 if partial else D      # condenser liquid product draw
+        v0 = D if partial else 0.0      # condenser vapor product
+        floor = _V_FLOOR_FRAC * F
+
+        # Stage duties (pumparound heat) enter the stage energy balances
+        # exactly like a feed enthalpy flow. They are ramped in over the
+        # first _SR_DUTY_RAMP iterations: dumping tens of MW on a stage whose
+        # traffic is still the initializer's guess sends the profile wild.
+        Q_stage = [0.0] * N
+        for stage, duty in duties:
+            Q_stage[stage - 1] += duty
+
+        # Feeds / draws entering at-or-below each stage, for the
+        # bottom-section total balances V_j = L_{j-1} + F>=j - (u+w)>=j - B.
+        F_ge = [0.0] * (N + 1)
+        UW_ge = [0.0] * (N + 1)
+        for j in range(N - 1, -1, -1):
+            F_ge[j] = F_ge[j + 1] + sum(fz_stage[j].values())
+            UW_ge[j] = UW_ge[j + 1] + u[j] + w[j]
+
+        # Per-component constant enthalpy offset (J/mol) used to recondition the
+        # stage energy balances onto a sensible-only basis. Subtracting a
+        # per-component constant from every molar enthalpy is exactly admissible
+        # (it cancels against the conserved envelope component balances at
+        # convergence) and it keeps the envelope pivot hLs_{j-1} - hVs_j ~
+        # -(latent heat) < 0: on the raw formation-inclusive basis the offsets
+        # span water (-242 kJ/mol) vs the crude pseudo-components (0), and that
+        # disparity makes the bare pivot hL_{j-1} - hV_j sign-indefinite, which
+        # wrecks the envelope form on the book's crude tower. The package's
+        # formation_enthalpies() are precisely those baked-in offsets; if a
+        # backend does not expose them (the method is not on the
+        # PropertyPackage protocol), fall back to each pure component's vapor
+        # enthalpy at a fixed reference state -- an equally admissible
+        # per-component constant.
+        _form_fn = getattr(pp, "formation_enthalpies", None)
+        hf_c: dict[str, float]
+        if callable(_form_fn):
+            _hf_all = _form_fn()
+            hf_c = {c: float(_hf_all.get(c, 0.0)) for c in active}
+        else:
+            hf_c = {c: pp.enthalpy_vapor(400.0, 1.0e4, {c: 1.0}) for c in active}
+
+        def hf_mix(row: dict[str, float]) -> float:
+            """Composition-weighted constant enthalpy offset (J/mol for a
+            mole-fraction row; J/s for a molar-flow row) -- the per-component
+            constant subtracted to put the energy balances on a sensible
+            basis."""
+            return sum(v * hf_c[c] for c, v in row.items())
+
+        # Per-stage feed formation-enthalpy FLOW (J/s), the constant paralleling
+        # the absolute feed-enthalpy flow fh_eff; their difference is the feed's
+        # sensible enthalpy flow used by the envelope balances.
+        fh_form = [hf_mix(fz) for fz in fz_stage]
+        # ... and the equivalent top-down cumulative A_j (L_j = V_{j+1} + A_j;
+        # A_{N-1} = B), shared with the reboiled bubble-point path.
+        A = [0.0] * N
+        run = -D
+        for j in range(N):
+            run += sum(fz_stage[j].values()) - u[j] - w[j]
+            A[j] = run
+
+        T, x, y, K, L, V = self._initial_sr_profiles(
+            pp, N, P_j, active, f, D, R0, feed_info, feed_flashes,
+            F_ge, UW_ge, B, v0, floor)
+        t_bounds = (max(min(T) - 60.0, _BUBBLE_T_LO),
+                    min(max(T) + 200.0, _BUBBLE_T_HI))
+
+        omega = 1.0
+        move_prev = math.inf
+        worsened = 0
+        converged = False
+        n_prop = 0
+        it = 0
+        dT = dF = resid_rel = math.inf
+        hL = [pp.enthalpy_liquid(T[j], P_j[j], x[j]) for j in range(N)]
+        hV = [pp.enthalpy_vapor(T[j], P_j[j], y[j]) for j in range(N)]
+        for it in range(1, max_iter + 1):
+            ramp = min(1.0, it / _SR_DUTY_RAMP) if duties else 1.0
+            fh_eff = [fh + ramp * qd for fh, qd in zip(fh_stage, Q_stage)]
+            if method == "sum_rates":
+                K = [pp.k_values(T[j], P_j[j], x[j], y[j]) for j in range(N)]
+                n_prop += N
+
+            # -- component balances (Thomas), shared by both updates -----------
+            cols: dict[str, list[float]] = {}
+            for c in active:
+                a = [0.0] + [L[j - 1] for j in range(1, N)]
+                b = [-(L[0] + u0 + v0 * K[0][c])] + \
+                    [-(L[j] + u[j] + (V[j] + w[j]) * K[j][c])
+                     for j in range(1, N)]
+                cc = [V[j + 1] * K[j + 1][c] for j in range(N - 1)] + [0.0]
+                d = [-fz_stage[j].get(c, 0.0) for j in range(N)]
+                cols[c] = _thomas(a, b, cc, d)
+            sum_raw = [sum(max(cols[c][j], 0.0) for c in active)
+                       for j in range(N)]
+            if min(sum_raw) <= 0.0:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: the component balances "
+                    f"left a stage with no liquid (iteration {it}); the "
+                    f"column is infeasible as specified"
+                )
+            L_prev, V_prev = list(L), list(V)
+
+            if method == "sum_rates":
+                # -- sum-rates traffic (bottoms pinned at B by the spec);
+                # ratio-clamped against transients --------------------------
+                L_new = [L[j] * min(max(sum_raw[j], 1.0 / _SR_L_RATIO),
+                                    _SR_L_RATIO) for j in range(N)]
+                L = [max(lo + omega * (ln - lo), floor)
+                     for lo, ln in zip(L, L_new)]
+                L[N - 1] = B
+                V = [v0] + [max(L[j - 1] + F_ge[j] - UW_ge[j] - B, floor)
+                            for j in range(1, N)]
+                for j in range(N):
+                    row = {c: max(cols[c][j], _X_FLOOR) for c in active}
+                    tot = sum(row.values())
+                    x[j] = {c: v / tot for c, v in row.items()}
+                    yr = {c: max(K[j][c] * x[j][c], _X_FLOOR) for c in active}
+                    tot = sum(yr.values())
+                    y[j] = {c: v / tot for c, v in yr.items()}
+
+                # condenser pinned to saturation; the rest from the
+                # simultaneous Newton energy solve
+                T0_new, K0, y0 = _bubble_T_kvalues(pp, P_j[0], x[0], T[0])
+                y[0] = y0
+                n_prop += 6
+                T_new, hL, hV, resid_rel, n_h = _newton_T_draws(
+                    pp, N, P_j, x, y, L, V, fh_eff, u, w,
+                    [T0_new] + T[1:], t_bounds)
+                n_prop += n_h
+            else:
+                # -- bubble-point update: normalize the stage liquids, take
+                # each stage's K-value bubble point, then drive the vapor
+                # traffic from the energy balances run bottom-up from the
+                # steam stage (V_{N+1} = 0; no reboiler) -----------------------
+                for j in range(N):
+                    row = {c: max(cols[c][j], _X_FLOOR) for c in active}
+                    tot = sum(row.values())
+                    x[j] = {c: v / tot for c, v in row.items()}
+                T_new = list(T)
+                for j in range(N):
+                    tj, K[j], y[j] = _bubble_T_kvalues(pp, P_j[j], x[j], T[j])
+                    n_prop += 6
+                    T_new[j] = T[j] + max(min(tj - T[j], _SR_T_OUTER_MAX),
+                                          -_SR_T_OUTER_MAX)
+                hL = [pp.enthalpy_liquid(T_new[j], P_j[j], x[j])
+                      for j in range(N)]
+                hV = [pp.enthalpy_vapor(T_new[j], P_j[j], y[j])
+                      for j in range(N)]
+                n_prop += 2 * N
+
+                # Envelope energy balances (around stage j down to the
+                # bottom; Seader 3e sec. 10.3 section form) on the SENSIBLE
+                # basis: each V_j comes from its own envelope, so there is no
+                # stage-to-stage error accumulation, and the formation-offset
+                # shift keeps the pivot hLs_{j-1} - hVs_j ~ -(latent heat) < 0
+                # even across the steam stage. ``hf_mix`` is the composition-
+                # weighted formation enthalpy (a per-component constant, so it
+                # cancels against the conserved envelope component balances at
+                # convergence); ``fh_form`` is the matching per-stage feed
+                # formation-enthalpy flow, so fh_eff - fh_form is the feed's
+                # sensible enthalpy flow (the ramped pumparound duty in fh_eff
+                # is pure heat and rightly survives the subtraction).
+                hLs = [hL[j] - hf_mix(x[j]) for j in range(N)]
+                hVs = [hV[j] - hf_mix(y[j]) for j in range(N)]
+                fhs = [fe - ff for fe, ff in zip(fh_eff, fh_form)]
+                # suffix sums: draws' and feeds' sensible enthalpy flows at
+                # or below stage j
+                S_uw = [0.0] * (N + 1)
+                S_f = [0.0] * (N + 1)
+                for j in range(N - 1, 0, -1):
+                    S_uw[j] = S_uw[j + 1] + u[j] * hLs[j] + w[j] * hVs[j]
+                    S_f[j] = S_f[j + 1] + fhs[j]
+                # The envelope pivot hLs_{j-1} - hVs_j is ~ -(latent heat) < 0
+                # at the solution, but a transient iterate (especially across
+                # the open-steam bottom stage, where the rising vapor is steam-
+                # rich and its sensible enthalpy can momentarily approach the
+                # falling liquid's) can drive it to zero or slightly positive.
+                # Clamp it to a small negative floor -- keeping the physical
+                # sign while bounding V_new -- rather than aborting on a
+                # recoverable transient; a genuinely degenerate *converged*
+                # state is caught downstream (dried-up section / unmet energy
+                # residual), never silently accepted. The clamp scale is a
+                # small fraction of a typical molar latent heat.
+                _pivot_floor = -1.0e3       # J/mol
+                V_new = list(V)
+                for j in range(1, N):
+                    denom = min(hLs[j - 1] - hVs[j], _pivot_floor)
+                    num = (S_uw[j] + B * hLs[N - 1] - S_f[j]
+                           - A[j - 1] * hLs[j - 1])
+                    V_new[j] = max(num / denom, floor)
+                V = [v0] + [max(vo + omega * (vn - vo), floor)
+                            for vo, vn in zip(V[1:], V_new[1:])]
+                L = [max(V[j + 1] + A[j], floor)
+                     for j in range(N - 1)] + [B]
+                resid_rel = 0.0     # the recurrence enforces the balances
+                n_prop += 0
+
+            dF = max(
+                max(abs(a_ - b_) / max(a_, b_) for a_, b_ in zip(L, L_prev)),
+                max(abs(a_ - b_) / max(a_, b_, floor * 10)
+                    for a_, b_ in zip(V[1:], V_prev[1:])),
+            )
+            dT = max(abs(tn - to) for tn, to in zip(T_new, T))
+            # Per-outer-iteration temperature move: damped by omega and then
+            # clamped. Damping the *temperature* (not only the traffic) is what
+            # lets omega break a period-2 limit cycle on an open-steam bottom
+            # stage, where the energy balance flips the bottom traffic between
+            # two states each iteration and the raw temperature move pins at the
+            # clamp (so a dT-only oscillation test never fires).
+            T = [to + max(min(omega * (tn - to), _SR_T_OUTER_MAX),
+                          -_SR_T_OUTER_MAX)
+                 for tn, to in zip(T_new, T)]
+
+            # Reduce damping when EITHER the temperature or the traffic change
+            # stalls/worsens: a flat-but-large dT (clamped) with a persistently
+            # large dF is exactly the limit-cycle signature, so progress is
+            # measured on the combined move and a lack of improvement shrinks
+            # omega geometrically.
+            move = max(dT / max(_SR_T_OUTER_MAX, 1.0), min(dF, 1.0))
+            if move >= move_prev - 1e-3:
+                worsened += 1
+                if worsened >= 2:
+                    omega = max(0.1, 0.5 * omega)
+                    worsened = 0
+            else:
+                worsened = 0
+            move_prev = move
+
+            if getattr(self, "_sr_debug", False):
+                dl = [abs(a_ - b_) / max(a_, b_) for a_, b_ in zip(L, L_prev)]
+                jmax = dl.index(max(dl))
+                print(f"  it={it:3d} dT={dT:.3e} dF={dF:.3e} "
+                      f"resid={resid_rel:.1e} omega={omega} "
+                      f"jL={jmax} L[jL]={L[jmax]:.2f} L0={L[0]:.2f} "
+                      f"T0={T[0]:.2f} Tbot={T[-1]:.2f}")
+
+            if (ramp >= 1.0 and dT <= _TOL_T and dF <= _SR_TOL_FLOW
+                    and resid_rel <= _SR_ENERGY_TOL):
+                converged = True
+                break
+
+        if not converged:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: {method} iteration did not "
+                f"converge in {max_iter} iterations (max |dT|={dT:.3g} K vs "
+                f"{_TOL_T} K, max traffic change={dF:.3g} vs {_SR_TOL_FLOW}, "
+                f"energy residual={resid_rel:.3g} vs {_SR_ENERGY_TOL}, "
+                f"damping={omega}). Check the specs (D={D:.4g} mol/s, "
+                f"n_stages={N}, draws={sum(u) + sum(w):.4g} mol/s) or raise "
+                f"'max_iter'"
+            )
+        if any(lj <= floor for lj in L) or any(vj <= floor for vj in V[1:]):
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: a column section dried up at "
+                f"the converged point (min L={min(L):.3g}, "
+                f"min V={min(V[1:]):.3g} mol/s) — the specified D={D:.4g} "
+                f"mol/s and side draws are infeasible for this feed"
+            )
+
+        # -- products (mass balance closed exactly by difference) ----------------
+        x_d = dict(y[0]) if partial else dict(x[0])
+        d_flows = {c: D * x_d[c] for c in active}
+        draw_flows: list[dict[str, float]] = []
+        for stage, phase, rate in draws:
+            comp = x[stage - 1] if phase == "liquid" else y[stage - 1]
+            draw_flows.append({c: rate * comp[c] for c in active})
+        b_flows = {c: f[c] - d_flows[c]
+                   - sum(df[c] for df in draw_flows) for c in active}
+        neg = min(b_flows.values())
+        if neg < -1e-7 * F:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: converged distillate/side draws "
+                f"would carry more of a component than the feed supplies "
+                f"(bottoms flow {neg:.3g} mol/s) — tighten tolerances or "
+                f"check the rate specs"
+            )
+        if neg < 0.0:
+            # Same trace-negative handling as the bubble-point path: keep
+            # every per-component balance machine-exact without touching D.
+            donor = max(b_flows, key=lambda c: b_flows[c])
+            for c, v in b_flows.items():
+                if v < 0.0:
+                    d_flows[c] += v
+                    d_flows[donor] -= v
+                    b_flows[c] = 0.0
+            b_flows[donor] = (f[donor] - d_flows[donor]
+                              - sum(df[donor] for df in draw_flows))
+            x_d = {c: v / D for c, v in d_flows.items()}
+        x_b = {c: v / B for c, v in b_flows.items()}
+
+        z_dist = {c: x_d.get(c, 0.0) for c in comps}
+        z_bot = {c: x_b.get(c, 0.0) for c in comps}
+        h_D = hV[0] if partial else hL[0]
+        # The bottoms leave as liquid at the bottom-stage temperature — a
+        # steam-stripped liquid is below its dry-EOS bubble point, so no
+        # saturation flash is imposed here.
+        h_B = pp.enthalpy_liquid(T[N - 1], P_j[N - 1], x_b)
+
+        distillate = Stream(
+            id=f"{self.id}.distillate", components=comps,
+            T=T[0], P=P_j[0], molar_flow=D, z=z_dist, H=h_D,
+            phase="vapor" if partial else "liquid",
+            vapor_fraction=1.0 if partial else 0.0,
+        )
+        bottoms = Stream(
+            id=f"{self.id}.bottoms", components=comps,
+            T=T[N - 1], P=P_j[N - 1], molar_flow=B, z=z_bot, H=h_B,
+            phase="liquid", vapor_fraction=0.0,
+        )
+        side_streams: list[Stream] = []
+        side_h = 0.0
+        for i, (stage, phase, rate) in enumerate(draws):
+            j = stage - 1
+            comp = x[j] if phase == "liquid" else y[j]
+            h_draw = hL[j] if phase == "liquid" else hV[j]
+            side_h += rate * h_draw
+            side_streams.append(Stream(
+                id=f"{self.id}.side{i + 1}", components=comps,
+                T=T[j], P=P_j[j], molar_flow=rate,
+                z={c: comp.get(c, 0.0) for c in comps},
+                H=h_draw, phase=phase,
+                vapor_fraction=0.0 if phase == "liquid" else 1.0,
+            ))
+
+        # The condenser duty closes the overall energy balance exactly
+        # (there is no reboiler); the independently computed condenser-stage
+        # balance is the diagnostic residual.
+        q_cond = D * h_D + B * h_B + side_h - feed_h - sum(Q_stage)
+        q_cond_stage = (L[0] + u0) * hL[0] + v0 * hV[0] - V[1] * hV[1]
+        e_scale = max(abs(q_cond), 1.0)
+        energy_residual = abs(q_cond - q_cond_stage) / e_scale
+
+        self._warm = {"method": "nonreboiled", "n_stages": N,
+                      "active": list(active),
+                      "z": {c: f[c] / F for c in active},
+                      "T": list(T), "x": [dict(r) for r in x],
+                      "y": [dict(r) for r in y], "K": [dict(r) for r in K],
+                      "L": list(L), "V": list(V)}
+
+        self.design = {
+            # FUG-compatible sizing keys ("N" counts the trays — every stage
+            # but the condenser; there is no reboiler). T_top_dew for the
+            # condenser LMTD is the temperature of the vapor entering it
+            # (saturated at stage-2 conditions).
+            "N": float(N - 1), "P": P_j[0], "x_D": dict(x_d), "x_B": dict(x_b),
+            "T_top": T[0], "T_top_dew": T[1], "T_bottom": T[N - 1],
+            "V_top": V[1], "Q_condenser": q_cond, "Q_reboiler": 0.0,
+            "D": D, "B": B, "R": L[0] / D, "q": q,
+            "feed_stage": feed_info[0][0] + 1,
+            "partial_condenser": partial,
+            "method": method, "reboiled": False,
+            "feeds": [{"stage": j + 1, "F": Fi, "q": qi}
+                      for j, Fi, qi in feed_info],
+            "side_draws": [{"stage": stage, "phase": phase, "rate": rate}
+                           for stage, phase, rate in draws],
+            "stage_duties": [{"stage": stage, "duty": duty}
+                             for stage, duty in duties],
+            "distillate_flows": dict(d_flows), "bottoms_flows": dict(b_flows),
+            "side_draw_flows": [dict(df) for df in draw_flows],
+            "n_stages": N,
+            "T_profile": list(T),
+            "P_profile": list(P_j),
+            "L_profile": list(L),
+            "V_profile": list(V),
+            "x_profile": [{c: row.get(c, 0.0) for c in comps} for row in x],
+            "y_profile": [{c: row.get(c, 0.0) for c in comps} for row in y],
+            "iterations": it, "max_dT": dT, "max_dV_rel": dF,
+            "damping": omega, "flash_calls": n_prop,
+            "energy_residual_rel": energy_residual,
+        }
+        out: dict[str, PortStream] = {
+            "distillate": distillate,
+            "bottoms": bottoms,
+            "condenser_duty": EnergyStream(id=f"{self.id}.condenser_duty",
+                                           duty=q_cond),
+            "reboiler_duty": EnergyStream(id=f"{self.id}.reboiler_duty",
+                                          duty=0.0),
+        }
+        for i, s in enumerate(side_streams):
+            out[f"side{i + 1}"] = s
         return out
+
+    def _initial_sr_profiles(self, pp, N: int, P_j: list[float],
+                             active: list[str], f: dict[str, float],
+                             D: float, R0: float,
+                             feed_info: list[tuple[int, float, float]],
+                             feed_flashes: list,
+                             F_ge: list[float], UW_ge: list[float],
+                             B: float, v0: float, floor: float):
+        """Starting profiles for the non-reboiled mode: the last converged
+        profiles when the layout/feed are unchanged; else a Fenske-style
+        composition ramp (K-values harvested from the already-computed feed
+        flashes — no extra flash), per-stage K-value bubble temperatures
+        marched outward from the feed stage, and constant-molal-overflow
+        traffic seeded by ``R0``. Returns ``(T, x, y, K, L, V)``."""
+        F = sum(f.values())
+        z = {c: f[c] / F for c in active}
+        w_ = self._warm
+        if (w_ is not None and w_.get("method") == "nonreboiled"
+                and w_["n_stages"] == N and w_["active"] == active
+                and max(abs(w_["z"].get(c, 0.0) - z[c]) for c in active)
+                < _WARM_Z_TOL):
+            return (list(w_["T"]), [dict(r) for r in w_["x"]],
+                    [dict(r) for r in w_["y"]], [dict(r) for r in w_["K"]],
+                    list(w_["L"]), list(w_["V"]))
+
+        # K at feed conditions, harvested from the feed PH flashes. A
+        # vapor-only feed (stripping steam) contributes no K; its components
+        # default to "very light" (4x the largest harvested K) — it only
+        # seeds the initializer.
+        K_feed: dict[str, float] = {}
+        for res in feed_flashes:
+            if res.x and res.y:
+                for c in active:
+                    xa, ya = res.x.get(c, 0.0), res.y.get(c, 0.0)
+                    if xa > 0.0 and ya > 0.0 and c not in K_feed:
+                        K_feed[c] = ya / xa
+        if K_feed:
+            kmax = max(K_feed.values())
+            for c in active:
+                K_feed.setdefault(c, 4.0 * kmax)
+        try:
+            x = fenske_profile(pp, P_j[0], f, D, N,
+                               K_feed=K_feed or None)
+        except _NoVLEError as exc:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: no vapor-liquid equilibrium for "
+                f"the feed at P={P_j[0]:.4g} Pa; check the pressure"
+            ) from exc
+
+        # Per-stage bubble temperatures of the initial liquid profile,
+        # marching outward from the (first two-phase) feed stage so every
+        # secant starts from its neighbor's solution.
+        j_seed, T_seed = feed_info[0][0], float(feed_flashes[0].T)
+        for (j0, _, _), res in zip(feed_info, feed_flashes):
+            if res.x and res.y:
+                j_seed, T_seed = j0, float(res.T)
+                break
+        T = [0.0] * N
+        y: list[dict[str, float]] = [{} for _ in range(N)]
+        K: list[dict[str, float]] = [{} for _ in range(N)]
+        g = T_seed
+        for j in range(j_seed, N):
+            T[j], K[j], y[j] = _bubble_T_kvalues(pp, P_j[j], x[j], g)
+            g = T[j]
+        g = T[j_seed]
+        for j in range(j_seed - 1, -1, -1):
+            T[j], K[j], y[j] = _bubble_T_kvalues(pp, P_j[j], x[j], g)
+            g = T[j]
+
+        # Constant-molal-overflow-style traffic: D(1+R0) above the main feed,
+        # the feeds' flashed vapor below it; L from the total balances.
+        f0 = feed_info[0][0]
+        V = [v0] * N
+        for j in range(1, N):
+            if j <= f0:
+                V[j] = D * (1.0 + R0)
+            else:
+                vap = sum((1.0 - qk) * Fk for jk, Fk, qk in feed_info
+                          if jk >= j)
+                V[j] = max(vap, 0.02 * F)
+        L = [floor] * N
+        for j in range(1, N):
+            L[j - 1] = max(V[j] - F_ge[j] + UW_ge[j] + B, floor)
+        L[N - 1] = B
+        return T, x, y, K, L, V
 
     # -- initialization ------------------------------------------------------------
     def _initial_x(self, pp, P: float, f: dict[str, float], D: float, N: int,
@@ -670,7 +1501,8 @@ class RigorousColumn(UnitOp):
         """
         active = list(f)
         w = self._warm
-        if (w is not None and w["n_stages"] == N and w["active"] == active
+        if (w is not None and w.get("method", "bubble_point") == "bubble_point"
+                and w["n_stages"] == N and w["active"] == active
                 and max(abs(w["z"].get(c, 0.0) - z.get(c, 0.0)) for c in active)
                 < _WARM_Z_TOL):
             return [dict(row) for row in w["x"]]

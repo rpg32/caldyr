@@ -136,6 +136,21 @@ export const GLYPHS: Record<string, ReactNode> = {
     <path d="M8 19 c2 -1.5 4 1.5 6 0 s4 1.5 6 0" />
     <path d="M10 14 L10 10 M14 15 L14 10 M18 14 L18 10" strokeDasharray="2 1.6" />
   </>),
+  Cyclone: svg(<>
+    <path d="M8 4 L20 4 L20 10 L15.5 24 L12.5 24 L8 10 Z" />
+    <path d="M14 24 L14 27 M20 6 L25 6" />
+    <path d="M11 8 c2 1.5 4 -1.5 6 0" strokeDasharray="1.5 1.5" />
+  </>),
+  RotaryVacuumFilter: svg(<>
+    <circle cx="13" cy="14" r="9" />
+    <circle cx="13" cy="14" r="4" strokeDasharray="2 1.6" />
+    <path d="M4 23 L22 23 M24 10 L26 10" />
+  </>),
+  BaghouseFilter: svg(<>
+    <rect x="5" y="4" width="18" height="20" rx="2" />
+    <path d="M9 7 L9 19 M14 7 L14 19 M19 7 L19 19" />
+    <path d="M9 19 a1.8 1.8 0 0 0 0 .1 M5 21 L23 21" strokeDasharray="0" />
+  </>),
   feed: svg(<>
     <path d="M3 14 L19 14 M13 8 L19 14 L13 20" />
     <path d="M23 6 L23 22" />

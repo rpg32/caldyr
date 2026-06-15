@@ -135,6 +135,46 @@ PURCHASED: dict[str, Purchased] = {
         3.1510, 1.0, 0.0, 1e-3, 1e9, "L_m_x_D_m^0.74",
         "Sinnott, C&R Vol. 6, 4e (2005), sec. 5.5: installed CS pipe "
         "880*(D m)^0.74 GBP2004/m -> 1416 USD2001 per m*D^0.74"),
+    # -- Solids-handling equipment (Hameed 2025 ch. 12 units). Turton 4e has no
+    # solids coverage, so these come from secondary sources, converted to the
+    # CEPCI-397 (2001) USD basis. They are ORDER-OF-MAGNITUDE correlations for
+    # screening/sensitivity, not vendor quotes — confidence is flagged per row.
+    #
+    # Cyclone, per cyclone, on the actual gas volumetric flow: Couper, Penney,
+    # Fair & Walas, *Chemical Process Equipment*, 3e (2012), ch. 21 cost data
+    # (after Walas 1988): heavy-duty gas cyclone, C[k$, mid-1985] =
+    # 1.39 Q^0.98 with Q in kSCFM (2-40). Converted with 1 m^3/s = 2.1189
+    # kSCFM (actual ~ standard flow assumed; adds <10% error below ~70 C) and
+    # CEPCI 325.3 (1985) -> 397: Cp0 = 3541 * Q^0.98 USD2001, Q in m^3/s.
+    # MODERATE-LOW confidence: the 0.98 exponent and 1.39 coefficient are from
+    # the Walas table as recalled; verify against a physical copy before
+    # relying on absolute cyclone capex.
+    "cyclone": Purchased(
+        3.5491, 0.98, 0.0, 0.94, 18.9, "gas_m3_s",
+        "Couper et al. 3e ch. 21 (Walas): heavy-duty cyclone 1.39*Q^0.98 "
+        "k$1985, Q in kSCFM (2-40) -> 3541*Q^0.98 USD2001, Q in m^3/s "
+        "[order-of-magnitude]"),
+    # Rotary vacuum drum filter, on filtration area: power-law anchored to the
+    # rotary drum vacuum filter purchased-cost chart of Peters, Timmerhaus &
+    # West, *Plant Design and Economics for Chemical Engineers*, 5e (2003),
+    # ch. 14 (solids separation): ~$250k purchased at 10 m^2 in ~2002 dollars
+    # (CEPCI ~396 ~ the 397 basis), with a 0.54 capacity exponent (mid-range
+    # for package solids equipment; six-tenths-rule family). LOW confidence on
+    # the absolute level (chart read from memory) — flagged for verification.
+    "rotary_vacuum_filter": Purchased(
+        4.8580, 0.54, 0.0, 1.0, 80.0, "area_m2",
+        "Peters, Timmerhaus & West 5e ch. 14 chart anchor: ~$250k at 10 m^2 "
+        "(USD2002~CEPCI-397), exponent 0.54 [order-of-magnitude]"),
+    # Baghouse (fabric filter), on gross cloth area: EPA *Air Pollution
+    # Control Cost Manual*, 6e (EPA/452/B-02-001, 2002), sec. 6 ch. 1: pulse-
+    # jet flange-to-flange equipment cost ~ $8-12/ft^2 of cloth plus bags
+    # ~$1-2/ft^2 (1998$, CEPCI ~390 ~ the 397 basis) -> ~ $160/m^2, linear in
+    # area. MODERATE confidence (the manual's correlations are linear in cloth
+    # area with a small fixed intercept this row drops).
+    "baghouse": Purchased(
+        2.2041, 1.0, 0.0, 10.0, 10_000.0, "area_m2",
+        "EPA APC Cost Manual 6e sec. 6 ch. 1: pulse-jet baghouse ~$15/ft^2 "
+        "cloth incl. bags (1998$~CEPCI-397) -> 160*A USD2001, A in m^2"),
 }
 
 # -- Pressure-factor correlations (Turton 4e Table A.2) ---------------------
@@ -182,6 +222,20 @@ FBM_DIRECT: dict[str, FbmDirect] = {
     # supports already included in the Sinnott figure), so Fbm = 1.
     "pipe": FbmDirect(1.0, "Sinnott C&R Vol. 6 4e sec. 5.5 — correlation is "
                            "already an installed cost"),
+    # Solids equipment: simple fabricated/package items take a Hand-type
+    # installation factor of ~2 on the f.o.b. purchased cost (Towler &
+    # Sinnott, Chemical Engineering Design, 2e, ch. 7, installation factors
+    # for miscellaneous fabricated equipment).
+    "cyclone": FbmDirect(2.0, "Towler & Sinnott 2e ch. 7, Hand-type factor ~2 "
+                              "for fabricated package equipment"),
+    "rotary_vacuum_filter": FbmDirect(
+        2.0, "Towler & Sinnott 2e ch. 7, Hand-type factor ~2 for package "
+             "solids equipment"),
+    # Baghouses: the EPA manual's own total-capital build-up multiplies the
+    # flange-to-flange cost by ~2.17 (direct + indirect installation; EPA APC
+    # Cost Manual 6e sec. 6 ch. 1 cost-factor table).
+    "baghouse": FbmDirect(2.17, "EPA APC Cost Manual 6e sec. 6 ch. 1: TCI ~ "
+                                "2.17 x flange-to-flange equipment cost"),
 }
 
 # Quantity factor for stacked/multiple identical items (trays): Turton 4e
