@@ -1995,6 +1995,85 @@ class RigorousColumn(UnitOp):
                     jac[:, col] = (R1 - R0) / dk
             return jac
 
+        # active-component indices in the property package's full ordering
+        pp_comps = list(getattr(pp, "components", active))
+        act_idx = np.array([pp_comps.index(c) for c in active])
+        has_analytic = hasattr(pp, "stage_derivs")
+
+        def build_jac_analytic():
+            # Per-stage analytic K-value / enthalpy derivatives (Naphtali-
+            # Sandholm). One rigorous evaluation per stage (vs N*(2C+1) for the
+            # finite-difference Jacobian) and exact — so the Newton direction
+            # and the LM gradient are noise-free, which is what makes the
+            # wide-boiling resid tower converge reproducibly across platforms.
+            SD = []
+            for j in range(N):
+                xj = {active[i]: lmat[j, i] / Lc[j] for i in range(C)}
+                yj = {active[i]: vmat[j, i] / Vc[j] for i in range(C)}
+                SD.append(pp.stage_derivs(Tv[j], P[j], xj, yj))
+            J = np.zeros((nv, nv))
+            ix = np.ix_(act_idx, act_idx)
+            for j in range(N):
+                d = SD[j]
+                K = d["K"][act_idx]
+                dlnK_dT = d["dlnK_dT"][act_idx]
+                dphL = d["dlnphiL_dns"][ix]
+                dphV = d["dlnphiV_dns"][ix]
+                HbarL = d["HbarL"][act_idx]
+                HbarV = d["HbarV"][act_idx]
+                CpL, CpV, hL, hV = d["CpL"], d["CpV"], d["hL"], d["hV"]
+                Lj, Vj, Uj, Wj = Lc[j], Vc[j], U[j], W[j]
+                Sj = Vj / Lj
+                lj, vj = lmat[j], vmat[j]
+                b = j * span
+                # -- M rows (material balance), scaled by 1/Ftot --------------
+                Mdl = (np.diag(np.full(C, 1.0 + Uj / Lj))
+                       - (Uj / Lj**2) * lj[:, None])
+                Mdv = (np.diag(np.full(C, 1.0 + Wj / Vj))
+                       - (Wj / Vj**2) * vj[:, None])
+                J[b:b + C, b:b + C] = Mdl / Ftot
+                J[b:b + C, b + C:b + 2 * C] = Mdv / Ftot
+                if j > 0:
+                    pb = (j - 1) * span
+                    for i in range(C):
+                        J[b + i, pb + i] += -1.0 / Ftot
+                if j < N - 1:
+                    nb = (j + 1) * span
+                    for i in range(C):
+                        J[b + i, nb + C + i] += -1.0 / Ftot
+                # -- E rows (equilibrium), scaled by 1/Ftot -------------------
+                eb = b + C
+                # dE_i/dl_k = -K_i S [(l_i/L)(dphL[i,k]-1) + delta_ik]
+                Edl = -(K * Sj)[:, None] * (
+                    (lj / Lj)[:, None] * (dphL - 1.0) + np.eye(C))
+                # dE_i/dv_k = delta_ik + K_i (l_i/L)(dphV[i,k]-1)
+                Edv = np.eye(C) + (K * lj / Lj)[:, None] * (dphV - 1.0)
+                EdT = -K * dlnK_dT * Sj * lj
+                J[eb:eb + C, b:b + C] = Edl / Ftot
+                J[eb:eb + C, b + C:b + 2 * C] = Edv / Ftot
+                J[eb:eb + C, b + 2 * C] = EdT / Ftot
+                # -- H row (energy balance, j>=1), scaled by 1/e_ref ----------
+                if j >= 1:
+                    hr = b + 2 * C
+                    J[hr, b:b + C] = (hL + (Lj + Uj) * (HbarL - hL) / Lj) / e_ref
+                    J[hr, b + C:b + 2 * C] = (
+                        hV + (Vj + Wj) * (HbarV - hV) / Vj) / e_ref
+                    J[hr, b + 2 * C] = (
+                        (Lj + Uj) * CpL + (Vj + Wj) * CpV) / e_ref
+                    pd = SD[j - 1]
+                    pb = (j - 1) * span
+                    J[hr, pb:pb + C] = -pd["HbarL"][act_idx] / e_ref
+                    J[hr, pb + 2 * C] = -Lc[j - 1] * pd["CpL"] / e_ref
+                    if j < N - 1:
+                        nd = SD[j + 1]
+                        nb = (j + 1) * span
+                        J[hr, nb + C:nb + 2 * C] = -nd["HbarV"][act_idx] / e_ref
+                        J[hr, nb + 2 * C] = -Vc[j + 1] * nd["CpV"] / e_ref
+                else:
+                    # spec row (stage 0): sum_k v_{k,0} = D
+                    J[b + 2 * C, b + C:b + 2 * C] = 1.0 / D
+            return J
+
         def cap(delta):
             # fractional-step cap (Naphtali-Sandholm): no SIGNIFICANT component
             # flow drops below _NS_TRUST of its value in one step. Trace flows
@@ -2054,7 +2133,16 @@ class RigorousColumn(UnitOp):
                 converged = True
                 break
             rss = float(R0 @ R0)
-            jac = build_jac()
+            jac = (build_jac_analytic() if has_analytic else build_jac())
+            if getattr(self, "_ns_jac_check", False) and it <= 1:
+                jfd = build_jac()
+                ja = build_jac_analytic()
+                scale = np.maximum(np.abs(jfd), np.abs(ja)) + 1e-12
+                rel = np.abs(ja - jfd) / scale
+                km = int(np.argmax(rel))
+                print(f"  [jac check] max rel diff {rel.max():.2e} at "
+                      f"({km // nv},{km % nv}); analytic={ja.flat[km]:.4e} "
+                      f"fd={jfd.flat[km]:.4e}")
             # Newton (Gauss-Newton) direction, regularized by lstsq so an
             # insensitive variable cannot throw an unbounded component into the
             # step. A line search along this direction reaches the quadratic

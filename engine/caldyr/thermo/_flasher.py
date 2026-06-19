@@ -397,6 +397,52 @@ class FlasherPackage:
         ys = self._zs(y)
         return float(gas.to(T=T, P=P, zs=ys).H()) + self._hf_mix(ys)
 
+    def stage_derivs(self, T: float, P: float, x: dict[str, float],
+                     y: dict[str, float]) -> dict[str, Any]:
+        """Analytic K-value and enthalpy derivatives for one equilibrium stage,
+        for the Naphtali-Sandholm analytic Jacobian. Returns numpy arrays
+        aligned to ``self.components`` (length ``Cf``):
+
+          * ``K`` (Cf,)            — phi-phi K-values, as in :meth:`k_values`;
+          * ``dlnK_dT`` (Cf,)      — d(ln K_i)/dT (1/K);
+          * ``dlnphiL_dns`` (Cf,Cf), ``dlnphiV_dns`` (Cf,Cf) — thermo's
+            mole-number derivatives of ln(phi) at unit total moles, so the
+            derivative w.r.t. a component MOLE FLOW is this divided by the phase
+            total flow (``thermo`` normalises ``dns`` to n_total = 1);
+          * ``hL``, ``hV`` (float) — formation-inclusive molar enthalpies;
+          * ``CpL``, ``CpV`` (float) — d h/dT (J/mol/K; the formation offset is
+            T-independent);
+          * ``HbarL`` (Cf,), ``HbarV`` (Cf,) — partial molar formation-inclusive
+            enthalpies, ``Hbar_k = h + dH_dns[k] + (hf_k - hf_mix)`` (so
+            ``d((n) h)/dn_k`` at unit total moles), the building block for the
+            energy-balance Jacobian.
+        """
+        liq, gas = self._phase_models()
+        xs = self._zs(x)
+        ys = self._zs(y)
+        lp = liq.to(T=T, P=P, zs=xs)
+        gp = gas.to(T=T, P=P, zs=ys)
+        lnphiL = np.array(lp.lnphis(), dtype=float)
+        lnphiV = np.array(gp.lnphis(), dtype=float)
+        K = np.exp(np.clip(lnphiL - lnphiV, -300.0, 300.0))
+        dlnK_dT = (np.array(lp.dlnphis_dT(), dtype=float)
+                   - np.array(gp.dlnphis_dT(), dtype=float))
+        dlnphiL_dns = np.array(lp.dlnphis_dns(), dtype=float)
+        dlnphiV_dns = np.array(gp.dlnphis_dns(), dtype=float)
+        hf = np.array(self._hf, dtype=float)
+        hf_x = float(hf @ np.array(xs))
+        hf_y = float(hf @ np.array(ys))
+        hL = float(lp.H()) + hf_x
+        hV = float(gp.H()) + hf_y
+        CpL = float(lp.dH_dT())
+        CpV = float(gp.dH_dT())
+        HbarL = hL + np.array(lp.dH_dns(), dtype=float) + (hf - hf_x)
+        HbarV = hV + np.array(gp.dH_dns(), dtype=float) + (hf - hf_y)
+        return {"K": K, "dlnK_dT": dlnK_dT,
+                "dlnphiL_dns": dlnphiL_dns, "dlnphiV_dns": dlnphiV_dns,
+                "hL": hL, "hV": hV, "CpL": CpL, "CpV": CpV,
+                "HbarL": HbarL, "HbarV": HbarV}
+
     def volume_liquid(self, T: float, P: float, x: dict[str, float]) -> float:
         """Molar volume (m^3/mol) of ``x`` as a liquid at (T, P)."""
         liq, _ = self._phase_models()
