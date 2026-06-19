@@ -186,8 +186,11 @@ _NS_TRUST = 0.5          # max fractional reduction a flow may take in one step
 _NS_STEP_REL = 1e-4      # only flows above this fraction of the stage total
 #                          constrain the fractional Newton step
 _NS_WARM_ITERS = 40      # inside-out homotopy warm-start iteration cap
-_NS_JAC_REUSE = 5        # reuse the FD Jacobian for this many crawl iterations
-_NS_JAC_FRESH = 2e-2     # ... but rebuild every iteration once |R| < this
+_NS_LM_INIT = 1e-3       # Levenberg-Marquardt damping: initial value
+_NS_LM_MIN = 1e-10       # ... lower bound (-> Gauss-Newton, quadratic endgame)
+_NS_LM_MAX = 1e10        # ... upper bound (-> short scaled gradient descent)
+_NS_LM_UP = 4.0          # ... growth factor on a rejected trial
+_NS_LM_DOWN = 3.0        # ... shrink factor on an accepted step
 
 
 class _NoVLEError(ValueError):
@@ -1992,94 +1995,115 @@ class RigorousColumn(UnitOp):
                     jac[:, col] = (R1 - R0) / dk
             return jac
 
+        def cap(delta):
+            # fractional-step cap (Naphtali-Sandholm): no SIGNIFICANT component
+            # flow drops below _NS_TRUST of its value in one step. Trace flows
+            # near the floor are excluded (protected by the floor) so they
+            # cannot collapse the step to nothing.
+            smax = 1.0
+            for j in range(N):
+                thr_l = _NS_STEP_REL * Lc[j]
+                thr_v = _NS_STEP_REL * Vc[j]
+                for kind in range(2 * C):
+                    cur = lmat[j, kind] if kind < C else vmat[j, kind - C]
+                    thr = thr_l if kind < C else thr_v
+                    dd = delta[j * span + kind]
+                    if dd < 0.0 and cur > thr:
+                        smax = min(smax, -_NS_TRUST * cur / dd)
+            return min(1.0, smax)
+
+        def evals(delta, frac):
+            d = frac * delta
+            lm = lmat.copy()
+            vm = vmat.copy()
+            tt = Tv.copy()
+            Lt, Vt = Lc.copy(), Vc.copy()
+            Kt, hLt, hVt = Kc.copy(), hLc.copy(), hVc.copy()
+            for j in range(N):
+                b = j * span
+                for i in range(C):
+                    lm[j, i] = max(lmat[j, i] + d[b + i], _NS_FLOOR)
+                    vm[j, i] = max(vmat[j, i] + d[b + C + i], _NS_FLOOR)
+                tt[j] = min(max(Tv[j] + d[b + 2 * C], t_lo), t_hi)
+                Lt[j], Vt[j], Kt[j], hLt[j], hVt[j] = stage_eval(
+                    j, lm[j], vm[j], tt[j])
+            Rt = residuals(lm, vm, Lt, Vt, Kt, hLt, hVt)
+            return float(Rt @ Rt), (lm, vm, tt, Lt, Vt, Kt, hLt, hVt, Rt)
+
+        def _ns_try(delta, rss):
+            ss, st = evals(delta, cap(delta))
+            return (ss, st) if ss < rss else (None, None)
+
+        def _ns_line_search(delta, rss):
+            frac = cap(delta)
+            for _ls in range(_NS_LS_MAX):
+                ss, st = evals(delta, frac)
+                if ss < (1.0 - 1e-4 * frac) * rss:
+                    return ss, st
+                frac *= 0.5
+            return None, None
+
         R0 = residuals(lmat, vmat, Lc, Vc, Kc, hLc, hVc)
         converged = False
         it = 0
         rnorm = float(np.max(np.abs(R0)))
-        # modified Newton: the finite-difference Jacobian is the dominant cost,
-        # so reuse it through the slow crawl (where the iterate barely moves)
-        # and rebuild it only periodically or once near the solution, where a
-        # fresh Jacobian recovers the quadratic endgame.
-        jac = None
-        since = 0
+        lam = _NS_LM_INIT      # Levenberg-Marquardt damping
         for it in range(1, max_iter + 1):
             rnorm = float(np.max(np.abs(R0)))
             if rnorm < _NS_TOL:
                 converged = True
                 break
             rss = float(R0 @ R0)
-            if (jac is None or since >= _NS_JAC_REUSE
-                    or rnorm < _NS_JAC_FRESH):
-                jac = build_jac()
-                fresh = True
-                since = 0
-            else:
-                fresh = False
-                since += 1
+            jac = build_jac()
+            # Newton (Gauss-Newton) direction, regularized by lstsq so an
+            # insensitive variable cannot throw an unbounded component into the
+            # step. A line search along this direction reaches the quadratic
+            # endgame (machine precision).
             try:
-                delta = np.linalg.solve(jac, -R0)
+                delta_n = np.linalg.solve(jac, -R0)
             except np.linalg.LinAlgError:
-                delta = np.linalg.lstsq(jac, -R0, rcond=_IO_RCOND)[0]
-
-            # -- bounded, line-searched Newton step ----------------------------
-            # cap the step so no SIGNIFICANT component flow drops below
-            # _NS_TRUST of its value in one move (Naphtali-Sandholm
-            # fractional-step rule). Trace flows near the floor are excluded —
-            # they are protected by the floor in the update and would otherwise
-            # collapse the whole step to nothing.
-            smax = 1.0
-            for j in range(N):
-                thr_l = _NS_STEP_REL * Lc[j]
-                thr_v = _NS_STEP_REL * Vc[j]
-                for kind in range(2 * C):
-                    col = j * span + kind
-                    if kind < C:
-                        cur, thr = lmat[j, kind], thr_l
-                    else:
-                        cur, thr = vmat[j, kind - C], thr_v
-                    d = delta[col]
-                    if d < 0.0 and cur > thr:
-                        smax = min(smax, -_NS_TRUST * cur / d)
-            step = min(1.0, smax)
-            accepted = False
-            for _ls in range(_NS_LS_MAX):
-                lm = lmat.copy()
-                vm = vmat.copy()
-                tt = Tv.copy()
-                for j in range(N):
-                    b = j * span
-                    for i in range(C):
-                        lm[j, i] = max(lmat[j, i] + step * delta[b + i],
-                                       _NS_FLOOR)
-                        vm[j, i] = max(vmat[j, i] + step * delta[b + C + i],
-                                       _NS_FLOOR)
-                    tt[j] = min(max(Tv[j] + step * delta[b + 2 * C],
-                                    t_lo), t_hi)
-                for j in range(N):
-                    Lc[j], Vc[j], Kc[j], hLc[j], hVc[j] = stage_eval(
-                        j, lm[j], vm[j], tt[j])
-                Rt = residuals(lm, vm, Lc, Vc, Kc, hLc, hVc)
-                if float(Rt @ Rt) < (1.0 - 1e-4 * step) * rss:
-                    lmat, vmat, Tv, R0 = lm, vm, tt, Rt
-                    accepted = True
-                    break
-                step *= 0.5
+                delta_n = np.linalg.lstsq(jac, -R0, rcond=_IO_RCOND)[0]
+            ss, state = _ns_line_search(delta_n, rss)
+            used = "N"
+            if ss is None:
+                # the Newton direction stalled (not a descent direction at this
+                # iterate — a platform-sensitive ill-conditioning). Escape with
+                # Levenberg-Marquardt steps of growing damping: each is a
+                # shorter, well-scaled blend toward gradient descent that still
+                # reduces ||R||^2. The fixed energy scaling + flow bounds keep
+                # LM from wandering to a spurious high-traffic state.
+                jtj = jac.T @ jac
+                jtr = jac.T @ R0
+                jdiag = np.maximum(np.diag(jtj), 1e-30)
+                lam = max(lam, _NS_LM_INIT)
+                for _ in range(_NS_LS_MAX):
+                    try:
+                        delta_l = np.linalg.solve(
+                            jtj + lam * np.diag(jdiag), -jtr)
+                    except np.linalg.LinAlgError:
+                        delta_l = -jtr / jdiag
+                    ss, state = _ns_try(delta_l, rss)
+                    if ss is not None:
+                        used = "LM"
+                        break
+                    lam = min(lam * _NS_LM_UP, _NS_LM_MAX)
+            if state is None:
+                accepted = False
+            else:
+                accepted = True
+                lmat, vmat, Tv, R0 = state[0], state[1], state[2], state[8]
+                Lc[:], Vc[:] = state[3], state[4]
+                Kc[:], hLc[:], hVc[:] = state[5], state[6], state[7]
+                lam = max(lam / _NS_LM_DOWN, _NS_LM_MIN)
             if getattr(self, "_ns_debug", False):
                 km = int(np.argmax(np.abs(R0)))
                 jj, kk = km // span, km % span
                 rk = "M" if kk < C else "E" if kk < 2 * C else "G"
-                print(f"  ns it={it:3d} |R|={rnorm:.2e}({rk}@{jj}) "
-                      f"step={step:.2e} T0={Tv[0]:.0f} Tbot={Tv[-1]:.0f} "
+                print(f"  ns it={it:3d} |R|={rnorm:.2e}({rk}@{jj}) {used} "
+                      f"lam={lam:.0e} T0={Tv[0]:.0f} Tbot={Tv[-1]:.0f} "
                       f"R={Lc[0] / max(Vc[1], 1e-9):.2f} V1={Vc[1]:.0f} "
                       f"Vbot={Vc[-1]:.0f}")
             if not accepted:
-                # restore the cache to the (unchanged) accepted state
-                refresh_all()
-                if not fresh:
-                    # a stale Jacobian failed — force a rebuild and retry
-                    # rather than declaring non-convergence
-                    since = _NS_JAC_REUSE
-                    continue
                 break
 
         # -- assemble the converged profile ------------------------------------
