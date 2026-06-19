@@ -303,3 +303,66 @@ def test_sum_rates_does_not_converge_this_tower():
     fs.units["TOWER"].params["max_iter"] = 40
     with pytest.raises(RigorousColumnError, match="did not converge"):
         fs.solve()
+
+
+def test_inside_out_matches_bubble_point():
+    """Cross-method validation: the inside-out Newton method
+    (``method="inside_out"``) and the default bubble-point method must converge
+    this steam-stripped tower to the SAME solution.
+
+    The two methods share no convergence machinery — bubble-point sets each
+    stage temperature from a K-value bubble point and the vapour traffic from an
+    envelope energy recurrence, while inside-out fits per-stage volatility /
+    enthalpy models and solves the (T, V) tear variables by a damped Newton on
+    the summation + energy residuals. That they reach an identical reflux ratio,
+    condenser duty and product slate is a strong correctness check on both
+    (the same role the SM-vs-EO backend agreement plays for the recycle
+    solvers). See ``RigorousColumn._inside_out_loops`` for the method and its
+    scope (it converges this narrow-to-medium wide-boiling tower; a full
+    resid-bearing tower is tracked future work needing Naphtali-Sandholm)."""
+    fs_bp, F, steam, _tbp = _build()
+    assert fs_bp.solve().converged
+    d_bp = fs_bp.units["TOWER"].design
+
+    fs_io, _F, _steam, _tbp = _build()
+    fs_io.units["TOWER"].params["method"] = "inside_out"
+    report = fs_io.solve()
+    assert report.converged
+    d_io = fs_io.units["TOWER"].design
+    assert d_io["method"] == "inside_out"
+    assert d_io["reboiled"] is False
+    # the inside-out method satisfies its own energy closure tightly
+    assert d_io["energy_residual_rel"] < 1e-4
+
+    # -- the two methods agree on the column-level results ---------------------
+    assert d_io["R"] == pytest.approx(d_bp["R"], rel=1e-3)
+    assert d_io["Q_condenser"] == pytest.approx(d_bp["Q_condenser"], rel=1e-3)
+    for sid in ("naphtha", "kerosene", "diesel", "residue"):
+        assert (fs_io.streams[sid].molar_flow
+                == pytest.approx(fs_bp.streams[sid].molar_flow, rel=2e-3)), sid
+        # ... and the cut compositions (mean molar mass) line up
+        z_io = fs_io.streams[sid].z
+        z_bp = fs_bp.streams[sid].z
+        mm_io = sum(z_io.get(c, 0.0) * molar_mass(c) for c in z_io)
+        mm_bp = sum(z_bp.get(c, 0.0) * molar_mass(c) for c in z_bp)
+        assert mm_io == pytest.approx(mm_bp, rel=5e-3), sid
+
+    # -- inside-out closes the same machine-exact mass balance -----------------
+    total_in = F + steam
+    total_out = sum(fs_io.streams[s].molar_flow
+                    for s in ("naphtha", "kerosene", "diesel", "residue"))
+    assert total_out == pytest.approx(total_in, rel=1e-12)
+
+    # -- and the Naphtali-Sandholm method (the resid-tower solver) reaches the
+    # same solution on this light tower too — a third independent method, here
+    # warm-started by inside-out so it polishes in a couple of Newton steps ----
+    fs_ns, _F, _steam, _tbp = _build()
+    fs_ns.units["TOWER"].params["method"] = "naphtali_sandholm"
+    assert fs_ns.solve().converged
+    d_ns = fs_ns.units["TOWER"].design
+    assert d_ns["method"] == "naphtali_sandholm"
+    assert d_ns["energy_residual_rel"] < 1e-6
+    assert d_ns["R"] == pytest.approx(d_bp["R"], rel=1e-3)
+    for sid in ("naphtha", "kerosene", "diesel", "residue"):
+        assert (fs_ns.streams[sid].molar_flow
+                == pytest.approx(fs_bp.streams[sid].molar_flow, rel=2e-3)), sid

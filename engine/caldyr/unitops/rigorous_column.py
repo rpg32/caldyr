@@ -119,6 +119,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import numpy as np
 from scipy.optimize import brentq
 
 from ..core import EnergyStream, Port, Stream, UnitOp
@@ -151,6 +152,42 @@ _SR_L_RATIO = 4.0        # max factor the liquid traffic may move per iteration
 _SR_DUTY_RAMP = 12       # iterations over which stage duties ramp to full
 _BUBBLE_T_LO = 150.0     # K, admissible window for the K-value bubble secant
 _BUBBLE_T_HI = 1500.0
+
+# inside-out mode (Boston-Sullivan; the robust wide-boiling / resid method)
+_IO_OUTER_MAX = 60       # outer (rigorous model-refit) iterations cap
+_IO_OUTER_TOL_T = 1e-3   # K, outer stage-temperature convergence
+_IO_OUTER_TOL_F = 1e-5   # relative outer traffic convergence
+_IO_B_LO = 300.0         # K, clamp on the base-K Clausius slope ln Kb = a - b/T
+_IO_B_HI = 60000.0
+_IO_B_DEFAULT = 6000.0   # K, fallback slope when the finite difference is noisy
+_IO_DH_DT = 0.1          # K, finite-difference step for the model slopes
+_IO_DUTY_RAMP = 8        # outer iterations over which stage duties ramp to full
+# inner damped-Newton (on the 2N-1 tear variables, frozen inside models)
+_IO_NEWTON_MAX = 40      # inner Newton iterations per outer pass
+_IO_NEWTON_TOL = 1e-9    # inner residual infinity-norm convergence
+_IO_LS_MAX = 16          # backtracking line-search halvings
+_IO_DT_PERT = 0.02       # K, Jacobian finite-difference step on temperatures
+_IO_DV_FRAC = 1e-4       # relative Jacobian step on the vapour flows
+_IO_DV_MIN = 1e-3        # mol/s, floor on the vapour-flow Jacobian step
+_IO_NEWTON_ACCEPT = 1e-5  # inner residual required before outer convergence
+_IO_TR_DT = 60.0         # K, trust-region half-width on the stage temperatures
+_IO_TR_VR = 4.0          # trust-region ratio bound on the vapour flows
+_IO_RCOND = 1e-8         # truncated-SVD cutoff for the regularized Newton step
+
+# Naphtali-Sandholm simultaneous-correction method (per-component flow variables)
+_NS_TOL = 1e-9           # scaled residual infinity-norm convergence
+_NS_MAX = 60             # Newton iterations cap (param 'max_iter' overrides)
+_NS_FLOOR = 1e-12        # mol/s, floor on the component flows
+_NS_DL_FRAC = 1e-6       # relative finite-difference step on the flows
+_NS_DL_MIN = 1e-10       # mol/s, floor on the flow finite-difference step
+_NS_DT = 0.01            # K, finite-difference step on the temperatures
+_NS_LS_MAX = 24          # backtracking line-search halvings
+_NS_TRUST = 0.5          # max fractional reduction a flow may take in one step
+_NS_STEP_REL = 1e-4      # only flows above this fraction of the stage total
+#                          constrain the fractional Newton step
+_NS_WARM_ITERS = 40      # inside-out homotopy warm-start iteration cap
+_NS_JAC_REUSE = 5        # reuse the FD Jacobian for this many crawl iterations
+_NS_JAC_FRESH = 2e-2     # ... but rebuild every iteration once |R| < this
 
 
 class _NoVLEError(ValueError):
@@ -402,10 +439,9 @@ class RigorousColumn(UnitOp):
         feed — open stripping steam, the crude-tower configuration. The
         column then has a single specification (the distillate rate);
         ``reflux_ratio`` only seeds the initial traffic and the converged
-        reflux ratio is reported in ``design['R']``. Requires
-        ``method="sum_rates"``.
-      * ``method`` — the MESH temperature/traffic update. Three supported
-        combinations (validated by the test suite):
+        reflux ratio is reported in ``design['R']``. Requires a non-reboiled
+        method (``"bubble_point"``, ``"inside_out"``).
+      * ``method`` — the MESH temperature/traffic update:
 
         - ``"bubble_point"`` + ``reboiled=True`` (the **default**): the
           Wang-Henke bubble-point method — a saturated-liquid flash per stage
@@ -414,19 +450,31 @@ class RigorousColumn(UnitOp):
         - ``"bubble_point"`` + ``reboiled=False``: the same per-stage K-value
           bubble temperatures, but the vapor traffic comes from *envelope*
           energy balances (each V_j from its own around-stage-j-to-bottom
-          balance) run on a formation-offset-conditioned sensible basis. This
-          is the **robust method for a steam-stripped main fractionator**
-          (open stripping steam, side draws, pumparound stage duties); it
-          converges the crude atmospheric tower (see ``examples/20_crude_tower``
-          and ``tests/test_m15_crude_column``).
-        - ``"sum_rates"`` + ``reboiled=False``: a Burningham-Otto variant
-          (liquid traffic from the component-flow sums; temperatures from a
-          simultaneous Newton solve of the stage energy balances). **Provided
-          but not recommended**: on equilibrium-dominated (distillation-like)
-          sections it limit-cycles — the documented Seader 3e ch. 10.4
-          division of labor. Prefer ``"bubble_point"`` for non-reboiled towers.
+          balance) run on a formation-offset-conditioned sensible basis. The
+          **robust method for a steam-stripped main fractionator** (open
+          stripping steam, side draws, pumparound stage duties); it converges
+          the crude atmospheric tower (see ``examples/20_crude_tower`` and
+          ``tests/test_m15_crude_column``).
+        - ``"naphtali_sandholm"`` + ``reboiled=False`` (partial condenser): the
+          **Naphtali-Sandholm simultaneous-correction** method (see
+          :meth:`_solve_ns`) — all MESH equations solved at once by a damped
+          Newton with per-component flow variables. The **robust method for a
+          full resid-bearing crude atmospheric tower** (the case bubble_point
+          and inside_out cannot solve); warm-started by inside_out. Reproduces
+          the bubble-point solution on the light tower and closes the resid
+          tower to machine precision (see ``tests/test_m15_resid_column``).
+        - ``"inside_out"`` + ``reboiled=False``: an inside-out method with a
+          damped-Newton inner loop on the (T, V) tear variables (see
+          :meth:`_inside_out_loops`). Converges narrow-to-medium wide-boiling
+          steam-stripped towers and reproduces the bubble-point solution to
+          machine precision on the light crude tower; on a full resid tower it
+          recovers the physics but stalls (a draw-stage degeneracy that
+          ``naphtali_sandholm`` resolves) — so it is used as the NS warm start.
+        - ``"sum_rates"`` + ``reboiled=False``: a Burningham-Otto variant.
+          **Provided but not recommended**: on equilibrium-dominated sections
+          it limit-cycles (Seader 3e ch. 10.4). Prefer ``"bubble_point"``.
 
-        ``reboiled=True`` with ``"sum_rates"`` is rejected.
+        ``reboiled=True`` with a non-default method is rejected.
       * ``stage_duties`` — ``[{"stage": j, "duty": W}, ...]``: heat added
         (negative = removed) directly on stage j (2..n_stages-1). This is
         the standard reduced model of a **pumparound**: the circulating
@@ -492,15 +540,18 @@ class RigorousColumn(UnitOp):
             )
 
         method = str(self.params.get("method", "bubble_point"))
-        if method not in ("bubble_point", "sum_rates"):
+        if method not in ("bubble_point", "sum_rates", "inside_out",
+                          "naphtali_sandholm"):
             raise RigorousColumnError(
                 f"RigorousColumn {self.id!r}: method={method!r} must be "
-                f"'bubble_point' or 'sum_rates'"
+                f"'bubble_point', 'inside_out', 'naphtali_sandholm', or "
+                f"'sum_rates'"
             )
         reboiled = bool(self.params.get("reboiled", True))
-        if reboiled and method == "sum_rates":
+        if reboiled and method in ("sum_rates", "inside_out",
+                                   "naphtali_sandholm"):
             raise RigorousColumnError(
-                f"RigorousColumn {self.id!r}: method='sum_rates' is "
+                f"RigorousColumn {self.id!r}: method={method!r} is "
                 f"implemented for the non-reboiled (steam-stripped main "
                 f"fractionator) form only — set reboiled=False, or use the "
                 f"default bubble_point method for a reboiled column"
@@ -1085,8 +1136,64 @@ class RigorousColumn(UnitOp):
         T, x, y, K, L, V = self._initial_sr_profiles(
             pp, N, P_j, active, f, D, R0, feed_info, feed_flashes,
             F_ge, UW_ge, B, v0, floor)
-        t_bounds = (max(min(T) - 60.0, _BUBBLE_T_LO),
-                    min(max(T) + 200.0, _BUBBLE_T_HI))
+        t_bounds = (max(min(T) - 120.0, _BUBBLE_T_LO),
+                    min(max(T) + 300.0, _BUBBLE_T_HI))
+
+        if method == "inside_out":
+            (T, x, y, K, L, V, hL, hV, it, dT, dF, n_prop,
+             converged) = self._inside_out_loops(
+                pp, N, P_j, active, fz_stage, fh_stage, u, w, A, B, v0, u0,
+                floor, Q_stage, duties, hf_c, fh_form, F_ge, UW_ge,
+                T, x, y, L, V, t_bounds, max_iter)
+            if not converged:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: inside_out iteration did not "
+                    f"converge in {it} outer passes (max |dT|={dT:.3g} K vs "
+                    f"{_IO_OUTER_TOL_T} K, max traffic change={dF:.3g} vs "
+                    f"{_IO_OUTER_TOL_F}). Check the specs (D={D:.4g} mol/s, "
+                    f"n_stages={N}, draws={sum(u) + sum(w):.4g} mol/s) or raise "
+                    f"'max_iter'"
+                )
+            return self._finish_nonreboiled(
+                pp, comps, active, N, P_j, F, f, feed_info, u, w, draws,
+                duties, Q_stage, D, B, q, partial, u0, v0, feed_h,
+                method, T, x, y, K, L, V, hL, hV, it, dT, dF, 1.0, n_prop)
+
+        if method == "naphtali_sandholm":
+            if not partial:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: method='naphtali_sandholm' "
+                    f"currently supports a partial condenser only (the crude "
+                    f"main-fractionator form); set partial_condenser=True or "
+                    f"use 'bubble_point'"
+                )
+            # Homotopy warm start: the inside-out method robustly drives the
+            # profile to the right PHYSICS (a hot resid bottom, steam rising)
+            # even where it stalls short of a tight residual, whereas the raw
+            # Fenske/CMO seed leaves a cold steam-flooded bottom that traps the
+            # NS Newton in a region where the cubic-EOS heavy-vapour enthalpy is
+            # degenerate. Seeding NS from the inside-out profile lets the full
+            # Newton finish to machine precision.
+            (T, x, y, _Kw, L, V, *_rest) = self._inside_out_loops(
+                pp, N, P_j, active, fz_stage, fh_stage, u, w, A, B, v0, u0,
+                floor, Q_stage, duties, hf_c, fh_form, F_ge, UW_ge,
+                T, x, y, L, V, t_bounds, min(max_iter, _NS_WARM_ITERS))
+            (T, x, y, K, L, V, hL, hV, it, dF, n_prop,
+             converged) = self._solve_ns(
+                pp, N, P_j, active, fz_stage, fh_stage, u, w, Q_stage, D,
+                partial, T, x, y, L, V, t_bounds, max_iter)
+            if not converged:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: naphtali_sandholm Newton did "
+                    f"not converge in {it} iterations (scaled residual "
+                    f"{dF:.3g} vs {_NS_TOL}). Check the specs (D={D:.4g} mol/s, "
+                    f"n_stages={N}, draws={sum(u) + sum(w):.4g} mol/s) or raise "
+                    f"'max_iter'"
+                )
+            return self._finish_nonreboiled(
+                pp, comps, active, N, P_j, F, f, feed_info, u, w, draws,
+                duties, Q_stage, D, B, q, partial, u0, v0, feed_h,
+                method, T, x, y, K, L, V, hL, hV, it, 0.0, dF, 1.0, n_prop)
 
         omega = 1.0
         move_prev = math.inf
@@ -1273,6 +1380,34 @@ class RigorousColumn(UnitOp):
                 f"n_stages={N}, draws={sum(u) + sum(w):.4g} mol/s) or raise "
                 f"'max_iter'"
             )
+        return self._finish_nonreboiled(
+            pp, comps, active, N, P_j, F, f, feed_info, u, w, draws, duties,
+            Q_stage, D, B, q, partial, u0, v0, feed_h, method,
+            T, x, y, K, L, V, hL, hV, it, dT, dF, omega, n_prop)
+
+    # -- shared non-reboiled product / duty / design assembly --------------------
+    def _finish_nonreboiled(
+        self, pp, comps: list[str], active: list[str], N: int,
+        P_j: list[float], F: float, f: dict[str, float],
+        feed_info: list[tuple[int, float, float]],
+        u: list[float], w: list[float],
+        draws: list[tuple[int, str, float]],
+        duties: list[tuple[int, float]], Q_stage: list[float],
+        D: float, B: float, q: float, partial: bool,
+        u0: float, v0: float, feed_h: float, method: str,
+        T: list[float], x: list[dict[str, float]], y: list[dict[str, float]],
+        K: list[dict[str, float]], L: list[float], V: list[float],
+        hL: list[float], hV: list[float],
+        it: int, dT: float, dF: float, omega: float, n_prop: int,
+    ) -> dict[str, PortStream]:
+        """Assemble products, duties and the design record from a *converged*
+        non-reboiled stage state — shared by every non-reboiled method
+        (bubble_point / inside_out / sum_rates). The mass balance closes by
+        difference (machine-exact), the condenser duty closes the overall
+        energy balance exactly (there is no reboiler), and the independently
+        computed condenser-stage balance is reported as ``energy_residual_rel``.
+        """
+        floor = _V_FLOOR_FRAC * F
         if any(lj <= floor for lj in L) or any(vj <= floor for vj in V[1:]):
             raise RigorousColumnError(
                 f"RigorousColumn {self.id!r}: a column section dried up at "
@@ -1403,6 +1538,564 @@ class RigorousColumn(UnitOp):
         for i, s in enumerate(side_streams):
             out[f"side{i + 1}"] = s
         return out
+
+    # -- inside-out (Boston-Sullivan) core ---------------------------------------
+    def _inside_out_loops(
+        self, pp, N: int, P_j: list[float], active: list[str],
+        fz_stage: list[dict[str, float]], fh_stage: list[float],
+        u: list[float], w: list[float], A: list[float], B: float,
+        v0: float, u0: float, floor: float, Q_stage: list[float],
+        duties: list[tuple[int, float]], hf_c: dict[str, float],
+        fh_form: list[float], F_ge: list[float], UW_ge: list[float],
+        T: list[float], x: list[dict[str, float]],
+        y: list[dict[str, float]], L: list[float], V: list[float],
+        t_bounds: tuple[float, float], max_iter: int,
+    ):
+        """Inside-out MESH with a damped-Newton inner loop (Boston & Sullivan
+        1974; Russell 1983; Seader, Henley & Roper 3e secs. 10.4-10.5) for the
+        non-reboiled steam-stripped main fractionator. A Newton inner loop is
+        used (not successive substitution), because the strong temperature-flow
+        coupling of a multi-draw / pumparound crude tower drives every
+        substitution-based update into a coupled limit cycle.
+
+        * **Outer loop** — at the current (T, x, y) profile, evaluate the
+          rigorous property package once per stage and fit per-stage *inside*
+          models held constant through the inner loop:
+            - a base K-value ``ln Kb_j = a_j - b_j / T_j`` (Clausius-Clapeyron
+              form; ``b_j`` from a finite-difference slope of the
+              mole-fraction-weighted log-mean K), and relative volatilities
+              ``alpha_i,j = K_i,j / Kb_j`` (frozen inside);
+            - a sensible-basis enthalpy model linear in T,
+              ``hLs_j(T) = hLs_j + cpL_j (T - T0_j)`` and likewise for the
+              vapor, with each molar enthalpy's composition-weighted
+              formation-enthalpy offset (``hf_c``) subtracted so the open-steam
+              bottom stays well-conditioned (the per-mole latent pivot inverts
+              sign when a heavy liquid descends past a much lighter vapour).
+        * **Inner loop** — a damped Newton on the ``2N-1`` tear variables (the
+          stage temperatures ``T_0..T_{N-1}`` and vapour flows ``V_1..V_{N-1}``;
+          the liquid traffic follows from the total balance
+          ``L_j = V_{j+1} + A_j``). The residuals are the ``N`` per-stage
+          summation defects (``sum_i K_i,j x_i,j - 1``, with x from the
+          component balances) and the ``N-1`` interior/bottom energy balances
+          (scaled by a *fixed* reference enthalpy flow, so the Newton cannot
+          drive the traffic to a spurious infinite-recycle root). The step is a
+          truncated-SVD (regularized) Newton step inside a trust region, with a
+          sum-of-squares backtracking line search — a Newton step inverts the
+          temperature-flow coupling that successive substitution cannot. The
+          Jacobian is cheap (finite differences over the frozen models, no
+          rigorous calls).
+
+        The single specification is the distillate rate (the reflux ratio is an
+        output); the condenser duty absorbs the stage-1 balance downstream.
+
+        **Scope / status.** This converges narrow-to-medium wide-boiling
+        steam-stripped towers and on the light crude tower reproduces the
+        bubble-point method's solution to machine precision (a cross-method
+        validation; see ``tests/test_m15_crude_column``). It does NOT yet
+        converge a *full resid-bearing* crude tower: at an extreme wide-boiling
+        side-draw stage the lumped summation residual loses its sensitivity to
+        the stage temperature (the direct K-sensitivity is cancelled by the
+        liquid-composition coupling), so the reduced (T, V) Jacobian is
+        rank-deficient there and the stage cannot be driven to equilibrium. The
+        robust completion is the full Naphtali-Sandholm formulation with
+        per-component flow variables (equilibrium enforced per component), which
+        does not have this degeneracy — tracked as the next step.
+
+        Returns ``(T, x, y, K, L, V, hL, hV, n_outer, dT, dF, n_prop,
+        converged)`` with ``hL``/``hV`` the rigorous (formation-inclusive)
+        molar enthalpies at the converged profile."""
+        t_lo, t_hi = t_bounds
+
+        # -- component material balances (Thomas per component) -----------------
+        # Returns the normalized stage liquids and the per-stage summation
+        # defect ``s_j = sum_i x_i,j`` (the unknowns solved here are the liquid
+        # mole fractions; with consistent flows they sum to 1, so the defect is
+        # the sum-rates correction factor for the liquid traffic).
+        def component_balances(Lf, Vf, K):
+            cols: dict[str, list[float]] = {}
+            for c in active:
+                a_ = [0.0] + [Lf[j - 1] for j in range(1, N)]
+                b_ = [-(Lf[0] + u0 + v0 * K[0][c])] + \
+                     [-(Lf[j] + u[j] + (Vf[j] + w[j]) * K[j][c])
+                      for j in range(1, N)]
+                cc = [Vf[j + 1] * K[j + 1][c] for j in range(N - 1)] + [0.0]
+                d_ = [-fz_stage[j].get(c, 0.0) for j in range(N)]
+                cols[c] = _thomas(a_, b_, cc, d_)
+            xs: list[dict[str, float]] = []
+            defect: list[float] = []
+            ok = True
+            for j in range(N):
+                row = {c: max(cols[c][j], _X_FLOOR) for c in active}
+                tot = sum(row.values())
+                if tot <= 0.0:
+                    ok = False
+                defect.append(tot)
+                xs.append({c: vv / tot for c, vv in row.items()})
+            return xs, defect, ok
+
+        def hf_mix(row):
+            return sum(vv * hf_c.get(c, 0.0) for c, vv in row.items())
+
+        def kb_of(a_j, b_j, T_j):
+            return math.exp(min(max(a_j - b_j / T_j, -50.0), 50.0))
+
+        n_prop = 0
+        converged = False
+        dT = dF = math.inf
+        Kb = [1.0] * N
+        it = 0
+        for it in range(1, max_iter + 1):
+            ramp = min(1.0, it / _IO_DUTY_RAMP) if duties else 1.0
+            fh_eff = [fh + ramp * qd for fh, qd in zip(fh_stage, Q_stage)]
+            fhs = [fe - ff for fe, ff in zip(fh_eff, fh_form)]
+
+            # -- OUTER: rigorous evaluation + inside-model fit at (T, x) --------
+            alpha: list[dict[str, float]] = []
+            a_par = [0.0] * N
+            b_par = [0.0] * N
+            T0 = list(T)
+            hLs0 = [0.0] * N
+            hVs0 = [0.0] * N
+            cpL = [0.0] * N
+            cpV = [0.0] * N
+            for j in range(N):
+                # settle the equilibrium vapor and the rigorous K at (T_j, x_j)
+                yj = dict(y[j])
+                Kj = y[j]
+                for _ in range(3):
+                    Kj = pp.k_values(T[j], P_j[j], x[j], yj)
+                    s = sum(Kj[c] * x[j][c] for c in active)
+                    yj = {c: max(Kj[c] * x[j][c], _X_FLOOR) / s for c in active}
+                y[j] = yj
+                Kj2 = pp.k_values(T[j] + _IO_DH_DT, P_j[j], x[j], yj)
+                n_prop += 4
+                lnkb1 = sum(x[j][c] * math.log(Kj[c]) for c in active)
+                lnkb2 = sum(x[j][c] * math.log(Kj2[c]) for c in active)
+                inv_diff = 1.0 / T[j] - 1.0 / (T[j] + _IO_DH_DT)
+                bj = (lnkb2 - lnkb1) / inv_diff if inv_diff != 0.0 else 0.0
+                bj = (min(max(bj, _IO_B_LO), _IO_B_HI) if bj > 0.0
+                      else _IO_B_DEFAULT)
+                kb = math.exp(lnkb1)
+                a_par[j] = lnkb1 + bj / T[j]
+                b_par[j] = bj
+                Kb[j] = kb
+                alpha.append({c: Kj[c] / kb for c in active})
+                # sensible-basis enthalpy model (formation offset subtracted)
+                hl0 = pp.enthalpy_liquid(T[j], P_j[j], x[j]) - hf_mix(x[j])
+                hv0 = pp.enthalpy_vapor(T[j], P_j[j], yj) - hf_mix(yj)
+                hl1 = (pp.enthalpy_liquid(T[j] + _IO_DH_DT, P_j[j], x[j])
+                       - hf_mix(x[j]))
+                hv1 = (pp.enthalpy_vapor(T[j] + _IO_DH_DT, P_j[j], yj)
+                       - hf_mix(yj))
+                n_prop += 4
+                hLs0[j] = hl0
+                hVs0[j] = hv0
+                cpL[j] = (hl1 - hl0) / _IO_DH_DT
+                cpV[j] = (hv1 - hv0) / _IO_DH_DT
+
+            # -- INNER: damped Newton on the (T, V) tear variables -------------
+            # Frozen alpha / base-K / enthalpy models. The 2N-1 inner unknowns
+            # are the stage temperatures T_0..T_{N-1} and the vapour flows
+            # V_1..V_{N-1} (V_0 = the condenser product is fixed; the liquid
+            # traffic follows from the total balance L_j = V_{j+1} + A_j). The
+            # 2N-1 residuals are the per-stage summation defects
+            # (sum_i K_i,j x_i,j - 1, with x from the component balances) and
+            # the interior/bottom-stage energy balances (sensible basis). A
+            # Newton step inverts the full temperature-flow coupling that
+            # successive substitution cannot, which is what tames the
+            # wide-boiling, multi-draw crude tower. The Jacobian is cheap
+            # (finite differences over the frozen models, no rigorous calls).
+            nv = 2 * N - 1
+            # FIXED reference enthalpy flow for the energy residuals — a typical
+            # molar enthalpy times the total feed. Scaling each energy balance
+            # by a fixed reference (not a traffic-dependent one) is essential:
+            # a per-stage |L*h| scale would make the energy residual vanish at
+            # infinite traffic (huge cancelling terms over a huge scale), and
+            # the Newton would happily run the traffic away to that spurious
+            # minimum. With a fixed scale, high traffic is properly penalised.
+            e_ref = max(max(abs(hLs0[j]) for j in range(N)),
+                        max(abs(hVs0[j]) for j in range(N)),
+                        1.0) * max(F_ge[0], 1.0)
+
+            def io_resid(vrs):
+                Tv = [min(max(float(vrs[j]), t_lo), t_hi) for j in range(N)]
+                Vv = [v0] + [max(float(vrs[N + j - 1]), floor)
+                             for j in range(1, N)]
+                Lv = [max(Vv[j + 1] + A[j], floor)
+                      for j in range(N - 1)] + [B]
+                Kbv = [kb_of(a_par[j], b_par[j], Tv[j]) for j in range(N)]
+                Km = [{c: alpha[j][c] * Kbv[j] for c in active}
+                      for j in range(N)]
+                xv, _defect, ok = component_balances(Lv, Vv, Km)
+                if not ok:
+                    return None, None, None, None, False
+                hLs = [hLs0[j] + cpL[j] * (Tv[j] - T0[j]) for j in range(N)]
+                hVs = [hVs0[j] + cpV[j] * (Tv[j] - T0[j]) for j in range(N)]
+                r = np.empty(nv)
+                for j in range(N):                          # summation defects
+                    r[j] = sum(Km[j][c] * xv[j][c] for c in active) - 1.0
+                for k, j in enumerate(range(1, N)):         # energy balances
+                    ein = (Lv[j - 1] * hLs[j - 1]
+                           + (Vv[j + 1] * hVs[j + 1] if j < N - 1 else 0.0)
+                           + fhs[j])
+                    eout = (Lv[j] + u[j]) * hLs[j] + (Vv[j] + w[j]) * hVs[j]
+                    r[N + k] = (ein - eout) / e_ref
+                return r, Tv, Vv, xv, True
+
+            # Trust region around the outer-fit point: the inside models are
+            # only valid near (T, V) where they were fitted, so the inner Newton
+            # is confined to a box (+-dT in temperature, a bounded ratio in
+            # vapour flow). This globalizes the Newton — it cannot run away to a
+            # spurious high-traffic root — while the outer loop walks the box in.
+            lo = np.empty(nv)
+            hi = np.empty(nv)
+            for j in range(N):
+                lo[j] = max(t_lo, T[j] - _IO_TR_DT)
+                hi[j] = min(t_hi, T[j] + _IO_TR_DT)
+            for j in range(1, N):
+                lo[N + j - 1] = max(floor, V[j] / _IO_TR_VR)
+                hi[N + j - 1] = max(V[j] * _IO_TR_VR, floor * 100.0)
+            vrs = np.array([T[j] for j in range(N)]
+                           + [V[j] for j in range(1, N)], dtype=float)
+            vrs = np.minimum(np.maximum(vrs, lo), hi)
+            r, Tv, Vv, x_in, ok = io_resid(vrs)
+            inner_ok = ok
+            inner_used = 0
+            rin = float(np.max(np.abs(r))) if ok else math.inf
+            for _nit in range(_IO_NEWTON_MAX):
+                if not inner_ok:
+                    break
+                inner_used = _nit + 1
+                rin = float(np.max(np.abs(r)))
+                if rin < _IO_NEWTON_TOL:
+                    break
+                rss = float(r @ r)                  # ||R||^2 merit
+                jac = np.empty((nv, nv))
+                for k in range(nv):
+                    dv = (_IO_DT_PERT if k < N
+                          else max(_IO_DV_FRAC * abs(vrs[k]), _IO_DV_MIN))
+                    vp = vrs.copy()
+                    vp[k] += dv
+                    rp, _, _, _, okp = io_resid(vp)
+                    jac[:, k] = (rp - r) / dv if okp else 0.0
+                # Truncated-SVD (regularized) Newton step: lstsq drops the
+                # singular directions of the finite-difference Jacobian (an
+                # insensitive stage makes J rank-deficient and a plain solve()
+                # then throws an unbounded step into that null space, which the
+                # line search rejects and the iteration stalls). The min-norm
+                # least-squares step stays bounded and descends. Backtracking
+                # on the sum-of-squares merit globalizes it.
+                delta = np.linalg.lstsq(jac, -r, rcond=_IO_RCOND)[0]
+                step = 1.0
+                accepted = False
+                for _ls in range(_IO_LS_MAX):
+                    vt = np.minimum(np.maximum(vrs + step * delta, lo), hi)
+                    rt, Tt, Vt, xt, okt = io_resid(vt)
+                    if okt and float(rt @ rt) < (1.0 - 1e-4 * step) * rss:
+                        vrs, r, Tv, Vv, x_in = vt, rt, Tt, Vt, xt
+                        rin = float(np.max(np.abs(r)))
+                        accepted = True
+                        break
+                    step *= 0.5
+                if not accepted:
+                    break
+            if not inner_ok:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: inside_out inner balances "
+                    f"left a stage with no liquid (outer pass {it}); the "
+                    f"column is infeasible as specified"
+                )
+            T_in, V_in = list(Tv), list(Vv)
+            L_in = [max(V_in[j + 1] + A[j], floor)
+                    for j in range(N - 1)] + [B]
+            Kb = [kb_of(a_par[j], b_par[j], T_in[j]) for j in range(N)]
+            y_in = []
+            for j in range(N):
+                yr = {c: max(alpha[j][c] * Kb[j] * x_in[j][c], _X_FLOOR)
+                      for c in active}
+                tot = sum(yr.values())
+                y_in.append({c: vv / tot for c, vv in yr.items()})
+
+            # -- accept the inner (Newton) solution; outer SS over the rigorous
+            # model refit. The Newton converges the frozen models exactly, so
+            # the inner solution is accepted in full; the outer move is the
+            # change between successive rigorous fits.
+            dT = max(abs(T_in[j] - T[j]) for j in range(N))
+            dF = max(abs(L_in[j] - L[j]) / max(L_in[j], L[j], floor * 10.0)
+                     for j in range(N))
+            rin = float(np.max(np.abs(r)))
+            T, V, L, x, y = T_in, V_in, L_in, x_in, y_in
+
+            if getattr(self, "_io_debug", False):
+                km = int(np.argmax(np.abs(r)))
+                rkind = (f"sum@{km}" if km < N else f"egy@{km - N + 1}")
+                print(f"  io outer={it:3d} dT={dT:.2e} dF={dF:.2e} "
+                      f"newton={inner_used}/{rin:.1e}({rkind}) "
+                      f"T0={T[0]:.0f} Tbot={T[-1]:.0f} R={L[0]/max(V[1],1e-9):.2f} "
+                      f"V1={V[1]:.0f} Vbot={V[-1]:.0f}")
+
+            if (ramp >= 1.0 and rin < _IO_NEWTON_ACCEPT
+                    and dT < _IO_OUTER_TOL_T and dF < _IO_OUTER_TOL_F):
+                converged = True
+                break
+
+        # rigorous (formation-inclusive) enthalpies + K at the converged state
+        hL = [pp.enthalpy_liquid(T[j], P_j[j], x[j]) for j in range(N)]
+        hV = [pp.enthalpy_vapor(T[j], P_j[j], y[j]) for j in range(N)]
+        n_prop += 2 * N
+        K_final = [{c: alpha[j][c] * Kb[j] for c in active} for j in range(N)]
+        return (T, x, y, K_final, L, V, hL, hV, it, dT, dF, n_prop, converged)
+
+    # -- Naphtali-Sandholm simultaneous correction -------------------------------
+    def _solve_ns(self, pp, N: int, P_j: list[float], active: list[str],
+                  fz_stage: list[dict[str, float]], fh_stage: list[float],
+                  u: list[float], w: list[float], Q_stage: list[float],
+                  D: float, partial: bool,
+                  T: list[float], x: list[dict[str, float]],
+                  y: list[dict[str, float]], L: list[float], V: list[float],
+                  t_bounds: tuple[float, float], max_iter: int):
+        """Naphtali & Sandholm (1971) simultaneous-correction method for the
+        non-reboiled, partial-condenser steam-stripped main fractionator —
+        Seader, Henley & Roper 3e sec. 10.4. ALL the MESH equations are solved
+        at once by a damped Newton, with per-component flow variables, so the
+        method has no division-of-labour assumption and (unlike the reduced
+        inside-out Newton) no draw-stage degeneracy: it converges the full
+        resid-bearing crude atmospheric tower.
+
+        Variables (``N(2C+1)`` of them): the component liquid flows ``l_i,j``,
+        the component vapour flows ``v_i,j`` and the temperature ``T_j`` of each
+        stage. The stage totals and mole fractions are ``L_j = sum_i l_i,j``,
+        ``V_j = sum_i v_i,j``, ``x_i,j = l_i,j / L_j``, ``y_i,j = v_i,j / V_j``.
+
+        Residuals (``N(2C+1)``):
+          * **M** (component material, per stage & component) —
+            ``l_i,j(1+U_j/L_j) + v_i,j(1+W_j/V_j) - l_i,j-1 - v_i,j+1 - f_i,j``;
+          * **E** (equilibrium, per stage & component) —
+            ``v_i,j - K_i,j (V_j/L_j) l_i,j`` (equilibrium enforced *per
+            component* — this is what removes the lumped-summation degeneracy);
+          * **H** (energy, per interior/bottom stage) — the stage enthalpy
+            balance, scaled by a fixed reference enthalpy flow; the condenser
+            energy balance is replaced by the **distillate-rate specification**
+            ``sum_i v_i,0 = D`` (its duty is recovered downstream).
+
+        The Jacobian is built by finite differences with per-stage property
+        caching (perturbing a stage's variables re-evaluates only that stage's
+        rigorous K and enthalpies, since the residuals couple only to the
+        nearest neighbours). A bounded, line-searched Newton step keeps every
+        component flow positive and the temperatures in range. Returns
+        ``(T, x, y, K, L, V, hL, hV, n_iter, resid, n_prop, converged)``.
+        """
+        t_lo, t_hi = t_bounds
+        C = len(active)
+        span = 2 * C + 1
+        nv = N * span
+        P = np.array(P_j, dtype=float)
+        Fcomp = np.zeros((N, C))
+        for j in range(N):
+            for c, val in fz_stage[j].items():
+                if c in active:
+                    Fcomp[j, active.index(c)] = val
+        Fh = np.array(fh_stage, dtype=float)
+        U = np.array(u, dtype=float)
+        W = np.array(w, dtype=float)
+        Q = np.array(Q_stage, dtype=float)
+        Ftot = max(float(Fcomp.sum()), 1.0)
+
+        # -- initial NS variables from the seed profile ------------------------
+        lmat = np.full((N, C), _NS_FLOOR)
+        vmat = np.full((N, C), _NS_FLOOR)
+        for j in range(N):
+            for i, c in enumerate(active):
+                lmat[j, i] = max(L[j] * x[j].get(c, 0.0), _NS_FLOOR)
+                vmat[j, i] = max(V[j] * y[j].get(c, 0.0), _NS_FLOOR)
+        Tv = np.array(T, dtype=float)
+        n_prop = 0
+
+        def stage_eval(j, lj, vj, Tj):
+            nonlocal n_prop
+            Lj = float(lj.sum())
+            Vj = float(vj.sum())
+            xj = {active[i]: lj[i] / Lj for i in range(C)}
+            yj = {active[i]: vj[i] / Vj for i in range(C)}
+            Kd = pp.k_values(Tj, P[j], xj, yj)
+            Karr = np.array([Kd[active[i]] for i in range(C)])
+            hLj = pp.enthalpy_liquid(Tj, P[j], xj)
+            hVj = pp.enthalpy_vapor(Tj, P[j], yj)
+            n_prop += 3
+            return Lj, Vj, Karr, hLj, hVj
+
+        # property cache over all stages
+        Lc = np.empty(N)
+        Vc = np.empty(N)
+        Kc = np.empty((N, C))
+        hLc = np.empty(N)
+        hVc = np.empty(N)
+
+        def refresh_all():
+            for j in range(N):
+                Lc[j], Vc[j], Kc[j], hLc[j], hVc[j] = stage_eval(
+                    j, lmat[j], vmat[j], Tv[j])
+
+        refresh_all()
+        e_ref = max(float(np.abs(hLc).max()), float(np.abs(hVc).max()),
+                    1.0) * Ftot
+
+        def residuals(lm, vm, Lq, Vq, Kq, hLq, hVq):
+            R = np.empty(nv)
+            for j in range(N):
+                base = j * span
+                for i in range(C):
+                    out_l = lm[j, i] * (1.0 + U[j] / Lq[j])
+                    out_v = vm[j, i] * (1.0 + W[j] / Vq[j])
+                    in_l = lm[j - 1, i] if j > 0 else 0.0
+                    in_v = vm[j + 1, i] if j < N - 1 else 0.0
+                    R[base + i] = (out_l + out_v - in_l - in_v
+                                   - Fcomp[j, i]) / Ftot
+                    R[base + C + i] = (vm[j, i]
+                                       - Kq[j, i] * (Vq[j] / Lq[j]) * lm[j, i]
+                                       ) / Ftot
+                if j == 0:
+                    R[base + 2 * C] = (Vq[0] - D) / D
+                else:
+                    in_l = Lq[j - 1] * hLq[j - 1]
+                    in_v = Vq[j + 1] * hVq[j + 1] if j < N - 1 else 0.0
+                    out_l = (Lq[j] + U[j]) * hLq[j]
+                    out_v = (Vq[j] + W[j]) * hVq[j]
+                    R[base + 2 * C] = (out_l + out_v - in_l - in_v
+                                       - Fh[j] - Q[j]) / e_ref
+            return R
+
+        def build_jac():
+            jac = np.empty((nv, nv))
+            for j in range(N):
+                for kind in range(span):
+                    col = j * span + kind
+                    lm, vm, tj = lmat, vmat, Tv[j]
+                    if kind < C:                       # perturb l_{i,j}
+                        dk = max(_NS_DL_FRAC * lmat[j, kind], _NS_DL_MIN)
+                        lm = lmat.copy()
+                        lm[j, kind] += dk
+                    elif kind < 2 * C:                 # perturb v_{i,j}
+                        i = kind - C
+                        dk = max(_NS_DL_FRAC * vmat[j, i], _NS_DL_MIN)
+                        vm = vmat.copy()
+                        vm[j, i] += dk
+                    else:                              # perturb T_j
+                        dk = _NS_DT
+                        tj = Tv[j] + dk
+                    Lj, Vj, Kj, hLj, hVj = stage_eval(j, lm[j], vm[j], tj)
+                    Lc2, Vc2 = Lc.copy(), Vc.copy()
+                    Kc2, hLc2, hVc2 = Kc.copy(), hLc.copy(), hVc.copy()
+                    Lc2[j], Vc2[j], Kc2[j] = Lj, Vj, Kj
+                    hLc2[j], hVc2[j] = hLj, hVj
+                    R1 = residuals(lm, vm, Lc2, Vc2, Kc2, hLc2, hVc2)
+                    jac[:, col] = (R1 - R0) / dk
+            return jac
+
+        R0 = residuals(lmat, vmat, Lc, Vc, Kc, hLc, hVc)
+        converged = False
+        it = 0
+        rnorm = float(np.max(np.abs(R0)))
+        # modified Newton: the finite-difference Jacobian is the dominant cost,
+        # so reuse it through the slow crawl (where the iterate barely moves)
+        # and rebuild it only periodically or once near the solution, where a
+        # fresh Jacobian recovers the quadratic endgame.
+        jac = None
+        since = 0
+        for it in range(1, max_iter + 1):
+            rnorm = float(np.max(np.abs(R0)))
+            if rnorm < _NS_TOL:
+                converged = True
+                break
+            rss = float(R0 @ R0)
+            if (jac is None or since >= _NS_JAC_REUSE
+                    or rnorm < _NS_JAC_FRESH):
+                jac = build_jac()
+                fresh = True
+                since = 0
+            else:
+                fresh = False
+                since += 1
+            try:
+                delta = np.linalg.solve(jac, -R0)
+            except np.linalg.LinAlgError:
+                delta = np.linalg.lstsq(jac, -R0, rcond=_IO_RCOND)[0]
+
+            # -- bounded, line-searched Newton step ----------------------------
+            # cap the step so no SIGNIFICANT component flow drops below
+            # _NS_TRUST of its value in one move (Naphtali-Sandholm
+            # fractional-step rule). Trace flows near the floor are excluded —
+            # they are protected by the floor in the update and would otherwise
+            # collapse the whole step to nothing.
+            smax = 1.0
+            for j in range(N):
+                thr_l = _NS_STEP_REL * Lc[j]
+                thr_v = _NS_STEP_REL * Vc[j]
+                for kind in range(2 * C):
+                    col = j * span + kind
+                    if kind < C:
+                        cur, thr = lmat[j, kind], thr_l
+                    else:
+                        cur, thr = vmat[j, kind - C], thr_v
+                    d = delta[col]
+                    if d < 0.0 and cur > thr:
+                        smax = min(smax, -_NS_TRUST * cur / d)
+            step = min(1.0, smax)
+            accepted = False
+            for _ls in range(_NS_LS_MAX):
+                lm = lmat.copy()
+                vm = vmat.copy()
+                tt = Tv.copy()
+                for j in range(N):
+                    b = j * span
+                    for i in range(C):
+                        lm[j, i] = max(lmat[j, i] + step * delta[b + i],
+                                       _NS_FLOOR)
+                        vm[j, i] = max(vmat[j, i] + step * delta[b + C + i],
+                                       _NS_FLOOR)
+                    tt[j] = min(max(Tv[j] + step * delta[b + 2 * C],
+                                    t_lo), t_hi)
+                for j in range(N):
+                    Lc[j], Vc[j], Kc[j], hLc[j], hVc[j] = stage_eval(
+                        j, lm[j], vm[j], tt[j])
+                Rt = residuals(lm, vm, Lc, Vc, Kc, hLc, hVc)
+                if float(Rt @ Rt) < (1.0 - 1e-4 * step) * rss:
+                    lmat, vmat, Tv, R0 = lm, vm, tt, Rt
+                    accepted = True
+                    break
+                step *= 0.5
+            if getattr(self, "_ns_debug", False):
+                km = int(np.argmax(np.abs(R0)))
+                jj, kk = km // span, km % span
+                rk = "M" if kk < C else "E" if kk < 2 * C else "G"
+                print(f"  ns it={it:3d} |R|={rnorm:.2e}({rk}@{jj}) "
+                      f"step={step:.2e} T0={Tv[0]:.0f} Tbot={Tv[-1]:.0f} "
+                      f"R={Lc[0] / max(Vc[1], 1e-9):.2f} V1={Vc[1]:.0f} "
+                      f"Vbot={Vc[-1]:.0f}")
+            if not accepted:
+                # restore the cache to the (unchanged) accepted state
+                refresh_all()
+                if not fresh:
+                    # a stale Jacobian failed — force a rebuild and retry
+                    # rather than declaring non-convergence
+                    since = _NS_JAC_REUSE
+                    continue
+                break
+
+        # -- assemble the converged profile ------------------------------------
+        Lout = [float(Lc[j]) for j in range(N)]
+        Vout = [float(Vc[j]) for j in range(N)]
+        xout = [{active[i]: float(lmat[j, i] / Lc[j]) for i in range(C)}
+                for j in range(N)]
+        yout = [{active[i]: float(vmat[j, i] / Vc[j]) for i in range(C)}
+                for j in range(N)]
+        Kout = [{active[i]: float(Kc[j, i]) for i in range(C)}
+                for j in range(N)]
+        Tout = [float(Tv[j]) for j in range(N)]
+        hLout = [float(hLc[j]) for j in range(N)]
+        hVout = [float(hVc[j]) for j in range(N)]
+        return (Tout, xout, yout, Kout, Lout, Vout, hLout, hVout,
+                it, rnorm, n_prop, converged)
 
     def _initial_sr_profiles(self, pp, N: int, P_j: list[float],
                              active: list[str], f: dict[str, float],
