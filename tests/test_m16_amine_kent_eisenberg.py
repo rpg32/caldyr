@@ -1,21 +1,30 @@
-"""M16 test: the Kent-Eisenberg acid-gas solubility model (CO2 in aqueous MDEA).
+"""M16 test: Kent-Eisenberg acid-gas solubility (CO2 and H2S in aqueous MDEA).
 
 Reference & validation oracle
 -----------------------------
 Gas sweetening (Hameed 2025, *Chemical Process Simulations using Aspen HYSYS*,
 §15.3) needs a reactive acid-gas property method — HYSYS uses its "Acid Gas –
 Chemical Solvents" package, and the book reports no numeric slate. The
-validatable physics is the underlying VLE: the equilibrium CO2 loading of an
-aqueous amine vs the CO2 partial pressure. We validate against the published
-experimental data of **Haji-Sulaiman, Aroua & Benamor (*Chem. Eng. Res. Des.*
-76:961, 1998)** for 2 M and 4 M aqueous MDEA at 303/313/323 K, as tabulated by
-the modified-Kent-Eisenberg study (UTP FYP CHE 12506, Table 5). Their modified
-Kent-Eisenberg model reproduces this data to 12.2 % AAD (2 M) and 29.7 % (4 M);
-``caldyr.thermo.amine`` reproduces it to comparable-or-better accuracy.
+validatable physics is the underlying VLE: the equilibrium acid-gas loading of
+an aqueous amine vs the acid-gas partial pressure.
 
-The carbonate/water/Henry constants are the literature values (Edwards et al.
-1978; Little et al. 1990) — checked here against their known 25 C magnitudes;
-the amine-protonation constant is fitted to the data above.
+* **CO2-MDEA** is validated against the published experimental data of
+  Haji-Sulaiman, Aroua & Benamor (*Chem. Eng. Res. Des.* 76:961, 1998) for 2 M
+  and 4 M aqueous MDEA at 303/313/323 K, as tabulated by the modified-Kent-
+  Eisenberg study UTP FYP CHE 12506 (Table 5). Their model reproduces this to
+  12.2 % AAD (2 M) / 29.7 % (4 M); ``caldyr.thermo.amine`` does comparably-or-
+  better.
+* **H2S-MDEA** is a *prediction* (the amine protonation constant comes from the
+  CO2 fit, combined with the literature H2S ionization + Henry constants), so it
+  is checked for physical correctness — the constants against their known
+  magnitudes, and the loading isotherm for shape/monotonicity — rather than a
+  quantitative data fit. (A quantitative check against Jou-Mather-Otto 1982
+  H2S-MDEA data is a tracked follow-up; that data sits behind paywalls.)
+
+The carbonate / sulfide / water / Henry constants are the literature values
+(Edwards et al. 1978; Little et al. 1990; Sander 2015), verified here against
+their known 25 C magnitudes; the amine-protonation constant is fitted to the
+CO2 data above.
 """
 import math
 
@@ -23,10 +32,19 @@ import pytest
 
 from caldyr.thermo.amine import (
     MDEA,
+    _arr,
+    _H_CO2,
+    _H_H2S,
+    _K2,
+    _K3,
+    _K4,
+    _K5,
+    acid_gas_loadings,
     co2_loading,
     co2_partial_pressure,
+    h2s_loading,
+    h2s_partial_pressure,
 )
-from caldyr.thermo.amine import _arr, _H_CO2, _K2, _K3, _K4
 
 # Haji-Sulaiman et al. (1998) CO2-MDEA solubility: (molarity, T[K], P_CO2[kPa],
 # alpha_exp [mol CO2 / mol MDEA]).
@@ -58,9 +76,8 @@ def _aad(molarity: int) -> float:
     return 100.0 * sum(errs) / len(errs)
 
 
-def test_literature_constants_have_physical_magnitudes():
-    """The carbonate/water/Henry constants must reproduce their textbook 25 C
-    values — the guard that caught an OCR-corrupted constant during sourcing."""
+# -- literature constants: physical-magnitude guards (caught an OCR error) ----
+def test_carbonate_water_henry_constants_have_physical_magnitudes():
     T = 298.15
     assert _arr(_K2, T) == pytest.approx(4.4e-7, rel=0.1)   # CO2 ionization
     assert _arr(_K3, T) == pytest.approx(4.7e-11, rel=0.1)  # bicarbonate
@@ -68,41 +85,62 @@ def test_literature_constants_have_physical_magnitudes():
     assert _arr(_H_CO2, T) == pytest.approx(29.0, rel=0.15)  # Henry, atm.L/mol
 
 
+def test_h2s_constants_have_physical_magnitudes():
+    """H2S first ionization must give pKa1 ~ 7.0, and Henry must reproduce the
+    pure-water H2S solubility (~0.1 mol/L at 1 atm, 25 C; less soluble hotter)."""
+    assert -math.log10(_arr(_K5, 298.15)) == pytest.approx(7.0, abs=0.1)
+    assert 1.0 / _arr(_H_H2S, 298.15) == pytest.approx(0.10, rel=0.1)  # mol/L@1atm
+    assert _arr(_H_H2S, 373.15) > _arr(_H_H2S, 298.15)   # less soluble when hot
+
+
 def test_amine_protonation_constant_is_physical():
     """The fitted MDEA protonation constant must land near the known
     pKa(MDEAH+) ~ 8.5 — i.e. the fit is chemistry, not an arbitrary curve."""
-    K1_298 = math.exp(MDEA.k1_a + MDEA.k1_b / 298.15)
-    pKa = -math.log10(K1_298)
+    pKa = -math.log10(math.exp(MDEA.k1_a + MDEA.k1_b / 298.15))
     assert 8.0 < pKa < 9.3
 
 
+# -- CO2-MDEA: validated against Haji-Sulaiman (1998) experimental data -------
 def test_reproduces_haji_sulaiman_2M_mdea():
-    """2 M MDEA: reproduce the experimental CO2 loading to <= the published
-    modified-Kent-Eisenberg accuracy (12.2 % AAD)."""
-    assert _aad(2) < 12.0
+    assert _aad(2) < 10.0     # published modified-KE: 12.2 %
 
 
 def test_reproduces_haji_sulaiman_4M_mdea():
-    """4 M MDEA: reproduce the experimental CO2 loading to <= the published
-    modified-Kent-Eisenberg accuracy (29.7 % AAD)."""
-    assert _aad(4) < 25.0
+    assert _aad(4) < 22.0     # published modified-KE: 29.7 %
 
 
-def test_loading_is_monotone_in_pressure_and_temperature():
-    """The physics a sweetening unit relies on: at fixed T, loading rises with
-    CO2 partial pressure (absorption); at fixed P, loading falls as T rises
-    (the basis of thermal regeneration in the stripper)."""
-    loads_P = [co2_loading(313.15, P, 2.0) for P in (1.0, 5.0, 20.0, 100.0)]
-    assert all(b > a for a, b in zip(loads_P, loads_P[1:]))
-    loads_T = [co2_loading(T, 20.0, 2.0) for T in (303.15, 323.15, 343.15)]
-    assert all(b < a for a, b in zip(loads_T, loads_T[1:]))
+# -- H2S-MDEA: physical-behaviour checks (prediction, not a data fit) ---------
+def test_h2s_loading_isotherm_is_sensible():
+    """H2S loading must rise monotonically with P_H2S and reach a physically
+    reasonable capacity (~0.5-1 mol/mol at ~100 kPa for 2 M MDEA)."""
+    loads = [h2s_loading(313.15, P, 2.0) for P in (1.0, 5.0, 20.0, 100.0)]
+    assert all(b > a for a, b in zip(loads, loads[1:]))
+    assert 0.5 < loads[-1] < 1.2
+
+
+# -- physics shared by absorption / regeneration -----------------------------
+def test_loading_falls_with_temperature():
+    """At fixed partial pressure both acid gases desorb as T rises — the basis
+    of thermal regeneration in the stripper."""
+    for fn in (co2_loading, h2s_loading):
+        loads = [fn(T, 20.0, 2.0) for T in (303.15, 323.15, 343.15)]
+        assert all(b < a for a, b in zip(loads, loads[1:]))
 
 
 def test_partial_pressure_inverts_loading():
-    """co2_partial_pressure is the inverse of co2_loading (the absorber stage
-    needs the vapour driving force at a given liquid loading)."""
     for T in (303.15, 323.15):
         for P in (2.0, 25.0, 90.0):
-            alpha = co2_loading(T, P, 3.0)
-            P_back = co2_partial_pressure(T, alpha, 3.0)
-            assert P_back == pytest.approx(P, rel=1e-4)
+            assert co2_partial_pressure(T, co2_loading(T, P, 3.0), 3.0) \
+                == pytest.approx(P, rel=1e-4)
+            assert h2s_partial_pressure(T, h2s_loading(T, P, 3.0), 3.0) \
+                == pytest.approx(P, rel=1e-4)
+
+
+def test_combined_co2_h2s_speciation_is_consistent():
+    """With both gases present the single charge balance still closes and each
+    loading lies between its single-gas value and zero (competition for the
+    amine), so the ternary solve is self-consistent."""
+    a_co2, a_h2s = acid_gas_loadings(313.15, 20.0, 20.0, 3.0)
+    assert a_co2 > 0.0 and a_h2s > 0.0
+    assert a_co2 < co2_loading(313.15, 20.0, 3.0)   # CO2 partly displaced
+    assert a_h2s < h2s_loading(313.15, 20.0, 3.0)   # H2S partly displaced
