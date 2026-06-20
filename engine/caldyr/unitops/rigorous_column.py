@@ -2075,10 +2075,27 @@ class RigorousColumn(UnitOp):
             return J
 
         def cap(delta):
-            # fractional-step cap (Naphtali-Sandholm): no SIGNIFICANT component
-            # flow drops below _NS_TRUST of its value in one step. Trace flows
-            # near the floor are excluded (protected by the floor) so they
-            # cannot collapse the step to nothing.
+            # Fractional-step cap (Naphtali-Sandholm): the global step is scaled
+            # so no SIGNIFICANT component flow that merely shrinks drops below
+            # _NS_TRUST of its value in one step. Two kinds of flows are
+            # deliberately excluded from setting that scale, so neither throttles
+            # the whole step:
+            #   * trace flows (cur <= thr) -- already protected by the floor;
+            #   * flows the Newton step drives clean THROUGH zero (cur + dd <= 0)
+            #     -- a component collapsing out of a stage (e.g. a heavy pseudo-
+            #     component carried too high up the column by the warm start).
+            # The second exclusion is the fix for the wide-boiling resid tower.
+            # Without it, ONE such collapsing flow (its Newton step is hugely
+            # negative relative to its current value) drives the global scale to
+            # ~1e-3, freezing EVERY variable into a ~16-iteration crawl while
+            # that flow bleeds down a factor of two per step. The crawl is a
+            # marginal, near-stationary phase: the build it was tuned on breaks
+            # out of it by iter ~34 and finishes, but it is fragile to small
+            # numerical differences and stalls there indefinitely on others
+            # (the CI failure: a flat scaled residual ~0.04-0.07). The floor in
+            # ``evals`` already keeps these flows positive, so letting them
+            # collapse in a single step is both correct and what removes the
+            # crawl -- the solve then converges in ~11 clean Newton steps.
             smax = 1.0
             for j in range(N):
                 thr_l = _NS_STEP_REL * Lc[j]
@@ -2087,7 +2104,7 @@ class RigorousColumn(UnitOp):
                     cur = lmat[j, kind] if kind < C else vmat[j, kind - C]
                     thr = thr_l if kind < C else thr_v
                     dd = delta[j * span + kind]
-                    if dd < 0.0 and cur > thr:
+                    if dd < 0.0 and cur > thr and cur + dd > 0.0:
                         smax = min(smax, -_NS_TRUST * cur / dd)
             return min(1.0, smax)
 

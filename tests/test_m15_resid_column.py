@@ -138,17 +138,6 @@ def _build():
     return fs, F, steam, tbp
 
 
-@pytest.mark.skip(
-    reason="The full resid-tower NS solve is marginally convergent and "
-    "platform-sensitive: it reaches machine precision on some numpy/BLAS/thermo "
-    "builds (local) but stalls at a shallow least-squares minimum (residual "
-    "~0.04-0.07) on the CI runners — and the analytic Jacobian, while exact and "
-    "~4.5x faster, did NOT fix this (so it is not finite-difference noise; the "
-    "warm-start lands in a non-convergent basin on those platforms). Making the "
-    "resid tower converge reproducibly needs a platform-robust warm start / "
-    "continuation (tracked). The example (examples/21_resid_crude_tower) shows "
-    "the converged result; the robust light-tower NS cross-validation in "
-    "test_m15_crude_column covers the method in CI.")
 def test_resid_tower_converges_and_balances():
     """The full resid-bearing crude tower converges on Naphtali-Sandholm, with a
     machine-exact mass balance, tight energy closure, exact side-draw rates, a
