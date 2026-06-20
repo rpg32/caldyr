@@ -191,10 +191,6 @@ _NS_LM_MIN = 1e-10       # ... lower bound (-> Gauss-Newton, quadratic endgame)
 _NS_LM_MAX = 1e10        # ... upper bound (-> short scaled gradient descent)
 _NS_LM_UP = 4.0          # ... growth factor on a rejected trial
 _NS_LM_DOWN = 3.0        # ... shrink factor on an accepted step
-_NS_HOMO_STEP = 0.5      # residual-homotopy fallback: shrink factor on the
-#                          residual target (1-lambda) per tracked sub-solve
-_NS_HOMO_INNER = 0.3     # solve each homotopy sub-problem to this fraction of
-#                          its current target magnitude before advancing
 
 
 class _NoVLEError(ValueError):
@@ -1189,27 +1185,24 @@ class RigorousColumn(UnitOp):
              converged) = self._solve_ns(
                 pp, N, P_j, active, fz_stage, fh_stage, u, w, Q_stage, D,
                 partial, Tw, xw, yw, Lw, Vw, t_bounds, max_iter)
-            if not converged:
-                # Robustness fallback. The one-shot simultaneous Newton is fast
-                # but platform-MARGINAL on this wide-boiling tower: it converges
-                # to 1e-9 on most CI runner CPUs but, on an unfavourable
-                # BLAS/CPU build, tips into an off-manifold non-root stationary
-                # point of ||R||^2 and stalls (a CI job flat at scaled residual
-                # ~4e-3..3e-2 while the others reach 1e-9; re-running the SAME
-                # commit on a different runner CPU flips pass/fail -- it is
-                # genuine numerical marginality, not a code bug). Recover with a
-                # residual HOMOTOPY: track F(z) = (1-lambda)*F(z0) from the
-                # warm-start residual down to zero in small in-basin Newton
-                # steps, so the iterate follows the solution path and never
-                # enters the stationary point. The finite-difference Jacobian
-                # (force_fd) keeps the tracked Newton system consistent with the
-                # residual to machine precision on every platform. Robust by
-                # construction -- not reliant on a favourable CPU.
+            if not converged and hasattr(pp, "stage_derivs"):
+                # Endgame-robustness fallback. The analytic Jacobian
+                # (pp.stage_derivs) and the residual (pp.k_values / enthalpies)
+                # are SEPARATE thermo code paths; the cubic-EOS fugacity routines
+                # can differ enough across platform thermo builds (the deps are
+                # unpinned, so e.g. Windows/py3.12 resolves a different thermo
+                # than Linux) that the analytic Jacobian becomes slightly
+                # inconsistent with its residual and the final quadratic plunge
+                # stalls short (observed: one CI job flat at scaled residual
+                # ~4e-3 while three others reach 1e-9). The finite-difference
+                # Jacobian is differenced from the SAME residual evaluation, so
+                # it is consistent to machine precision on every platform.
+                # Re-solve from the inside-out warm start with it.
                 (T, x, y, K, L, V, hL, hV, it, dF, n_prop2,
                  converged) = self._solve_ns(
                     pp, N, P_j, active, fz_stage, fh_stage, u, w, Q_stage, D,
                     partial, Tw, xw, yw, Lw, Vw, t_bounds, max_iter,
-                    force_fd=True, homotopy=True)
+                    force_fd=True)
                 n_prop += n_prop2
             if not converged:
                 raise RigorousColumnError(
@@ -1883,7 +1876,7 @@ class RigorousColumn(UnitOp):
                   T: list[float], x: list[dict[str, float]],
                   y: list[dict[str, float]], L: list[float], V: list[float],
                   t_bounds: tuple[float, float], max_iter: int,
-                  force_fd: bool = False, homotopy: bool = False):
+                  force_fd: bool = False):
         """Naphtali & Sandholm (1971) simultaneous-correction method for the
         non-reboiled, partial-condenser steam-stripped main fractionator —
         Seader, Henley & Roper 3e sec. 10.4. ALL the MESH equations are solved
@@ -2135,14 +2128,6 @@ class RigorousColumn(UnitOp):
                         smax = min(smax, -_NS_TRUST * cur / dd)
             return min(1.0, smax)
 
-        # Residual-homotopy target (zeros except on the homotopy fallback path).
-        # The solver tracks F(z) = R_tgt with R_tgt ramped from the initial
-        # residual down to zero, so every sub-step is a small in-basin Newton
-        # move and the iterate never enters the off-manifold non-root stationary
-        # points that make the one-shot Newton platform-marginal. With R_tgt = 0
-        # this is exactly the ordinary solve.
-        R_tgt = np.zeros(nv)
-
         def evals(delta, frac):
             d = frac * delta
             lm = lmat.copy()
@@ -2159,8 +2144,7 @@ class RigorousColumn(UnitOp):
                 Lt[j], Vt[j], Kt[j], hLt[j], hVt[j] = stage_eval(
                     j, lm[j], vm[j], tt[j])
             Rt = residuals(lm, vm, Lt, Vt, Kt, hLt, hVt)
-            Reff = Rt - R_tgt
-            return float(Reff @ Reff), (lm, vm, tt, Lt, Vt, Kt, hLt, hVt, Rt)
+            return float(Rt @ Rt), (lm, vm, tt, Lt, Vt, Kt, hLt, hVt, Rt)
 
         def _ns_try(delta, rss):
             ss, st = evals(delta, cap(delta))
@@ -2180,38 +2164,12 @@ class RigorousColumn(UnitOp):
         it = 0
         rnorm = float(np.max(np.abs(R0)))
         lam = _NS_LM_INIT      # Levenberg-Marquardt damping
-        # residual-homotopy schedule (active only on the homotopy fallback path).
-        # h_s is the remaining target fraction (1 - lambda): the solver tracks
-        # F(z) = h_s * R0_init from h_s = 1 (trivially solved at the warm start)
-        # down to h_s = 0 (the real problem). Each sub-target is solved loosely,
-        # then h_s shrinks, so the path is followed in small in-basin steps.
-        r0_mag = max(float(np.max(np.abs(R0))), _NS_TOL)
-        h_s = 1.0 if homotopy else 0.0
-        if homotopy:
-            R0_init = R0.copy()
-            R_tgt = R0_init.copy()
-        inner_tol = (max(_NS_TOL, _NS_HOMO_INNER * r0_mag) if homotopy
-                     else _NS_TOL)
-        budget = max_iter * 4 if homotopy else max_iter
-        for it in range(1, budget + 1):
-            R_eff = R0 - R_tgt
-            rnorm = float(np.max(np.abs(R0)))          # actual residual (report)
-            reff_norm = float(np.max(np.abs(R_eff)))   # sub-problem residual
-            if reff_norm < inner_tol:
-                if h_s <= 0.0:
-                    if rnorm < _NS_TOL:
-                        converged = True
-                        break
-                else:
-                    # advance the homotopy: shrink the residual target one notch
-                    h_s *= _NS_HOMO_STEP
-                    if h_s * r0_mag < _NS_TOL:
-                        h_s = 0.0
-                    R_tgt = h_s * R0_init
-                    inner_tol = (_NS_TOL if h_s <= 0.0
-                                 else max(_NS_TOL, _NS_HOMO_INNER * h_s * r0_mag))
-                    continue
-            rss = float(R_eff @ R_eff)
+        for it in range(1, max_iter + 1):
+            rnorm = float(np.max(np.abs(R0)))
+            if rnorm < _NS_TOL:
+                converged = True
+                break
+            rss = float(R0 @ R0)
             jac = (build_jac_analytic() if has_analytic else build_jac())
             if getattr(self, "_ns_jac_check", False) and it <= 1:
                 jfd = build_jac()
@@ -2222,13 +2180,14 @@ class RigorousColumn(UnitOp):
                 print(f"  [jac check] max rel diff {rel.max():.2e} at "
                       f"({km // nv},{km % nv}); analytic={ja.flat[km]:.4e} "
                       f"fd={jfd.flat[km]:.4e}")
-            # Newton (Gauss-Newton) direction toward the current target, regular-
-            # ized by lstsq so an insensitive variable cannot throw an unbounded
-            # component into the step. A line search reaches the quadratic endgame.
+            # Newton (Gauss-Newton) direction, regularized by lstsq so an
+            # insensitive variable cannot throw an unbounded component into the
+            # step. A line search along this direction reaches the quadratic
+            # endgame (machine precision).
             try:
-                delta_n = np.linalg.solve(jac, -R_eff)
+                delta_n = np.linalg.solve(jac, -R0)
             except np.linalg.LinAlgError:
-                delta_n = np.linalg.lstsq(jac, -R_eff, rcond=_IO_RCOND)[0]
+                delta_n = np.linalg.lstsq(jac, -R0, rcond=_IO_RCOND)[0]
             ss, state = _ns_line_search(delta_n, rss)
             used = "N"
             if ss is None:
@@ -2236,10 +2195,10 @@ class RigorousColumn(UnitOp):
                 # iterate — a platform-sensitive ill-conditioning). Escape with
                 # Levenberg-Marquardt steps of growing damping: each is a
                 # shorter, well-scaled blend toward gradient descent that still
-                # reduces ||R - R_tgt||^2. The fixed energy scaling + flow bounds
-                # keep LM from wandering to a spurious high-traffic state.
+                # reduces ||R||^2. The fixed energy scaling + flow bounds keep
+                # LM from wandering to a spurious high-traffic state.
                 jtj = jac.T @ jac
-                jtr = jac.T @ R_eff
+                jtr = jac.T @ R0
                 jdiag = np.maximum(np.diag(jtj), 1e-30)
                 lam = max(lam, _NS_LM_INIT)
                 for _ in range(_NS_LS_MAX):
@@ -2266,9 +2225,9 @@ class RigorousColumn(UnitOp):
                 jj, kk = km // span, km % span
                 rk = "M" if kk < C else "E" if kk < 2 * C else "G"
                 print(f"  ns it={it:3d} |R|={rnorm:.2e}({rk}@{jj}) {used} "
-                      f"lam={lam:.0e} hs={h_s:.1e} T0={Tv[0]:.0f} "
-                      f"Tbot={Tv[-1]:.0f} R={Lc[0] / max(Vc[1], 1e-9):.2f} "
-                      f"V1={Vc[1]:.0f} Vbot={Vc[-1]:.0f}")
+                      f"lam={lam:.0e} T0={Tv[0]:.0f} Tbot={Tv[-1]:.0f} "
+                      f"R={Lc[0] / max(Vc[1], 1e-9):.2f} V1={Vc[1]:.0f} "
+                      f"Vbot={Vc[-1]:.0f}")
             if not accepted:
                 break
 
