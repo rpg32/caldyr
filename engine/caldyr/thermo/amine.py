@@ -1,6 +1,6 @@
 """Kent-Eisenberg acid-gas solubility model for aqueous alkanolamine solutions.
 
-Gas sweetening (scrubbing CO2/H2S out of a gas with an amine like MEA/DEA/MDEA)
+Gas sweetening (scrubbing CO2/H2S out of a gas with an amine like DEA/MDEA)
 works because the acid gas *chemically reacts* with the amine in the liquid to
 form ionic species — so only the small free-molecular fraction of the acid gas
 has a vapour pressure. A cubic-EOS or activity package cannot represent that
@@ -9,37 +9,34 @@ acid-gas property method. This is the open analogue of HYSYS's "Acid Gas –
 Chemical Solvents" package (Hameed 2025, *Chemical Process Simulations using
 Aspen HYSYS*, §15.3).
 
-**Model — modified Kent-Eisenberg** (Kent & Eisenberg, *Hydrocarbon Processing*
-55(2):87, 1976; Haji-Sulaiman, Aroua & Benamor, *Chem. Eng. Res. Des.* 76:961,
-1998). The liquid-phase ionic equilibria are solved with *literature* constants
-for the carbonate / sulfide / water reactions and Henry's law, and a *fitted*
-apparent constant for the amine protonation that lumps the solution
-non-idealities (the defining idea of the method) with a single amine-
-concentration correction ``[amine]**conc_exp``.
-
-Scope today: **CO2 and H2S in aqueous MDEA** (methyldiethanolamine — a *tertiary*
-amine, so no carbamate forms and the reaction set is the minimal one). The
-CO2-MDEA branch is validated against the Haji-Sulaiman et al. (1998) 2 M / 4 M
-solubility data; the H2S branch is a *prediction* — the amine protonation
-constant is taken straight from the CO2 fit and combined with the literature
-H2S ionization and Henry constants (verified against pure-water H2S solubility)
-— so it is physically grounded but not yet fitted/validated against amine-
-specific H2S data (see ``tests/test_m16_amine_kent_eisenberg.py``). The structure
-(an ``AmineSystem`` carrying the amine-specific constants; a general ionic-
-equilibrium solver over both acid gases) is built to extend to carbamate-forming
-primary/secondary amines (MEA, DEA).
+**Model — modified Kent-Eisenberg** (Kent & Eisenberg 1976), with the constants
+and apparent-constant factors of **Haji-Sulaiman, Aroua & Benamor**, *Chem. Eng.
+Res. Des.* 76:961 (1998). The liquid-phase ionic equilibria are solved with
+literature constants for the carbonate / sulfide / water reactions and Henry's
+law; the amine protonation and (for primary/secondary amines) the carbamate
+formation carry an apparent-constant factor ``F`` that lumps the solution
+non-idealities as a function of CO2 partial pressure and amine concentration.
 
 Reaction set (molarity basis, mol/L):
-  * amine protonation     ``AmH+  <->  Am + H+``                 (K1, fitted)
-  * CO2 first ionization  ``CO2 + H2O  <->  H+ + HCO3-``         (K2)
-  * bicarbonate           ``HCO3-  <->  H+ + CO3^2-``            (K3)
-  * water                 ``H2O  <->  H+ + OH-``                 (K4 = Kw)
-  * H2S first ionization  ``H2S  <->  H+ + HS-``                 (K5)
-  * Henry (physical)      ``P_i = H_i * [i]``        for CO2, H2S
-The bisulfide ``HS- <-> H+ + S^2-`` is omitted: its pK (>12) makes ``S^2-``
-negligible at amine-solution pH (8-11). Unknowns are eliminated to a single
-charge-balance equation in ``[H+]``, solved by a bracketed root find; each acid
-gas's loading ``alpha = (mol gas)/(mol amine)`` follows from its mass balance.
+  * amine protonation     ``AmH+  <->  Am + H+``                  K_prot
+  * carbamate formation   ``Am + HCO3-  <->  AmCOO- + H2O``       K_carb (sec. amine)
+  * CO2 first ionization  ``CO2 + H2O  <->  H+ + HCO3-``          K_co2
+  * bicarbonate           ``HCO3-  <->  H+ + CO3^2-``             K_hco3
+  * water                 ``H2O  <->  H+ + OH-``                  K_w
+  * H2S first ionization  ``H2S  <->  H+ + HS-``                  K_h2s
+  * Henry (physical)      ``P_i = H_i * [i]``         for CO2, H2S
+The bisulfide ``HS- <-> H+ + S^2-`` is omitted (pK>12 -> negligible at amine pH).
+Everything is eliminated to one charge-balance equation in ``[H+]``; the loading
+``alpha = (mol acid gas)/(mol amine)`` follows from each gas's mass balance.
+
+Validation (``tests/test_m16_amine_kent_eisenberg.py``):
+  * **CO2 in DEA** — vs Haji-Sulaiman et al. (1998) 2 M / 4 M data, ~7% AAD
+    (matches the paper's own 9.2%); the carbamate caps the fast loading near
+    0.5 mol/mol and bicarbonate carries it higher, as observed.
+  * **CO2 in MDEA** — vs the same source (tertiary amine, no carbamate).
+  * **H2S in MDEA** — a prediction from the amine protonation + the literature
+    H2S ionization/Henry constants (verified vs pure-water H2S solubility);
+    physically validated, quantitative H2S-MDEA data fit tracked as follow-up.
 """
 from __future__ import annotations
 
@@ -51,21 +48,19 @@ from scipy.optimize import brentq
 ATM_PER_KPA = 1.0 / 101.325
 
 # -- temperature-dependent constants: value = exp(a/T + b ln T + c T + d), T[K].
-# The acid-dissociation constants are molarity-basis (mol/L); the Henry's
-# constants are in atm.L/mol (so partial pressures here are in atm internally).
-# K2,K3,K4 and H_CO2 are the canonical literature values (Edwards, Maurer,
-# Newman & Prausnitz, *AIChE J.* 24:966, 1978; CO2 Henry from Little, Bos &
-# Knoop 1990); K5 is the Edwards 1978 H2S first-ionization constant; H_H2S is a
-# van't Hoff fit to the NIST/Sander (2015) H2S water solubility. Every one is
-# verified here against its known 25 C magnitude (K2~4.4e-7, K3~4.7e-11,
-# Kw~1e-14, H_CO2~29, pKa1(H2S)~7.0, [H2S]~0.1 mol/L at 1 atm) — the guard that
-# caught an OCR-corrupted constant during sourcing.
-_K2 = (-12092.1, -36.7816, 0.0, 235.482)    # CO2 + H2O <-> H+ + HCO3-
-_K3 = (-12431.7, -35.4819, 0.0, 220.067)    # HCO3- <-> H+ + CO3^2-
-_K4 = (-13445.9, -22.4773, 0.0, 140.932)    # H2O <-> H+ + OH-  (Kw)
-_K5 = (-12995.4, -33.5471, 0.0, 218.599)    # H2S <-> H+ + HS-
+# Acid-dissociation constants are molarity-basis (mol/L); Henry's constants are
+# atm.L/mol (so partial pressures convert to atm internally). K_co2/K_hco3/K_w
+# and H_CO2 are the literature values used by Haji-Sulaiman 1998 (Edwards et al.
+# 1978; CO2 Henry Little et al. 1990); K_h2s is the Edwards 1978 H2S first
+# ionization; H_H2S is a van't Hoff fit to the NIST/Sander (2015) H2S water
+# solubility. Each verified here against its known 25 C magnitude (the guard
+# that caught an OCR-corrupted constant during sourcing).
+_K_CO2 = (-12092.1, -36.7816, 0.0, 235.482)    # CO2 + H2O <-> H+ + HCO3-
+_K_HCO3 = (-12431.7, -35.4819, 0.0, 220.067)   # HCO3- <-> H+ + CO3^2-
+_K_W = (-13445.9, -22.4773, 0.0, 140.932)      # H2O <-> H+ + OH-
+_K_H2S = (-12995.4, -33.5471, 0.0, 218.599)    # H2S <-> H+ + HS-
 _H_CO2 = (-6789.04, -11.4519, -0.010454, 94.4914)   # Henry CO2, atm.L/mol
-_H_H2S = (-2100.0, 0.0, 0.0, 9.3329)        # Henry H2S, atm.L/mol (Sander 2015)
+_H_H2S = (-2100.0, 0.0, 0.0, 9.3329)           # Henry H2S, atm.L/mol (Sander)
 
 
 def _arr(p: tuple[float, float, float, float], T: float) -> float:
@@ -75,33 +70,36 @@ def _arr(p: tuple[float, float, float, float], T: float) -> float:
 
 @dataclass(frozen=True)
 class AmineSystem:
-    """Acid-gas equilibrium parameters for one aqueous amine.
+    """Acid-gas equilibrium parameters for one aqueous amine (Haji-Sulaiman 1998
+    Tables 1 & 3).
 
-    ``k1_a``/``k1_b`` give the amine protonation constant ``K1 = exp(k1_a +
-    k1_b/T)`` (acid dissociation of the protonated amine, mol/L). The *apparent*
-    protonation constant used in the charge balance is ``K1' = K1 *
-    [amine]**conc_exp`` — a single amine-concentration (ionic-strength)
-    correction (Haji-Sulaiman 1998), shared by both acid gases since it is a
-    property of the amine, not of CO2 or H2S. ``carbamate`` flags
-    primary/secondary amines (MEA, DEA) that also form a carbamate ion — not
-    modelled yet, so only tertiary amines are exposed.
+    ``prot`` is the (a,b,c,d) of the protonation constant ``K_prot`` (acid
+    dissociation of the protonated amine). ``prot_F`` = (g, k) gives the
+    apparent factor ``F = exp(g ln P_CO2[kPa] + k ln[amine_total])`` so
+    ``K_prot' = K_prot·F``. ``carb`` is the carbamate *formation* constant
+    (``[AmCOO-] = K_carb·[HCO3-][Am]``; Aroua et al. 1997) for primary/secondary
+    amines, with ``carb_F`` = (g, j) and ``F = exp(g ln P_CO2 + j/[amine])``;
+    both ``None`` for tertiary amines (no carbamate).
     """
     name: str
-    k1_a: float
-    k1_b: float
-    conc_exp: float
-    carbamate: bool = False
+    prot: tuple[float, float, float, float]
+    prot_F: tuple[float, float]
+    carb: tuple[float, float, float, float] | None = None
+    carb_F: tuple[float, float] | None = None
 
 
-# K1 fitted to the Haji-Sulaiman et al. (1998) 2 M + 4 M MDEA CO2 solubility
-# data (303-323 K, 0.1-100 kPa) with the carbonate/water/Henry constants held at
-# their literature values. The fit gives K1(298 K)=1.7e-9 (pKa(MDEAH+)~8.8,
-# consistent with the ~8.5 literature value) and reproduces the data to ~7 %
-# (2 M) / ~19 % (4 M) AAD — see tests/test_m16_amine_kent_eisenberg.py.
-MDEA = AmineSystem(name="MDEA", k1_a=-10.9358, k1_b=-2758.80,
-                   conc_exp=0.8338, carbamate=False)
+# Protonation: DEA from Perrin 1965 (pKa 8.88), MDEA from Littel 1990 (pKa 8.6).
+# Carbamate: DEA formation constant from Aroua, Ben Amor & Haji-Sulaiman 1997.
+# F-factor exponents from Haji-Sulaiman 1998 Table 3.
+DEA = AmineSystem(
+    name="DEA",
+    prot=(-3071.15, 6.776904, 0.0, -48.7594), prot_F=(-0.4559, 0.2584),
+    carb=(-17067.2, -66.8007, 0.0, 439.709), carb_F=(-0.002386, 2.88))
+MDEA = AmineSystem(
+    name="MDEA",
+    prot=(-8483.95, -13.8328, 0.0, 87.39717), prot_F=(-0.03628, 0.6262))
 
-_SYSTEMS = {"MDEA": MDEA}
+_SYSTEMS = {"DEA": DEA, "MDEA": MDEA}
 
 
 def amine_system(name: str) -> AmineSystem:
@@ -111,60 +109,62 @@ def amine_system(name: str) -> AmineSystem:
     except KeyError:
         raise ValueError(
             f"unsupported amine {name!r}; Kent-Eisenberg acid-gas solubility is "
-            f"available for {sorted(_SYSTEMS)} — primary/secondary amines (MEA, "
-            f"DEA) need the carbamate reaction, not yet modelled"
+            f"available for {sorted(_SYSTEMS)}"
         ) from None
+
+
+def _apparent(sys: AmineSystem, T: float, P_co2_kpa: float, amine_M: float
+              ) -> tuple[float, float | None]:
+    """Apparent protonation and carbamate constants K' = K·F at (T, P_CO2, M)."""
+    pf = max(P_co2_kpa, 1e-6)          # F is a CO2-VLE correction; floor ln arg
+    g, k = sys.prot_F
+    kp = _arr(sys.prot, T) * math.exp(g * math.log(pf) + k * math.log(amine_M))
+    kc = None
+    if sys.carb is not None and sys.carb_F is not None:
+        gc, jc = sys.carb_F
+        kc = _arr(sys.carb, T) * math.exp(gc * math.log(pf) + jc / amine_M)
+    return kp, kc
 
 
 def speciate(T: float, P_co2: float, P_h2s: float, amine_M: float,
              amine: str | AmineSystem = "MDEA") -> dict[str, float]:
-    """Solve the liquid-phase ionic equilibrium at (T, P_CO2, P_H2S, amine M).
-
-    ``T`` in K, partial pressures in **kPa**, ``amine_M`` the amine molarity
-    (mol/L). Returns the molar concentrations (mol/L) of every species plus
-    ``H+``. The apparent protonation constant depends on the free-amine
-    concentration, so a short fixed-point loop wraps the ``[H+]`` root find.
-    """
+    """Solve the liquid-phase ionic equilibrium at (T[K], P_CO2[kPa], P_H2S[kPa],
+    amine molarity). Returns species concentrations (mol/L) plus ``H+``."""
     sys = amine if isinstance(amine, AmineSystem) else amine_system(amine)
     if amine_M <= 0:
         raise ValueError("amine molarity must be positive")
-    K2, K3, K4, K5 = (_arr(p, T) for p in (_K2, _K3, _K4, _K5))
-    co2 = max(P_co2, 0.0) * ATM_PER_KPA / _arr(_H_CO2, T)   # free molecular CO2
-    h2s = max(P_h2s, 0.0) * ATM_PER_KPA / _arr(_H_H2S, T)   # free molecular H2S
-    free_amine = amine_M
-    h = 1e-9
-    for _ in range(60):
-        K1p = math.exp(sys.k1_a + sys.k1_b / T) * (free_amine ** sys.conc_exp)
+    Kco2, Khco3, Kw, Kh2s = (_arr(p, T) for p in (_K_CO2, _K_HCO3, _K_W, _K_H2S))
+    co2 = max(P_co2, 0.0) * ATM_PER_KPA / _arr(_H_CO2, T)
+    h2s = max(P_h2s, 0.0) * ATM_PER_KPA / _arr(_H_H2S, T)
+    Kp, Kc = _apparent(sys, T, P_co2, amine_M)
 
-        def charge(hp: float) -> float:
-            # [H+] + [AmH+] - [OH-] - [HCO3-] - 2[CO3^2-] - [HS-] = 0
-            hco3 = K2 * co2 / hp
-            co3 = K2 * K3 * co2 / hp / hp
-            hs = K5 * h2s / hp
-            oh = K4 / hp
-            amh = amine_M * hp / (K1p + hp)
-            return hp + amh - oh - hco3 - 2.0 * co3 - hs
+    def carb_ratio(h: float) -> float:        # [AmCOO-]/[Am] = K_carb'·[HCO3-]
+        return Kc * Kco2 * co2 / h if Kc is not None else 0.0
 
-        h = brentq(charge, 1e-14, 1e-1, xtol=1e-22, rtol=1e-13, maxiter=200)
-        new_free = amine_M * K1p / (K1p + h)
-        if abs(new_free - free_amine) <= 1e-10 * amine_M:
-            free_amine = new_free
-            break
-        free_amine = new_free
+    def charge(h: float) -> float:
+        hco3 = Kco2 * co2 / h
+        co3 = Kco2 * Khco3 * co2 / h / h
+        hs = Kh2s * h2s / h
+        n = amine_M / (1.0 + h / Kp + carb_ratio(h))
+        return h + n * h / Kp - Kw / h - hco3 - 2.0 * co3 - hs - n * carb_ratio(h)
+
+    h = brentq(charge, 1e-14, 1e-1, xtol=1e-25, rtol=1e-14, maxiter=400)
+    n = amine_M / (1.0 + h / Kp + carb_ratio(h))
     return {
-        "H+": h, "OH-": K4 / h,
-        "CO2": co2, "HCO3-": K2 * co2 / h, "CO3--": K2 * K3 * co2 / h / h,
-        "H2S": h2s, "HS-": K5 * h2s / h,
-        "amine": free_amine, "amineH+": amine_M - free_amine,
+        "H+": h, "OH-": Kw / h,
+        "CO2": co2, "HCO3-": Kco2 * co2 / h, "CO3--": Kco2 * Khco3 * co2 / h / h,
+        "AmCOO-": n * carb_ratio(h),
+        "H2S": h2s, "HS-": Kh2s * h2s / h,
+        "amine": n, "amineH+": n * h / Kp,
     }
 
 
 def acid_gas_loadings(T: float, P_co2: float, P_h2s: float, amine_M: float,
                       amine: str | AmineSystem = "MDEA") -> tuple[float, float]:
-    """``(alpha_CO2, alpha_H2S)`` loadings (mol acid gas / mol amine) of an
-    aqueous amine in equilibrium with CO2 and H2S partial pressures (kPa)."""
+    """``(alpha_CO2, alpha_H2S)`` loadings (mol acid gas / mol amine) over CO2
+    and H2S partial pressures (kPa)."""
     sp = speciate(T, P_co2, P_h2s, amine_M, amine)
-    a_co2 = (sp["CO2"] + sp["HCO3-"] + sp["CO3--"]) / amine_M
+    a_co2 = (sp["CO2"] + sp["HCO3-"] + sp["CO3--"] + sp["AmCOO-"]) / amine_M
     a_h2s = (sp["H2S"] + sp["HS-"]) / amine_M
     return a_co2, a_h2s
 
@@ -179,14 +179,13 @@ def co2_loading(T: float, P_co2: float, amine_M: float,
 def h2s_loading(T: float, P_h2s: float, amine_M: float,
                 amine: str | AmineSystem = "MDEA") -> float:
     """H2S loading ``alpha`` (mol H2S / mol amine) over an H2S partial pressure
-    (``P_h2s`` in **kPa**), no CO2 present."""
+    (``P_h2s`` in **kPa**), no CO2 present (the protonation F-factor then uses
+    its CO2-pressure floor — H2S-only loading is a prediction, see module docs)."""
     return acid_gas_loadings(T, 0.0, P_h2s, amine_M, amine)[1]
 
 
 def _invert(load_fn, T: float, alpha: float, amine_M: float,
             amine: str | AmineSystem) -> float:
-    """Bracketed inverse of a (monotone) loading-vs-partial-pressure relation,
-    returning the partial pressure (kPa) that gives ``alpha``."""
     if alpha <= 0.0:
         return 0.0
 
