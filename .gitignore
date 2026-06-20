@@ -30,3 +30,6 @@ web/test-results/
 web/playwright-report/
 web/.last-run.json
 _probe_*.py
+
+# reference papers (copyrighted journal PDFs) — kept locally, never committed
+docs/*.pdf
