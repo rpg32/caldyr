@@ -1177,14 +1177,33 @@ class RigorousColumn(UnitOp):
             # NS Newton in a region where the cubic-EOS heavy-vapour enthalpy is
             # degenerate. Seeding NS from the inside-out profile lets the full
             # Newton finish to machine precision.
-            (T, x, y, _Kw, L, V, *_rest) = self._inside_out_loops(
+            (Tw, xw, yw, _Kw, Lw, Vw, *_rest) = self._inside_out_loops(
                 pp, N, P_j, active, fz_stage, fh_stage, u, w, A, B, v0, u0,
                 floor, Q_stage, duties, hf_c, fh_form, F_ge, UW_ge,
                 T, x, y, L, V, t_bounds, min(max_iter, _NS_WARM_ITERS))
             (T, x, y, K, L, V, hL, hV, it, dF, n_prop,
              converged) = self._solve_ns(
                 pp, N, P_j, active, fz_stage, fh_stage, u, w, Q_stage, D,
-                partial, T, x, y, L, V, t_bounds, max_iter)
+                partial, Tw, xw, yw, Lw, Vw, t_bounds, max_iter)
+            if not converged and hasattr(pp, "stage_derivs"):
+                # Endgame-robustness fallback. The analytic Jacobian
+                # (pp.stage_derivs) and the residual (pp.k_values / enthalpies)
+                # are SEPARATE thermo code paths; the cubic-EOS fugacity routines
+                # can differ enough across platform thermo builds (the deps are
+                # unpinned, so e.g. Windows/py3.12 resolves a different thermo
+                # than Linux) that the analytic Jacobian becomes slightly
+                # inconsistent with its residual and the final quadratic plunge
+                # stalls short (observed: one CI job flat at scaled residual
+                # ~4e-3 while three others reach 1e-9). The finite-difference
+                # Jacobian is differenced from the SAME residual evaluation, so
+                # it is consistent to machine precision on every platform.
+                # Re-solve from the inside-out warm start with it.
+                (T, x, y, K, L, V, hL, hV, it, dF, n_prop2,
+                 converged) = self._solve_ns(
+                    pp, N, P_j, active, fz_stage, fh_stage, u, w, Q_stage, D,
+                    partial, Tw, xw, yw, Lw, Vw, t_bounds, max_iter,
+                    force_fd=True)
+                n_prop += n_prop2
             if not converged:
                 raise RigorousColumnError(
                     f"RigorousColumn {self.id!r}: naphtali_sandholm Newton did "
@@ -1856,7 +1875,8 @@ class RigorousColumn(UnitOp):
                   D: float, partial: bool,
                   T: list[float], x: list[dict[str, float]],
                   y: list[dict[str, float]], L: list[float], V: list[float],
-                  t_bounds: tuple[float, float], max_iter: int):
+                  t_bounds: tuple[float, float], max_iter: int,
+                  force_fd: bool = False):
         """Naphtali & Sandholm (1971) simultaneous-correction method for the
         non-reboiled, partial-condenser steam-stripped main fractionator —
         Seader, Henley & Roper 3e sec. 10.4. ALL the MESH equations are solved
@@ -1998,7 +2018,7 @@ class RigorousColumn(UnitOp):
         # active-component indices in the property package's full ordering
         pp_comps = list(getattr(pp, "components", active))
         act_idx = np.array([pp_comps.index(c) for c in active])
-        has_analytic = hasattr(pp, "stage_derivs")
+        has_analytic = hasattr(pp, "stage_derivs") and not force_fd
 
         def build_jac_analytic():
             # Per-stage analytic K-value / enthalpy derivatives (Naphtali-
