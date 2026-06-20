@@ -191,6 +191,9 @@ _NS_LM_MIN = 1e-10       # ... lower bound (-> Gauss-Newton, quadratic endgame)
 _NS_LM_MAX = 1e10        # ... upper bound (-> short scaled gradient descent)
 _NS_LM_UP = 4.0          # ... growth factor on a rejected trial
 _NS_LM_DOWN = 3.0        # ... shrink factor on an accepted step
+_NS_REFINE = 2           # iterative-refinement passes on the Newton linear
+#                          solve (recovers digits lost to the ill-conditioned
+#                          MESH Jacobian, so the endgame plunge is reproducible)
 
 
 class _NoVLEError(ValueError):
@@ -2186,6 +2189,21 @@ class RigorousColumn(UnitOp):
             # endgame (machine precision).
             try:
                 delta_n = np.linalg.solve(jac, -R0)
+                # Iterative refinement: the wide-boiling MESH Jacobian is
+                # ill-conditioned (cond ~1e8-1e12 from the energy rows), so a
+                # single LU solve loses several digits of the Newton step. On a
+                # favourable BLAS/CPU build the loss is small enough to still
+                # plunge to 1e-9; on an unfavourable one it caps the endgame at
+                # a marginal residual (~3e-3) and the test flakes across runner
+                # CPUs. One or two refinement passes recover the lost digits
+                # (delta += J^-1 (-R0 - J delta)), restoring the quadratic
+                # endgame reproducibly. Cheap: the iterate is near the root.
+                for _ref in range(_NS_REFINE):
+                    lin_res = -R0 - jac @ delta_n
+                    if (float(np.max(np.abs(lin_res)))
+                            <= 1e-13 * float(np.max(np.abs(R0)) + 1e-30)):
+                        break
+                    delta_n = delta_n + np.linalg.solve(jac, lin_res)
             except np.linalg.LinAlgError:
                 delta_n = np.linalg.lstsq(jac, -R0, rcond=_IO_RCOND)[0]
             ss, state = _ns_line_search(delta_n, rss)
