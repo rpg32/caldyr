@@ -186,6 +186,16 @@ _NS_TRUST = 0.5          # max fractional reduction a flow may take in one step
 _NS_STEP_REL = 1e-4      # only flows above this fraction of the stage total
 #                          constrain the fractional Newton step
 _NS_WARM_ITERS = 40      # inside-out homotopy warm-start iteration cap
+_NS_CONT_STEP0 = 0.3     # draw-rate continuation (broader-basin fallback for
+#                          draw-heavy towers): initial fraction step, ramping the
+#                          side draws to 100% of target, warm-starting each NS
+#                          solve from the previous; the step halves on a failed
+#                          target and grows on success
+_NS_CONT_GROW = 1.5      # ... step growth factor after a converged target
+_NS_CONT_STEP_MIN = 0.02  # ... give up if the step must shrink below this
+_NS_CONT_IT = 40         # ... per-step iteration cap for intermediate targets
+#                          (a warm-started step converges in ~7-11 Newton iters
+#                          or not at all; only the final target gets max_iter)
 _NS_LM_INIT = 1e-3       # Levenberg-Marquardt damping: initial value
 _NS_LM_MIN = 1e-10       # ... lower bound (-> Gauss-Newton, quadratic endgame)
 _NS_LM_MAX = 1e10        # ... upper bound (-> short scaled gradient descent)
@@ -1173,6 +1183,10 @@ class RigorousColumn(UnitOp):
                     f"main-fractionator form); set partial_condenser=True or "
                     f"use 'bubble_point'"
                 )
+            # One NS attempt for a given draw schedule (u_, w_) and optional
+            # warm profile: inside-out homotopy warm start -> NS Newton ->
+            # FD-Jacobian endgame fallback. Returns the _solve_ns 12-tuple.
+            #
             # Homotopy warm start: the inside-out method robustly drives the
             # profile to the right PHYSICS (a hot resid bottom, steam rising)
             # even where it stalls short of a tight residual, whereas the raw
@@ -1180,33 +1194,135 @@ class RigorousColumn(UnitOp):
             # NS Newton in a region where the cubic-EOS heavy-vapour enthalpy is
             # degenerate. Seeding NS from the inside-out profile lets the full
             # Newton finish to machine precision.
-            (Tw, xw, yw, _Kw, Lw, Vw, *_rest) = self._inside_out_loops(
-                pp, N, P_j, active, fz_stage, fh_stage, u, w, A, B, v0, u0,
-                floor, Q_stage, duties, hf_c, fh_form, F_ge, UW_ge,
-                T, x, y, L, V, t_bounds, min(max_iter, _NS_WARM_ITERS))
+            def _ns_attempt(u_, w_, warm, maxit=max_iter, use_fd=True):
+                # Draw-dependent cumulatives for THIS schedule (the bottoms
+                # B_ = F - D - draws absorbs the scaled-away side product).
+                UW_ge_ = [0.0] * (N + 1)
+                for jj in range(N - 1, -1, -1):
+                    UW_ge_[jj] = UW_ge_[jj + 1] + u_[jj] + w_[jj]
+                A_ = [0.0] * N
+                run_ = -D
+                for jj in range(N):
+                    run_ += sum(fz_stage[jj].values()) - u_[jj] - w_[jj]
+                    A_[jj] = run_
+                B_ = F - D - (sum(u_) + sum(w_))
+                if warm is None:
+                    T0, x0, y0, _K0, L0, V0 = self._initial_sr_profiles(
+                        pp, N, P_j, active, f, D, R0, feed_info, feed_flashes,
+                        F_ge, UW_ge_, B_, v0, floor)
+                else:
+                    T0, x0, y0, L0, V0 = warm
+                (Tw, xw, yw, _Kw, Lw, Vw, *_rest) = self._inside_out_loops(
+                    pp, N, P_j, active, fz_stage, fh_stage, u_, w_, A_, B_, v0,
+                    u0, floor, Q_stage, duties, hf_c, fh_form, F_ge, UW_ge_,
+                    T0, x0, y0, L0, V0, t_bounds, min(maxit, _NS_WARM_ITERS))
+                res = self._solve_ns(
+                    pp, N, P_j, active, fz_stage, fh_stage, u_, w_, Q_stage, D,
+                    partial, Tw, xw, yw, Lw, Vw, t_bounds, maxit)
+                if not res[-1] and use_fd and hasattr(pp, "stage_derivs"):
+                    # Endgame-robustness fallback. The analytic Jacobian
+                    # (pp.stage_derivs) and the residual (pp.k_values /
+                    # enthalpies) are SEPARATE thermo code paths; the cubic-EOS
+                    # fugacity routines can differ enough across platform thermo
+                    # builds (deps are unpinned, so e.g. Windows/py3.12 resolves
+                    # a different thermo than Linux) that the analytic Jacobian
+                    # becomes slightly inconsistent with its residual and the
+                    # final quadratic plunge stalls short (observed: one CI job
+                    # flat at scaled residual ~4e-3 while three reach 1e-9). The
+                    # FD Jacobian is differenced from the SAME residual, so it is
+                    # consistent to machine precision on every platform.
+                    res2 = self._solve_ns(
+                        pp, N, P_j, active, fz_stage, fh_stage, u_, w_, Q_stage,
+                        D, partial, Tw, xw, yw, Lw, Vw, t_bounds, maxit,
+                        force_fd=True)
+                    res = res2[:10] + (res[10] + res2[10], res2[11])
+                return res
+
+            # Fast path: a direct analytic Newton from the inside-out warm start.
+            # The resid main fractionator converges here in ~11 iterations; the
+            # continuation and the FD fallback below never run for it. The
+            # expensive FD-Jacobian endgame fallback is deferred PAST the cheap
+            # draw continuation, so a draw-heavy basin stall (which the FD
+            # fallback cannot fix anyway -- it is an endgame digit-recovery tool,
+            # not a basin tool) is rescued by continuation without first grinding
+            # out ~N(2C+1) finite-difference Jacobian builds.
             (T, x, y, K, L, V, hL, hV, it, dF, n_prop,
-             converged) = self._solve_ns(
-                pp, N, P_j, active, fz_stage, fh_stage, u, w, Q_stage, D,
-                partial, Tw, xw, yw, Lw, Vw, t_bounds, max_iter)
+             converged) = _ns_attempt(u, w, None, use_fd=False)
+            if not converged and (sum(u) + sum(w)) > 0.0:
+                # Broader-basin fallback: warm-start DRAW CONTINUATION. A
+                # draw-heavy tower (large side draws relative to its stage
+                # count) can leave the damped Newton stuck at a non-root
+                # stationary point of ||R|| (the LM escape oscillates without
+                # closing). Homotopy on the draw rates fixes it: start from a
+                # light-draw column (NS solves it easily -- it is close to a
+                # plain distillate/bottoms split), then ramp the draws up to
+                # their target in steps, warm-starting each NS solve from the
+                # previous converged profile so every step stays in-basin. This
+                # is the same warm-start-continuation trick that made the
+                # reboiled+refluxed amine regenerator converge (_solve_reboiled_ns).
+                # Adaptive step: grow the draw fraction toward 1.0, halving the
+                # step whenever a target fails to converge and re-trying from the
+                # last good profile (the s=0.85->1.0 jump is the hard one on a
+                # heavily-drawn tower; a finer approach walks it in). Each solve
+                # warm-starts from the previous, so the successful steps finish
+                # in a handful of Newton iterations.
+                # A warm-started step that is GOING to converge does so in a
+                # handful of Newton iterations (~7-11); a capped budget + no FD
+                # fallback keeps each intermediate step cheap (a stalled step
+                # halves the draw step rather than grinding out the full budget).
+                # Only the final, full-draw target gets the full iteration budget
+                # and the FD endgame fallback.
+                warm = None
+                np_cont = 0
+                s_done = 0.0
+                step = _NS_CONT_STEP0
+                r = None
+                while True:
+                    s = min(1.0, s_done + step)
+                    final = s >= 1.0
+                    us = [s * ui for ui in u]
+                    ws = [s * wi for wi in w]
+                    r = _ns_attempt(
+                        us, ws, warm,
+                        maxit=max_iter if final else min(max_iter, _NS_CONT_IT),
+                        use_fd=final)
+                    np_cont += r[10]
+                    if getattr(self, "_ns_debug", False):
+                        print(f"  [draw-cont] s={s:.3f} step={step:.3f} "
+                              f"converged={r[-1]} resid={r[9]:.3e} it={r[8]}")
+                    if r[-1]:
+                        s_done = s
+                        warm = (r[0], r[1], r[2], r[4], r[5])  # T, x, y, L, V
+                        if final:
+                            converged = True
+                            break
+                        step = min(step * _NS_CONT_GROW, _NS_CONT_STEP0)
+                    else:
+                        step *= 0.5
+                        if step < _NS_CONT_STEP_MIN:
+                            break
+                if converged and r is not None:
+                    (T, x, y, K, L, V, hL, hV, it, dF, _np_last,
+                     converged) = r
+                    n_prop += np_cont
             if not converged and hasattr(pp, "stage_derivs"):
-                # Endgame-robustness fallback. The analytic Jacobian
-                # (pp.stage_derivs) and the residual (pp.k_values / enthalpies)
-                # are SEPARATE thermo code paths; the cubic-EOS fugacity routines
-                # can differ enough across platform thermo builds (the deps are
-                # unpinned, so e.g. Windows/py3.12 resolves a different thermo
-                # than Linux) that the analytic Jacobian becomes slightly
-                # inconsistent with its residual and the final quadratic plunge
-                # stalls short (observed: one CI job flat at scaled residual
-                # ~4e-3 while three others reach 1e-9). The finite-difference
-                # Jacobian is differenced from the SAME residual evaluation, so
-                # it is consistent to machine precision on every platform.
-                # Re-solve from the inside-out warm start with it.
-                (T, x, y, K, L, V, hL, hV, it, dF, n_prop2,
-                 converged) = self._solve_ns(
-                    pp, N, P_j, active, fz_stage, fh_stage, u, w, Q_stage, D,
-                    partial, Tw, xw, yw, Lw, Vw, t_bounds, max_iter,
-                    force_fd=True)
-                n_prop += n_prop2
+                # Endgame FD-Jacobian fallback (last resort; the ONLY fallback
+                # for a no-draw column, where continuation cannot run). The
+                # analytic Jacobian (pp.stage_derivs) and the residual
+                # (pp.k_values / enthalpies) are SEPARATE thermo code paths; the
+                # cubic-EOS fugacity routines can differ enough across platform
+                # thermo builds that near the root the analytic Jacobian becomes
+                # slightly inconsistent with its residual and the final quadratic
+                # plunge stalls short (observed: one CI job flat at scaled
+                # residual ~4e-3 while three reach 1e-9). The FD Jacobian is
+                # differenced from the SAME residual, so it is consistent to
+                # machine precision on every platform.
+                (T2, x2, y2, K2, L2, V2, hL2, hV2, it2, dF2, np2,
+                 conv2) = _ns_attempt(u, w, None, use_fd=True)
+                n_prop += np2
+                if conv2:
+                    (T, x, y, K, L, V, hL, hV, it, dF, converged) = (
+                        T2, x2, y2, K2, L2, V2, hL2, hV2, it2, dF2, conv2)
             if not converged:
                 raise RigorousColumnError(
                     f"RigorousColumn {self.id!r}: naphtali_sandholm Newton did "

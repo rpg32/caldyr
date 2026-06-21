@@ -155,9 +155,15 @@ def _build():
     "CPUs). Marked xfail (strict=False) on Windows so a favourable-CPU pass "
     "still registers (xpass) while a marginal stall does not break CI; the NS "
     "method itself is covered cross-platform by the light-tower equivalence "
-    "test in test_m15_crude_column. A fully CPU-robust solve needs a better-"
-    "conditioned formulation (e.g. a sensible-enthalpy energy basis) or "
-    "extended-precision endgame -- tracked.",
+    "test in test_m15_crude_column. NOTE (2026-06-21): the hypothesised "
+    "sensible-enthalpy reconditioning lever was MEASURED locally and rejected -- "
+    "cond(J) at the endgame is only ~4e5 (the ~1e8-1e12 figure was the cold "
+    "it=1 iterate, not the root), and subtracting the formation-enthalpy basis "
+    "lowers it just ~5% (the heavy pseudo-components' absolute enthalpy "
+    "dominates e_ref regardless), so it cannot bridge a per-CPU FP stall. The "
+    "marginality is genuine per-CPU thermo floating point; np.longdouble == "
+    "double under MSVC rules out an extended-precision endgame on Windows too. "
+    "The xfail(strict=False) is the honest resolution.",
     strict=False,
 )
 def test_resid_tower_converges_and_balances():
@@ -245,3 +251,142 @@ def test_resid_tower_converges_and_balances():
     assert abs(rel_delta) < 0.06, (
         f"naphtha yield {dry_naphtha:.1f} mol/s vs TBP-implied "
         f"{tbp['naphtha']:.1f} mol/s (delta {rel_delta * 100:+.1f}%)")
+
+
+def _build_drawheavy(n_stages: int = 14, max_iter: int = 60):
+    """A DRAW-HEAVY crude tower (few stages, large side draws): the same heavy
+    crude and steam-stripped partial-condenser configuration as ``_build`` but
+    with only ``n_stages`` (default 14) trays carrying the naphtha distillate
+    plus two large liquid side draws (kerosene + diesel). Returns
+    ``(flowsheet, F, steam, tbp_yields)``.
+
+    The direct Naphtali-Sandholm Newton (analytic Jacobian, then the
+    finite-difference fallback) STALLS on this tower: warm-started at the full
+    draw rates from the inside-out profile, the bottom vapour collapses to zero
+    (a dry, degenerate bottom) and the damped Newton sits at a non-root
+    stationary point of ||R|| (~2e-3). It is the smaller, draw-heavy stall noted
+    as the open NS basin gap. The solve only converges via the **draw-rate
+    continuation** fallback in ``RigorousColumn._solve_nonreboiled`` — ramp the
+    side draws from a light split (which NS solves trivially) up to 100% of
+    target, warm-starting each step from the previous — so this case exercises
+    that path end to end.
+    """
+    res = characterize_assay(
+        [(v, degF(f)) for v, f in TBP], kind="TBP", api_gravity=BULK_API,
+        sg_curve=[(v, api_to_sg(a)) for v, a in API], mw_curve=MW,
+        n_cuts=N_CUTS, light_ends=LIGHT_ENDS)
+
+    ladder = [(cid, fr["vol_frac"], fr["mole_frac"])
+              for cid, fr in res.light_end_fractions.items()]
+    ladder += [(c.id, c.vol_frac, c.mole_frac) for c in res.cuts]
+
+    def slice_moles(lo: float, hi: float) -> dict[str, float]:
+        out: dict[str, float] = {}
+        cum = 0.0
+        for cid, dv, dn in ladder:
+            a, b = cum, cum + dv
+            cum = b
+            ov = max(0.0, min(b, hi) - max(a, lo))
+            if ov > 0.0:
+                out[cid] = out.get(cid, 0.0) + dn * ov / dv
+        return out
+
+    vdot = 100000 * 0.158987294928 / 86400.0
+    rho_w = 999.016
+    sg_of = {c.id: c.SG for c in res.cuts}
+    sg_of.update({cid: LIGHT_END_SG[cid] for cid in LIGHT_ENDS})
+    mw_of = {c.id: c.MW for c in res.cuts}
+    mw_of.update({cid: molar_mass(cid) for cid in LIGHT_ENDS})
+    z = res.mole_fractions()
+    vol_per_mol = sum(zi * mw_of[c] / (sg_of[c] * rho_w) for c, zi in z.items())
+    F = vdot / vol_per_mol
+    steam = 7500 * 0.45359237 / 3600.0 / 0.01801528
+
+    naph = sum(slice_moles(0.0, NAPHTHA_HI).values()) * F
+    kero = sum(slice_moles(NAPHTHA_HI, KERO_HI).values()) * F
+    diesel = sum(slice_moles(KERO_HI, DIESEL_HI).values()) * F
+    tbp = {"naphtha": naph, "kerosene": kero, "diesel": diesel}
+
+    comps = res.components() + [resolve_component("water")]
+    fs = Flowsheet(components=comps, property_package="thermo:PR")
+    fs.add(FlashDrum("PREFLASH", {"P": 75.0 * PSIA}))
+    fs.add(Heater("FURNACE", {"T_out": degF(650.0), "dP": 10.0 * PSIA}))
+    fs.add(Mixer("MIX"))
+    n = n_stages
+    fs.add(RigorousColumn("TOWER", {
+        "n_stages": n, "feeds": [{"stage": n - 2}, {"stage": n}],
+        "distillate_rate": naph + steam,
+        "side_draws": [{"stage": 4, "phase": "liquid", "rate": kero},
+                       {"stage": 8, "phase": "liquid", "rate": diesel}],
+        "stage_duties": [{"stage": 2, "duty": -25e6 * BTU_PER_H},
+                         {"stage": 8, "duty": -15e6 * BTU_PER_H}],
+        "P": 19.7 * PSIA, "dP_stage": 13.0 * PSIA / (n - 1),
+        "reboiled": False, "method": "naphtali_sandholm",
+        "partial_condenser": True, "max_iter": max_iter,
+    }))
+    fs.connect("crude", None, "PREFLASH:in1")
+    fs.connect("preflash_vap", "PREFLASH:vapor", "MIX:in1")
+    fs.connect("preflash_liq", "PREFLASH:liquid", "FURNACE:in1")
+    fs.connect("hot_crude", "FURNACE:out", "MIX:in2")
+    fs.connect("tower_feed", "MIX:out", "TOWER:in1")
+    fs.connect("naphtha", "TOWER:distillate", None)
+    fs.connect("residue", "TOWER:bottoms", None)
+    fs.connect("kerosene", "TOWER:side1", None)
+    fs.connect("diesel", "TOWER:side2", None)
+    fs.connect("qc", "TOWER:condenser_duty", None)
+    fs.connect("qr", "TOWER:reboiler_duty", None)
+    fs.feed("crude", "PREFLASH:in1", T=degF(450.0), P=75.0 * PSIA,
+            molar_flow=F, z=z)
+    fs.feed("steam", "TOWER:in2", T=degF(375.0), P=150.0 * PSIA,
+            molar_flow=steam, z={"water": 1.0})
+    return fs, F, steam, tbp
+
+
+@pytest.mark.slow
+def test_drawheavy_tower_converges_via_continuation():
+    """A draw-heavy N=14 crude tower converges on Naphtali-Sandholm ONLY through
+    the draw-rate continuation fallback (the direct analytic+FD Newton stalls at
+    a dry-bottom non-root). Validates the broader-basin mechanism: convergence,
+    machine-exact mass balance, exact side-draw rates, a physically ordered
+    product slate, and a hot resid bottom — the same internal-consistency oracle
+    as the N=20 resid tower (the book gives no numeric slate)."""
+    fs, F, steam, tbp = _build_drawheavy()
+    report = fs.solve()
+    assert report.converged
+
+    des = fs.units["TOWER"].design
+    assert des["method"] == "naphtali_sandholm"
+    assert des["energy_residual_rel"] < 1e-6
+    assert des["R"] > 0.0
+
+    naphtha = fs.streams["naphtha"]
+    kerosene = fs.streams["kerosene"]
+    diesel = fs.streams["diesel"]
+    residue = fs.streams["residue"]
+
+    # total + per-component mass balance: machine-exact
+    total_in = F + steam
+    total_out = sum(s.molar_flow
+                    for s in (naphtha, kerosene, diesel, residue))
+    assert total_out == pytest.approx(total_in, rel=1e-10)
+    crude = fs.streams["crude"]
+    for c in [comp.id for comp in fs.components]:
+        c_in = F * crude.z.get(c, 0.0) + (steam if c == "water" else 0.0)
+        c_out = sum(s.molar_flow * s.z.get(c, 0.0)
+                    for s in (naphtha, kerosene, diesel, residue))
+        assert c_out == pytest.approx(c_in, rel=1e-8, abs=1e-7)
+
+    # side-draw rates honored exactly
+    assert kerosene.molar_flow == pytest.approx(tbp["kerosene"], rel=1e-10)
+    assert diesel.molar_flow == pytest.approx(tbp["diesel"], rel=1e-10)
+
+    # product slate ordered by boiling range + a hot resid bottom
+    assert naphtha.T < kerosene.T < diesel.T
+    assert toF(des["T_profile"][-1]) > 500.0
+    mw = {comp.id: molar_mass(comp.id) for comp in fs.components}
+
+    def mean_mw(stream) -> float:
+        return sum(stream.z.get(c, 0.0) * mw[c] for c in mw)
+
+    assert (mean_mw(naphtha) < mean_mw(kerosene) < mean_mw(diesel)
+            < mean_mw(residue)), "product slate not ordered by mean MW"
