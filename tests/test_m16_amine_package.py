@@ -35,16 +35,42 @@ def _pkg(amine: str = "DEA", comps: list[str] | None = None) -> AmineAcidGasPack
 
 # -- make_package wiring + validation -----------------------------------------
 def test_selector_builds_the_amine_package():
-    for amine in ("DEA", "MDEA"):
+    for amine in ("DEA", "MDEA", "MEA"):
         comps = [amine, "water", "CO2", "H2S", "methane"]
         pp = make_package(f"amine:{amine}", comps)
         assert isinstance(pp, AmineAcidGasPackage)
         assert pp.amine == amine
 
 
+def test_mea_absorber_sweetens_the_gas():
+    """The new amine:MEA package drives an absorber: MEA (a primary amine, the
+    classic CO2-removal solvent) converges, closes its mass balance, and removes
+    the acid gas — the same contract the DEA case is validated against."""
+    comps = ["MEA", "water", "CO2", "H2S", "methane"]
+    pp = make_package("amine:MEA", comps)
+    P = 3.0e6
+    gas = Stream(id="sour", components=comps, T=313.15, P=P, molar_flow=300.0,
+                 z={"methane": 0.95, "CO2": 0.035, "H2S": 0.015})
+    # 15 wt% MEA (~2.5 M): mole fractions ~ MEA 0.053, water 0.947
+    liq = Stream(id="lean", components=comps, T=313.15, P=P, molar_flow=900.0,
+                 z={"MEA": 0.053, "water": 0.945, "CO2": 0.001, "H2S": 0.001})
+    ab = Absorber("ABS", {"n_stages": 14})
+    out = ab.solve({"gas_in": gas, "liquid_in": liq}, pp)
+    sweet = out["vapor_out"]
+    assert ab.design["energy_residual_rel"] < 1e-6
+    assert ab.design["absorbed"]["CO2"] > 0.5            # acid gas removed
+    # machine-exact component balance
+    lo = out["liquid_out"]
+    feed = {c: gas.molar_flow * gas.z.get(c, 0.0) + liq.molar_flow * liq.z.get(c, 0.0)
+            for c in comps}
+    for c in comps:
+        out_c = lo.molar_flow * lo.z.get(c, 0.0) + sweet.molar_flow * sweet.z.get(c, 0.0)
+        assert abs(feed[c] - out_c) < 1e-6 * sum(feed.values())
+
+
 def test_rejects_unknown_amine_and_missing_roles():
     with pytest.raises(ValueError, match="unsupported amine"):
-        make_package("amine:MEA", _COMPS)
+        make_package("amine:TEA", _COMPS)        # triethanolamine: not parameterized
     with pytest.raises(ValueError, match="no 'water'"):
         AmineAcidGasPackage(["DEA", "CO2", "methane"], "DEA")
     with pytest.raises(ValueError, match="no 'amine'"):

@@ -14,10 +14,16 @@ loading vs partial pressure.
   carbamate (formation constant from Aroua et al. 1997) caps the fast loading
   near 0.5 mol/mol, with bicarbonate carrying it higher — the signature of a
   secondary amine.
-* **H2S in MDEA** — a prediction (amine protonation from the CO2 fit + literature
-  H2S ionization/Henry constants, verified vs pure-water solubility); checked for
-  physical correctness. (Quantitative H2S data fit vs Jou 1982 / Lawson 1976 in
-  caldyr/docs/ is a tracked follow-up.)
+* **H2S** — now QUANTITATIVELY validated against experimental data: H2S in MEA &
+  DEA vs Lawson & Garst (*J. Chem. Eng. Data* 21:20, 1976; 15.2 wt% MEA / 25 wt%
+  DEA) and H2S in MDEA vs Jou, Mather & Otto (*Ind. Eng. Chem. Process Des. Dev.*
+  21:539, 1982; 2 M). AADs: MEA ~7%, MDEA ~17% (joint CO2+H2S fit), DEA ~20%
+  (a prediction from the CO2-fitted protonation). The earlier model applied the
+  CO2-loading F-factor to the H2S-only protonation (P_CO2 floor blew it up ~700x,
+  H2S ~30x too low); the F-factor now uses the **total** acid-gas pressure.
+* **MEA** (primary amine) — protonation fitted to the Lawson H2S data, carbamate
+  fitted to the (sparse) Lawson CO2 data; the strong primary-amine carbamate caps
+  the CO2 loading near 0.5 mol/mol.
 """
 import math
 
@@ -174,3 +180,93 @@ def test_combined_co2_h2s_competes_for_amine():
     assert a_co2 > 0.0 and a_h2s > 0.0
     assert a_co2 < co2_loading(313.15, 20.0, 3.0, "MDEA")
     assert a_h2s < h2s_loading(313.15, 20.0, 3.0, "MDEA")
+
+
+# -- quantitative H2S validation vs experimental data -------------------------
+_MMHG_KPA = 101.325 / 760.0      # mmHg -> kPa
+
+# Lawson & Garst (1976) Table IV: H2S in 15.2 wt% (~2.5 M) MEA. (T[K], [(alpha,
+# P_H2S[mmHg]), ...]); mid-loading points (alpha>1 is physical-solubility
+# dominated, P<0.1 mmHg is at the analytical detection limit).
+_LAWSON_MEA_H2S = {
+    313.15: [(0.0329, 0.08), (0.0396, 0.19), (0.0590, 0.31), (0.0789, 0.55),
+             (0.373, 11.0), (0.380, 9.3)],
+    333.15: [(0.0339, 0.28), (0.0406, 0.44), (0.0593, 0.74), (0.0805, 1.1),
+             (0.384, 34.0), (0.392, 35.0)],
+    353.15: [(0.0349, 0.74), (0.0418, 1.16), (0.382, 85.0), (0.385, 90.0)],
+    373.15: [(0.0633, 4.7), (0.0793, 5.6), (0.121, 13.8), (0.376, 230.0),
+             (0.384, 230.0)],
+}
+# Lawson & Garst (1976) Table I: H2S in 25 wt% (~2.5 M) DEA (100 & 150 degF).
+_LAWSON_DEA_H2S = {
+    310.93: [(0.0526, 0.84), (0.0755, 1.3), (0.133, 3.3), (0.177, 6.5),
+             (0.230, 15.4), (0.319, 21.7), (0.457, 59.0), (0.652, 160.0),
+             (0.855, 760.0)],
+    338.71: [(0.124, 19.7), (0.179, 27.2), (0.205, 46.3), (0.252, 64.3),
+             (0.318, 85.0), (0.446, 210.0)],
+}
+# Jou, Mather & Otto (1982) Table II: H2S in 2.0 M MDEA, P_H2S in kPa (40 & 100 C).
+_JOU_MDEA_H2S = {
+    313.15: [(0.674, 27.3), (0.443, 8.98), (0.368, 5.76), (0.162, 1.20),
+             (0.0871, 0.370), (0.0576, 0.171), (0.0238, 0.0308)],
+    373.15: [(0.660, 266.3), (0.474, 146.9), (0.357, 72.53), (0.203, 29.07),
+             (0.156, 16.43)],
+}
+
+
+def _h2s_aad(dataset, amine_M, amine, p_in_kpa=False) -> float:
+    errs = []
+    for T, pts in dataset.items():
+        for alpha, p in pts:
+            P = p if p_in_kpa else p * _MMHG_KPA
+            errs.append(abs(h2s_loading(T, P, amine_M, amine) - alpha) / alpha)
+    return 100.0 * sum(errs) / len(errs)
+
+
+def test_mea_h2s_matches_lawson():
+    """H2S in MEA vs Lawson & Garst (1976) Table IV — the MEA protonation was
+    fitted to this data (the H2S sub-model isolates protonation: no carbamate)."""
+    assert _h2s_aad(_LAWSON_MEA_H2S, 2.5, "MEA") < 12.0
+
+
+def test_mdea_h2s_matches_jou():
+    """H2S in MDEA vs Jou et al. (1982) — MDEA is the H2S-selective amine; its
+    protonation F-factor is a joint CO2+H2S fit, so H2S is quantitative."""
+    assert _h2s_aad(_JOU_MDEA_H2S, 2.0, "MDEA", p_in_kpa=True) < 25.0
+
+
+def test_dea_h2s_predicts_lawson():
+    """H2S in DEA vs Lawson & Garst (1976) Table I — a *prediction* from the
+    CO2-fitted DEA protonation (no separate H2S fit), so a looser engineering
+    band. Without the total-pressure F-factor fix this was ~96%."""
+    assert _h2s_aad(_LAWSON_DEA_H2S, 2.5, "DEA") < 30.0
+
+
+def test_h2s_total_pressure_factor_fixed_the_protonation():
+    """Regression: the H2S-only protonation must NOT carry the blown-up CO2
+    F-factor. A DEA H2S loading at a low partial pressure is order-0.1, not the
+    order-0.001 the old P_CO2-floored factor produced."""
+    assert h2s_loading(310.93, 3.3 * _MMHG_KPA, 2.5, "DEA") > 0.05
+
+
+# -- MEA (primary amine): CO2 + carbamate -------------------------------------
+# Lawson & Garst (1976) Table V: CO2 in 15.2 wt% MEA (sparse, high-T).
+_LAWSON_MEA_CO2 = [(373.15, 0.177, 10.0), (393.15, 0.115, 22.0),
+                   (393.15, 0.187, 49.0)]
+
+
+def test_mea_co2_matches_lawson():
+    """CO2 in MEA vs Lawson Table V (the carbamate magnitude was fitted to these
+    sparse, high-temperature points; the formation slope is held physical)."""
+    errs = [abs(co2_loading(T, p * _MMHG_KPA, 2.5, "MEA") - a) / a
+            for T, a, p in _LAWSON_MEA_CO2]
+    assert 100.0 * sum(errs) / len(errs) < 15.0
+
+
+def test_mea_carbamate_caps_co2_loading():
+    """The primary-amine signature: a strong carbamate holds the low-pressure CO2
+    loading near ~0.5 mol/mol, and bicarbonate carries it past at high pressure."""
+    lo = co2_loading(313.15, 1.0, 2.5, "MEA")        # carbamate regime
+    hi = co2_loading(313.15, 100.0, 2.5, "MEA")      # bicarbonate regime
+    assert 0.40 < lo < 0.55
+    assert hi > lo

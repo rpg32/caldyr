@@ -73,7 +73,7 @@ _T_LO, _T_HI = 200.0, 600.0   # K, flash/bubble temperature search window
 _CAS_WATER = "7732-18-5"
 _CAS_CO2 = "124-38-9"
 _CAS_H2S = "7783-06-4"
-_CAS_AMINE = {"DEA": "111-42-2", "MDEA": "105-59-9"}
+_CAS_AMINE = {"DEA": "111-42-2", "MDEA": "105-59-9", "MEA": "141-43-5"}
 
 
 # -- pure-component property data ---------------------------------------------
@@ -87,6 +87,7 @@ _WATER = dict(MW=18.015e-3, Vm=18.07e-6, CpL=75.3, Hvap=44.0e3, Cpig=33.6, Tb=37
 _AMINE_DATA = {
     "DEA": dict(MW=105.136e-3, Vm=95.8e-6, CpL=290.0, Hvap=60.9e3, Cpig=200.0, Tb=541.5),
     "MDEA": dict(MW=119.163e-3, Vm=114.8e-6, CpL=350.0, Hvap=62.0e3, Cpig=230.0, Tb=520.2),
+    "MEA": dict(MW=61.083e-3, Vm=60.4e-6, CpL=166.0, Hvap=50.5e3, Cpig=120.0, Tb=443.5),
 }
 
 # Reactive acid gases: ideal-gas Cp (J/mol/K) and heat of absorption (J/mol,
@@ -96,8 +97,8 @@ _AMINE_DATA = {
 # depends on them but the acid-gas removal does not).
 _ACID_CPIG = {"CO2": 37.1, "H2S": 34.0}
 _ACID_HABS = {
-    "CO2": {"DEA": -70.0e3, "MDEA": -54.0e3},
-    "H2S": {"DEA": -38.0e3, "MDEA": -38.0e3},
+    "CO2": {"DEA": -70.0e3, "MDEA": -54.0e3, "MEA": -84.0e3},
+    "H2S": {"DEA": -38.0e3, "MDEA": -38.0e3, "MEA": -43.0e3},
 }
 
 # Light gases — physical (Henry's law) solubility in water. Per species:
@@ -185,7 +186,7 @@ class AmineAcidGasPackage:
     docstring for the model.
     """
 
-    SUPPORTED = ("DEA", "MDEA")
+    SUPPORTED = ("DEA", "MDEA", "MEA")
 
     def __init__(self, components: list[str], amine: str = "DEA") -> None:
         amine = amine.upper()

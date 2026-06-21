@@ -89,13 +89,20 @@ def pseudo_signature(components: list[str] | tuple[str, ...]) -> tuple:
     )
 
 
+# Process abbreviations the chemicals index does not resolve on its own
+# (notably "MEA"); mapped to CAS so the common gas-sweetening amine ids work.
+_ABBREV_CAS = {
+    "MEA": "141-43-5", "DEA": "111-42-2", "MDEA": "105-59-9",
+}
+
+
 @lru_cache(maxsize=1024)
 def _search(identifier: str) -> Any:
     """Cached `chemicals` metadata lookup (the chemicals index search is not
     free, and the same ids are resolved repeatedly across solves)."""
     from chemicals.identifiers import search_chemical
 
-    return search_chemical(identifier)
+    return search_chemical(_ABBREV_CAS.get(identifier.strip().upper(), identifier))
 
 
 def resolve_component(identifier: str) -> Component:

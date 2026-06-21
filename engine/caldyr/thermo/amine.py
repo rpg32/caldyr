@@ -95,11 +95,28 @@ DEA = AmineSystem(
     name="DEA",
     prot=(-3071.15, 6.776904, 0.0, -48.7594), prot_F=(-0.4559, 0.2584),
     carb=(-17067.2, -66.8007, 0.0, 439.709), carb_F=(-0.002386, 2.88))
+# MDEA protonation F-factor re-fitted JOINTLY to the full CO2 (Haji-Sulaiman
+# 1998, 39 pts) and H2S (Jou et al. 1982, 12 pts) sets so both are quantitative —
+# H2S ~17% AAD (was a ~37% prediction from the CO2-only fit), CO2 ~24% AAD
+# (unchanged band). MDEA is the H2S-selective amine, so a data-fit H2S matters.
 MDEA = AmineSystem(
     name="MDEA",
-    prot=(-8483.95, -13.8328, 0.0, 87.39717), prot_F=(-0.03628, 0.6262))
+    prot=(-8483.95, -13.8328, 0.0, 87.39717), prot_F=(-0.1068, -0.2445))
+# MEA (primary amine, strong carbamate). Protonation: van't Hoff base
+# (ΔH_diss ~ 50 kJ/mol so the 1/T coeff is −ΔH/R ≈ −6038) with the constant term
+# + pressure exponent FITTED to Lawson & Garst (1976) Table IV (H2S in 15.2 wt%
+# MEA, 313–373 K) to 7.4% AAD: effective pKa(298) ≈ 9.95 vs the physical 9.50 —
+# the offset absorbs the lumped H2S non-idealities, the Kent-Eisenberg
+# fitted-constant approach. Carbamate: a physical formation slope (≈ Aroua 1997's
+# 1781·ln10 ≈ 4100 K) with the magnitude FITTED to Lawson Table V (CO2 in 15.2
+# wt% MEA — sparse, high-T); the carbamate caps the loading near 0.5 then
+# bicarbonate carries it past (see tests). carb_F = 1 (single-concentration data).
+MEA = AmineSystem(
+    name="MEA",
+    prot=(-6038.0, 0.0, 0.0, -2.648), prot_F=(-0.110, 0.0),
+    carb=(4100.0, 0.0, 0.0, -8.895), carb_F=(0.0, 0.0))
 
-_SYSTEMS = {"DEA": DEA, "MDEA": MDEA}
+_SYSTEMS = {"DEA": DEA, "MDEA": MDEA, "MEA": MEA}
 
 
 def amine_system(name: str) -> AmineSystem:
@@ -121,17 +138,27 @@ def _clamp_exp(arg: float) -> float:
     return math.exp(min(max(arg, -700.0), 700.0))
 
 
-def _apparent(sys: AmineSystem, T: float, P_co2_kpa: float, amine_M: float
-              ) -> tuple[float, float | None]:
-    """Apparent protonation and carbamate constants K' = K·F at (T, P_CO2, M)."""
-    pf = max(P_co2_kpa, 1e-6)          # F is a CO2-VLE correction; floor ln arg
+def _apparent(sys: AmineSystem, T: float, P_prot_kpa: float, P_co2_kpa: float,
+              amine_M: float) -> tuple[float, float | None]:
+    """Apparent protonation and carbamate constants K' = K·F at (T, P, M).
+
+    The protonation apparent factor is an ionic-strength correction, so it is
+    driven by the **total acid-gas partial pressure** ``P_prot_kpa`` = P_CO2 +
+    P_H2S (Haji-Sulaiman parameterized it with P_CO2 as the proxy because their
+    data were CO2-only; using the total generalizes it to H2S and mixed systems
+    and reduces to the original for CO2-only). The carbamate apparent factor
+    stays CO2-specific (the carbamate forms from bicarbonate). Earlier the
+    protonation factor used P_CO2 even for H2S, where the 1e-6 floor blew K_prot
+    up by ~700x and made H2S loadings ~30x too low."""
+    pp = max(P_prot_kpa, 1e-6)         # ionic-strength proxy: total acid gas
+    pc = max(P_co2_kpa, 1e-6)          # carbamate factor is CO2-specific
     m = max(amine_M, 1e-6)             # floor: F is undefined at zero amine
     g, k = sys.prot_F
-    kp = _arr(sys.prot, T) * _clamp_exp(g * math.log(pf) + k * math.log(m))
+    kp = _arr(sys.prot, T) * _clamp_exp(g * math.log(pp) + k * math.log(m))
     kc = None
     if sys.carb is not None and sys.carb_F is not None:
         gc, jc = sys.carb_F
-        kc = _arr(sys.carb, T) * _clamp_exp(gc * math.log(pf) + jc / m)
+        kc = _arr(sys.carb, T) * _clamp_exp(gc * math.log(pc) + jc / m)
     return kp, kc
 
 
@@ -145,7 +172,7 @@ def speciate(T: float, P_co2: float, P_h2s: float, amine_M: float,
     Kco2, Khco3, Kw, Kh2s = (_arr(p, T) for p in (_K_CO2, _K_HCO3, _K_W, _K_H2S))
     co2 = max(P_co2, 0.0) * ATM_PER_KPA / _arr(_H_CO2, T)
     h2s = max(P_h2s, 0.0) * ATM_PER_KPA / _arr(_H_H2S, T)
-    Kp, Kc = _apparent(sys, T, P_co2, amine_M)
+    Kp, Kc = _apparent(sys, T, P_co2 + P_h2s, P_co2, amine_M)
 
     def carb_ratio(h: float) -> float:        # [AmCOO-]/[Am] = K_carb'·[HCO3-]
         return Kc * Kco2 * co2 / h if Kc is not None else 0.0

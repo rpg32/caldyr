@@ -57,9 +57,10 @@ def make_package(spec: str, components: list[str]) -> PropertyPackage:
       * ``thermo:NRTL`` — activity-coefficient liquid (polar systems, azeotropes).
       * ``coolprop:Water`` — pure-water steam tables (CoolProp IAPWS-95);
         single-component water flowsheets only.
-      * ``amine:DEA`` / ``amine:MDEA`` — reactive acid-gas (modified
-        Kent-Eisenberg) package for amine gas sweetening (CO2/H2S absorbers,
-        strippers and regenerators); see :mod:`caldyr.thermo.amine_pkg`.
+      * ``amine:DEA`` / ``amine:MDEA`` / ``amine:MEA`` — reactive acid-gas
+        (modified Kent-Eisenberg) package for amine gas sweetening (CO2/H2S
+        absorbers, strippers and regenerators); see
+        :mod:`caldyr.thermo.amine_pkg`.
     """
     backend, _, method = spec.partition(":")
     if backend == "amine":
