@@ -822,6 +822,76 @@ class Absorber(UnitOp):
             )
         return reb_T
 
+    def _reboiler_duty(self, method: str, N: int, reb_T: float | None,
+                       active: list[str]) -> float | None:
+        """Parse the optional ``reboiler_duty`` param (W, heat added at the bottom
+        stage) — the alternative reboiler spec to ``reboiler_T``: instead of
+        pinning the bottoms temperature it sets the reboiler heat input, which
+        keeps the bottom-stage energy balance intact (better conditioned). This
+        is the **robust amine-regenerator** spec: paired with ``condenser_T`` it
+        gives a dried acid-gas product AND a closed water loop (no open steam), and
+        the solve warm-starts from an open-steam proxy so the otherwise-stiff
+        condenser+reboiler combination converges. Requires Naphtali-Sandholm and
+        water in the system (for the steam proxy)."""
+        spec = self.params.get("reboiler_duty")
+        if spec is None:
+            return None
+        reb_duty = float(spec)
+        if method != "naphtali_sandholm":
+            raise AbsorberError(
+                f"Absorber {self.id!r}: 'reboiler_duty' is only supported with "
+                f"method='naphtali_sandholm'"
+            )
+        if reb_T is not None:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: specify only one of 'reboiler_T' "
+                f"(pin the bottoms temperature) or 'reboiler_duty' (set the heat)"
+            )
+        if N < 2:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: a reboiler needs n_stages >= 2; got {N}"
+            )
+        if reb_duty <= 0.0:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: reboiler_duty={reb_duty} W must be > 0 "
+                f"(it boils up the stripping vapour)"
+            )
+        if "water" not in active:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: 'reboiler_duty' needs water in the system "
+                f"(the warm-start proxy boils steam); got components {active}"
+            )
+        return reb_duty
+
+    def _solve_reboiled_ns(self, uid, pp, active, N, P_j, feeds, Q, reb_duty,
+                           profiles, max_iter, t_bounds, cond_T, P, T_l):
+        """Solve an internally-boiled (reboiler-duty) NS column via a two-stage
+        continuation: (1) a robust **open-steam proxy** — the same column with a
+        synthetic steam feed on the bottom stage (sized from the duty) and no
+        reboiler — converges from a cold start; (2) the **real** column (the
+        reboiler duty on the bottom stage, no steam) re-solves from the proxy's
+        in-basin profile in a handful of Newton steps."""
+        # Proxy steam ~ the boilup the duty produces (duty / water latent heat),
+        # bounded by the liquid feed so the proxy column is well-posed.
+        f_liq = feeds[0][1]
+        F_liq = sum(f_liq.values()) or 1.0
+        z_l = {c: f_liq[c] / F_liq for c in active}
+        steam = min(max(reb_duty / 45.0e3, 0.1 * F_liq), F_liq)
+        T_steam = min(t_bounds[1] - 5.0, max(T_l, 393.0))
+        h_steam = pp.enthalpy(T_steam, P, {"water": 1.0})
+        # Proxy seed: cool condenser top -> hot steam bottom, with steam traffic.
+        Tp, xp, yp, Lp, Vp = self._initial_profiles(
+            N, active, {"water": 1.0}, z_l, T_steam, T_l, steam, F_liq, cond_T, None)
+        proxy_feeds = list(feeds) + [(N - 1, {"water": steam}, steam * h_steam)]
+        proxy = _solve_ns_absorber(
+            uid, pp, active, N, P_j, proxy_feeds, [0.0] * N,
+            Tp, xp, yp, Lp, Vp, max_iter, t_bounds, cond_T, None)
+        # Re-solve the real internally-boiled column from the proxy profile.
+        return _solve_ns_absorber(
+            uid, pp, active, N, P_j, feeds, Q,
+            proxy["T"], proxy["x"], proxy["y"], proxy["L"], proxy["V"],
+            max_iter, t_bounds, cond_T, None)
+
     def solve(self, inlets: dict[str, Stream], pp) -> dict[str, PortStream]:
         gas = inlets.get("gas_in")
         liq = inlets.get("liquid_in")
@@ -837,12 +907,13 @@ class Absorber(UnitOp):
             )
         # A reboiler supplies the stripping vapour internally, so 'gas_in' is
         # then optional (a regenerator with no open steam).
-        reboiled = self.params.get("reboiler_T") is not None
+        reboiled = (self.params.get("reboiler_T") is not None
+                    or self.params.get("reboiler_duty") is not None)
         gas_present = gas is not None and bool(gas.molar_flow)
         if not gas_present and not reboiled:
             raise AbsorberError(
-                f"Absorber {self.id!r}: missing or empty inlet on 'gas_in' "
-                f"(or set 'reboiler_T' for an internally-boiled stripper)"
+                f"Absorber {self.id!r}: missing or empty inlet on 'gas_in' (or set "
+                f"'reboiler_T'/'reboiler_duty' for an internally-boiled stripper)"
             )
 
         T_l, P_l, F_l = liq.require_state()
@@ -878,12 +949,16 @@ class Absorber(UnitOp):
         murphree = self._murphree_map(active)
         cond_T = self._condenser_T(method, N)
         reb_T = self._reboiler_T(method, N, cond_T is not None)
+        reb_duty = self._reboiler_duty(method, N, reb_T, active)
         # With a partial condenser, stage 0 is the condenser and the liquid feed
         # enters the top tray (stage 1); otherwise it enters stage 0.
         liq_stage = 1 if cond_T is not None else 0
         feeds = [(liq_stage, f_liq, F_l * h_l)]
         if gas_present:
             feeds.append((N - 1, f_gas, F_g * h_g))
+        Q = [0.0] * N
+        if reb_duty is not None:
+            Q[N - 1] = reb_duty                # reboiler heat on the bottom stage
         T0, x0, y0, L0, V0 = self._initial_profiles(
             N, active, z_g, z_l, T_g, T_l, F_g, F_l, cond_T, reb_T)
         t_lo = min(T_g, T_l) - 60.0
@@ -892,24 +967,35 @@ class Absorber(UnitOp):
             t_lo = min(t_lo, cond_T - 30.0)
         if reb_T is not None:
             t_hi = max(t_hi, reb_T + 30.0)
+        if reb_duty is not None:
+            t_hi = max(t_hi, T_l + 60.0)
         t_bounds = (t_lo, t_hi)
+        uid = f"Absorber {self.id!r}"
         if method == "naphtali_sandholm":
             if murphree is not None:
                 raise AbsorberError(
                     f"Absorber {self.id!r}: the 'naphtali_sandholm' method does "
                     f"not support a Murphree efficiency yet — use 'sum_rates'"
                 )
-            res = _solve_ns_absorber(
-                f"Absorber {self.id!r}", pp, active, N, P_j, feeds,
-                [0.0] * N, T0, x0, y0, L0, V0, max_iter, t_bounds, cond_T, reb_T)
+            if reb_duty is not None:
+                # A reboiler duty + condenser is FD-Jacobian-stiff from a cold
+                # start, so warm-start from a robust open-steam proxy (a synthetic
+                # bottom steam feed sized from the duty) then re-solve the real
+                # internally-boiled column from that in-basin profile.
+                res = self._solve_reboiled_ns(
+                    uid, pp, active, N, P_j, feeds, Q, reb_duty,
+                    (T0, x0, y0, L0, V0), max_iter, t_bounds, cond_T, P, T_l)
+            else:
+                res = _solve_ns_absorber(
+                    uid, pp, active, N, P_j, feeds, Q, T0, x0, y0, L0, V0,
+                    max_iter, t_bounds, cond_T, reb_T)
         else:
             res = _solve_sum_rates(
-                f"Absorber {self.id!r}", pp, active, N, P_j, feeds,
-                [0.0] * N, T0, x0, y0, L0, V0, max_iter, T_bounds=t_bounds,
-                murphree=murphree, bottom_vapor_flows=f_gas)
+                uid, pp, active, N, P_j, feeds, Q, T0, x0, y0, L0, V0, max_iter,
+                T_bounds=t_bounds, murphree=murphree, bottom_vapor_flows=f_gas)
 
         q_cond = res.get("condenser_duty") if cond_T is not None else None
-        q_reb = res.get("reboiler_duty") if reb_T is not None else None
+        q_reb = res.get("reboiler_duty") if reb_T is not None else reb_duty
         q_added = (q_cond or 0.0) + (q_reb or 0.0)
         out, design = _build_products(
             self.id, pp, comps, active, f_tot, res, P_j,
@@ -919,7 +1005,8 @@ class Absorber(UnitOp):
             design["condenser_T"] = cond_T
             design["condenser_duty"] = q_cond
         if q_reb is not None:
-            design["reboiler_T"] = reb_T
+            if reb_T is not None:
+                design["reboiler_T"] = reb_T
             design["reboiler_duty"] = q_reb
         design["N"] = float(N)            # ideal stages (incl. condenser if any)
         design["absorbed"] = {

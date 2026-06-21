@@ -24,7 +24,7 @@ import pytest
 from caldyr.core import Stream
 from caldyr.thermo import AmineAcidGasPackage, make_package
 from caldyr.thermo.amine import acid_gas_partial_pressures
-from caldyr.unitops.absorber import Absorber
+from caldyr.unitops.absorber import Absorber, AbsorberError
 
 _COMPS = ["DEA", "water", "CO2", "H2S", "methane"]
 
@@ -353,6 +353,48 @@ def test_regenerator_reflux_condenser_dries_the_acid_gas():
     acid = _flows(od["vapor_out"])
     for c in _COMPS:
         assert abs(feed[c] - lean[c] - acid[c]) < 1e-7 * sum(feed.values())
+
+
+@pytest.mark.slow
+def test_reboiled_refluxed_regenerator_closes_the_water_loop():
+    """The fully internally-boiled regenerator: a reflux condenser (dry product)
+    PLUS a reboiler duty (no open steam). Pinning both end temperatures is
+    FD-Jacobian-stiff, so reboiler_duty + a warm-start continuation from an
+    open-steam proxy is used — it converges robustly. Because no steam is fed,
+    the water is conserved: the lean amine keeps ~all the rich water (only the
+    dry overhead leaves), so the make-up collapses to ~1 mol/s vs ~84 for the
+    open-steam stripper — the real point of the condenser+reboiler pair."""
+    pp = _pkg()
+    Prg = 1.8e5
+    rich = {"DEA": 52.0, "water": 800.0, "CO2": 14.5, "H2S": 6.0, "methane": 0.0}
+    reg = Absorber("REG", {"n_stages": 10, "method": "naphtali_sandholm",
+                           "max_iter": 100, "condenser_T": 320.0,
+                           "reboiler_duty": 8.0e6})
+    out = reg.solve({"liquid_in": _stream(rich, 388.0, Prg)}, pp)   # no gas_in
+    d = reg.design
+    assert d["energy_residual_rel"] < 1e-6
+    assert d["condenser_duty"] < 0.0 and d["reboiler_duty"] == pytest.approx(8.0e6)
+    acid, lean = out["vapor_out"], _flows(out["liquid_out"])
+    assert acid.z["water"] < 0.2                       # dried product
+    assert lean["CO2"] / lean["DEA"] < 0.01            # regenerated lean
+    # water is conserved (no open steam): lean water ~ rich water, make-up tiny
+    assert lean["water"] > 0.99 * rich["water"]
+    makeup = rich["water"] - lean["water"]
+    assert 0.0 < makeup < 10.0                          # vs ~84 for open steam
+    # overall mass balance: rich = lean + acid gas (no steam feed)
+    a = _flows(acid)
+    for c in _COMPS:
+        assert abs(rich.get(c, 0.0) - lean[c] - a[c]) < 1e-6 * sum(rich.values())
+
+
+def test_reboiler_duty_and_temperature_are_mutually_exclusive():
+    pp = _pkg()
+    reg = Absorber("REG", {"n_stages": 8, "method": "naphtali_sandholm",
+                           "reboiler_T": 390.0, "reboiler_duty": 5.0e6})
+    with pytest.raises(AbsorberError, match="only one of"):
+        reg.solve({"liquid_in": _stream(
+            {"DEA": 52.0, "water": 800.0, "CO2": 10.0, "H2S": 4.0}, 388.0, 1.8e5)},
+            pp)
 
 
 def test_more_solvent_absorbs_more():
