@@ -347,3 +347,70 @@ def test_more_solvent_absorbs_more():
         return ab.design["absorbed"]["CO2"]
 
     assert run(700.0) <= run(1100.0) + 1e-9
+
+
+@pytest.mark.slow
+def test_amine_plant_native_flowsheet_closes():
+    """The §15.3 loop as a **native Flowsheet** (the example/24 wiring): the
+    recycle solver tears the lean-amine loop and an in-loop :class:`Makeup`
+    controller holds the circulating water, so ``fs.solve()`` converges the whole
+    plant — matching the hand-rolled script tear of test_amine_recycle_loop_closes.
+
+    A fixed make-up makes this loop inventory-*unstable* (open-steam stripping
+    loses water overhead with no stable fixed point), so the make-up must act
+    in-loop; direct substitution (not Wegstein, which the column-solver noise
+    destabilizes) then converges in a few sweeps. The tear tolerance is ~3e-3
+    because the lean loading ~3e-4 makes the trace acid-gas flows relatively
+    sensitive while the macroscopic balances close."""
+    from caldyr.core import Component, Flowsheet
+    from caldyr.unitops import Heater, Makeup
+
+    P_abs, P_reg, W = 6.9e6, 1.8e5, 800.0
+    z_sour = {"methane": 0.9415, "CO2": 0.0413, "H2S": 0.0172}
+    fs = Flowsheet(components=[Component(c) for c in _COMPS],
+                   property_package="amine:DEA")
+    fs.add(Absorber("ABS", {"n_stages": 16, "murphree": {"CO2": 0.6}}))
+    fs.add(Heater("HEAT", {"T_out": 388.0, "dP": P_abs - P_reg}))
+    fs.add(Absorber("REG", {"n_stages": 8, "method": "naphtali_sandholm",
+                            "max_iter": 80}))
+    fs.add(Heater("COOL", {"T_out": 313.15, "dP": P_reg - P_abs}))
+    fs.add(Makeup("MK", {"component": "water", "target": W, "T": 313.15, "P": P_abs}))
+    fs.feed("SOUR", "ABS:gas_in", T=313.15, P=P_abs, molar_flow=350.0,
+            z={c: z_sour.get(c, 0.0) for c in _COMPS})
+    fs.feed("STEAM", "REG:gas_in", T=396.0, P=P_reg, molar_flow=140.0, z={"water": 1.0})
+    fs.connect("RICH", "ABS:liquid_out", "HEAT:in1")
+    fs.connect("RICHHOT", "HEAT:out", "REG:liquid_in")
+    fs.connect("LEAN", "REG:liquid_out", "COOL:in1")
+    fs.connect("LEANCOOL", "COOL:out", "MK:in1")
+    fs.connect("LEANRECY", "MK:out", "ABS:liquid_in")
+    fs.connect("SWEET", "ABS:vapor_out", None)
+    fs.connect("ACID", "REG:vapor_out", None)
+    fs.connect("HQ", "HEAT:duty", None)
+    fs.connect("CQ", "COOL:duty", None)
+    lean0 = {"DEA": 52.0, "water": W, "CO2": 0.05, "H2S": 0.02}
+    tot = sum(lean0.values())
+    fs.solver_hints = {
+        "tear_guesses": {"LEANRECY": {"T": 313.15, "P": P_abs, "molar_flow": tot,
+                                      "z": {c: lean0.get(c, 0.0) / tot for c in _COMPS}}},
+        "tear_tolerance": 3e-3,
+    }
+
+    rep = fs.solve(method="direct", max_iter=40)
+    assert rep.converged
+    assert rep.tear_streams == ["LEANRECY"]
+
+    lr, sweet, acid = fs.streams["LEANRECY"], fs.streams["SWEET"], fs.streams["ACID"]
+    fl = lambda s, c: s.molar_flow * s.z.get(c, 0.0)         # noqa: E731
+    # the make-up holds the circulating water at the target
+    assert fl(lr, "water") == pytest.approx(W, abs=1.0)
+    assert fs.units["MK"].design["makeup_flow"] > 0.0        # open steam loses water
+    # regenerated lean solvent + sweetened gas (matching the script tear)
+    assert lr.z["CO2"] / lr.z["DEA"] < 0.01
+    assert (1.0 - fl(sweet, "CO2") / (350.0 * z_sour["CO2"])) > 0.9
+    # overall component balance: feeds + make-up == products
+    makeup = fs.units["MK"].design["makeup_flow"]
+    for c in _COMPS:
+        cin = (fl(fs.streams["SOUR"], c) + fl(fs.streams["STEAM"], c)
+               + (makeup if c == "water" else 0.0))
+        cout = fl(sweet, c) + fl(acid, c)
+        assert abs(cin - cout) < 1.0                         # mol/s, ~1e-3 relative

@@ -15,6 +15,7 @@ from .flash import FlashDrum
 from .gibbs_reactor import CanteraSpeciesError, GibbsReactor
 from .heat_exchanger import HeatExchanger
 from .heater import Heater
+from .makeup import Makeup
 from .mixer import Mixer
 from .pfr import PFR
 from .pipe import PipeFlowError, PipeSegment
@@ -23,6 +24,7 @@ from .reaction import KineticReaction, Reaction
 from .rigorous_column import RigorousColumn, RigorousColumnError
 from .shortcut_column import ShortcutColumn, ShortcutColumnError
 from .solids import BaghouseFilter, Cyclone, RotaryVacuumFilter, SolidsOperationError
+from .source import Source
 from .splitter import Splitter
 from .three_phase_separator import ThreePhaseSeparator
 from .valve import Valve
@@ -33,6 +35,8 @@ __all__ = [
     "Reaction",
     "KineticReaction",
     "Mixer",
+    "Source",
+    "Makeup",
     "Heater",
     "FiredHeater",
     "AirCooler",

@@ -150,10 +150,11 @@ def register_sizer(*unit_types: str) -> Callable[[Sizer], Sizer]:
 
 
 # -- sizers ------------------------------------------------------------------
-@register_sizer("Mixer", "Splitter", "Valve")
+@register_sizer("Mixer", "Splitter", "Valve", "Source", "Makeup")
 def _negligible_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
-    """Mixers, splitters and throttling valves contribute no significant
-    equipment cost (piping/header components)."""
+    """Mixers, splitters, throttling valves, boundary sources and make-up
+    controllers contribute no significant equipment cost (piping/header
+    components)."""
     return []
 
 
