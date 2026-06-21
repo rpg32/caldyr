@@ -72,6 +72,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import numpy as np
 from scipy.optimize import brentq
 
 from ..core import EnergyStream, Port, Stream, UnitOp
@@ -90,6 +91,26 @@ _ENERGY_TOL = 1e-9       # relative energy residual required at convergence
 _NEWTON_STEP_MAX = 12.0  # K, per-stage Newton step clamp
 _DH_DT = 0.05            # K, finite-difference step for dh/dT
 _WARM_Z_TOL = 0.1        # max |dz| of the feed for warm-starting
+
+# -- Naphtali-Sandholm (simultaneous-correction) constants, mirroring the
+# proven settings in :mod:`caldyr.unitops.rigorous_column`. NS is the robust
+# fallback for columns the alternating sum-rates iteration cannot converge —
+# notably an amine *regenerator* (reactive desorption + condensing stripping
+# steam), where the sum-rates traffic update limit-cycles.
+_NS_TOL = 1e-9           # scaled residual infinity-norm convergence
+_NS_FLOOR = 1e-12        # mol/s, floor on the component flows
+_NS_DL_FRAC = 1e-6       # relative finite-difference step on the flows
+_NS_DL_MIN = 1e-10       # mol/s, floor on the flow finite-difference step
+_NS_DT = 0.01            # K, finite-difference step on the temperatures
+_NS_LS_MAX = 24          # backtracking line-search halvings
+_NS_TRUST = 0.5          # max fractional reduction a flow may take in one step
+_NS_STEP_REL = 1e-4      # only flows above this fraction of the stage total cap
+_NS_LM_INIT = 1e-3       # Levenberg-Marquardt damping: initial value
+_NS_LM_MIN = 1e-10       # ... lower bound (-> Gauss-Newton, quadratic endgame)
+_NS_LM_MAX = 1e10        # ... upper bound (-> short scaled gradient descent)
+_NS_LM_UP = 4.0          # ... growth on a rejected trial
+_NS_LM_DOWN = 3.0        # ... shrink on an accepted step
+_NS_REFINE = 2           # iterative-refinement passes on the Newton linear solve
 
 
 class AbsorberError(ValueError):
@@ -117,6 +138,8 @@ def _solve_sum_rates(
     V: list[float],
     max_iter: int,
     T_bounds: tuple[float, float],
+    murphree: dict[str, float] | None = None,
+    bottom_vapor_flows: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Run the sum-rates (Burningham-Otto) MESH iteration.
 
@@ -125,6 +148,20 @@ def _solve_sum_rates(
     ``x``, ``y``, ``L``, ``V`` are starting profiles (mutated copies are
     returned in the result dict, never the inputs); ``T_bounds`` brackets the
     physically admissible stage temperatures for the Newton energy solve.
+
+    ``murphree`` is an optional per-component vapor (Murphree) stage efficiency
+    ``{component: E}`` (default 1.0 = equilibrium). A finite efficiency lets a
+    stage approach equilibrium only partially — essential for the *kinetically*
+    limited acid gases in amine sweetening (e.g. CO2 with a tertiary amine: book
+    §15.3 uses E_CO2 ~ 0.15, E_H2S ~ 0.8). The Murphree relation
+    ``y_j = E*K_j*x_j + (1-E)*y_(j+1)`` is solved *exactly* (not lagged) by
+    writing the component balance of an E<1 species in its **vapor** component
+    flows ``v_j`` — that keeps the (1-E)*y_(j+1) coupling tridiagonal (see
+    :func:`_murphree_vapor_column`). The entering vapor below the bottom stage is
+    the gas feed (``bottom_vapor_flows``). E=1 species keep the standard
+    liquid-flow tridiagonal (a vapor formulation is ill-conditioned for a
+    barely-volatile solvent like the amine). The two formulations are identical
+    at E=1, so a mix of efficiencies is consistent.
     """
     T, L, V = list(T), list(L), list(V)
     x = [dict(row) for row in x]
@@ -150,6 +187,11 @@ def _solve_sum_rates(
     n_prop = 0
     it = 0
     dT = dF = resid_rel = math.inf
+    eff = {c: float((murphree or {}).get(c, 1.0)) for c in active}
+    gas_f = {c: max((bottom_vapor_flows or {}).get(c, 0.0), 0.0) for c in active}
+    gas_tot = sum(gas_f.values())
+    y_gas = {c: (gas_f[c] / gas_tot if gas_tot > 0.0 else 0.0) for c in active}
+
     for it in range(1, max_iter + 1):
         K = [pp.k_values(T[j], P_j[j], x[j], y[j]) for j in range(N)]
         n_prop += N
@@ -157,11 +199,17 @@ def _solve_sum_rates(
         # -- component balances (Thomas) + sum-rates traffic update ----------
         cols: dict[str, list[float]] = {}
         for c in active:
-            a = [0.0] + [L[j - 1] for j in range(1, N)]
-            b = [-(L[j] + V[j] * K[j][c]) for j in range(N)]
-            cc = [V[j + 1] * K[j + 1][c] for j in range(N - 1)] + [0.0]
-            d = [-f_stage[j].get(c, 0.0) for j in range(N)]
-            cols[c] = _thomas(a, b, cc, d)
+            if eff[c] < 1.0:
+                # Kinetically limited (Murphree E<1): exact vapor-flow tridiagonal.
+                cols[c] = _murphree_vapor_column(
+                    c, N, K, L, V, eff[c], f_stage, gas_f, y_gas)
+            else:
+                # Equilibrium species: standard liquid-mole-fraction tridiagonal.
+                a = [0.0] + [L[j - 1] for j in range(1, N)]
+                b = [-(L[j] + V[j] * K[j][c]) for j in range(N)]
+                cc = [V[j + 1] * K[j + 1][c] for j in range(N - 1)] + [0.0]
+                d = [-f_stage[j].get(c, 0.0) for j in range(N)]
+                cols[c] = _thomas(a, b, cc, d)
         sum_raw = [sum(max(cols[c][j], 0.0) for c in active) for j in range(N)]
         if min(sum_raw) <= 0.0:
             raise AbsorberError(
@@ -181,7 +229,18 @@ def _solve_sum_rates(
         for j in range(N):
             row = {c: max(cols[c][j], _X_FLOOR) for c in active}
             x[j] = _normalized(row)
-            y[j] = _normalized({c: K[j][c] * x[j][c] for c in active})
+        # Vapor compositions: equilibrium y=Kx for E=1 species, the Murphree
+        # relation y = E*K*x + (1-E)*y_below for E<1 (bottom-up so y_below is
+        # this iterate's value; the gas feed is the bottom stage's y_below).
+        for j in range(N - 1, -1, -1):
+            below = y[j + 1] if j < N - 1 else y_gas
+            y_raw = {
+                c: (K[j][c] * x[j][c] if eff[c] >= 1.0
+                    else eff[c] * K[j][c] * x[j][c]
+                    + (1.0 - eff[c]) * below.get(c, 0.0))
+                for c in active
+            }
+            y[j] = _normalized(y_raw)
 
         # -- energy balances: simultaneous Newton for the new T profile ------
         # Best-effort mid-iteration (the traffic may still be inconsistent);
@@ -221,6 +280,275 @@ def _solve_sum_rates(
         "prop_calls": n_prop, "energy_residual_rel": resid_rel,
         "F_total": F_total,
     }
+
+
+def _solve_ns_absorber(
+    unit_id: str, pp: Any, active: list[str], N: int, P_j: list[float],
+    feeds: list[tuple[int, dict[str, float], float]], Q: list[float],
+    T: list[float], x: list[dict[str, float]], y: list[dict[str, float]],
+    L: list[float], V: list[float], max_iter: int,
+    t_bounds: tuple[float, float],
+) -> dict[str, Any]:
+    """Naphtali-Sandholm (1971) simultaneous-correction MESH for a column with
+    NO condenser and NO reboiler — a gas absorber, stripper, or amine
+    regenerator (Seader, Henley & Roper 3e §10.4). ALL the MESH equations are
+    solved at once by a damped Newton over per-component flow variables, so the
+    method has none of the alternating sum-rates traffic instability that
+    limit-cycles on reactive desorption.
+
+    This is a simplification of the crude-tower NS in
+    :mod:`caldyr.unitops.rigorous_column`: no side draws and no
+    distillate-rate spec — every stage carries an ordinary energy balance (the
+    top stage's vapour and the bottom stage's liquid are simply the products).
+
+    Variables (``N(2C+1)``): component liquid flows ``l_i,j``, component vapour
+    flows ``v_i,j`` and stage temperature ``T_j``. Residuals: component material
+    balance ``l_i,j + v_i,j - l_i,j-1 - v_i,j+1 - f_i,j``; per-component
+    equilibrium ``v_i,j - K_i,j (V_j/L_j) l_i,j``; the stage energy balance
+    (scaled). The Jacobian is finite-difference with per-stage property caching;
+    a fractional-step cap + 2-norm line search keep the flows positive and the
+    temperatures bounded, with a Levenberg-Marquardt escape if the Newton
+    direction stalls. Returns the same profile dict as :func:`_solve_sum_rates`.
+    """
+    t_lo, t_hi = t_bounds
+    C = len(active)
+    span = 2 * C + 1
+    nv = N * span
+    P = np.array(P_j, dtype=float)
+    Fcomp = np.zeros((N, C))
+    Fh = np.zeros(N)
+    for j, flows, fh in feeds:
+        for c, val in flows.items():
+            if c in active:
+                Fcomp[j, active.index(c)] += val
+        Fh[j] += fh
+    Qa = np.array(Q, dtype=float)
+    Ftot = max(float(Fcomp.sum()), 1.0)
+
+    lmat = np.full((N, C), _NS_FLOOR)
+    vmat = np.full((N, C), _NS_FLOOR)
+    for j in range(N):
+        for i, c in enumerate(active):
+            lmat[j, i] = max(L[j] * x[j].get(c, 0.0), _NS_FLOOR)
+            vmat[j, i] = max(V[j] * y[j].get(c, 0.0), _NS_FLOOR)
+    Tv = np.array(T, dtype=float)
+    n_prop = 0
+
+    def stage_eval(j, lj, vj, Tj):
+        nonlocal n_prop
+        Lj = float(lj.sum())
+        Vj = float(vj.sum())
+        xj = {active[i]: lj[i] / Lj for i in range(C)}
+        yj = {active[i]: vj[i] / Vj for i in range(C)}
+        Kd = pp.k_values(Tj, P[j], xj, yj)
+        Karr = np.array([Kd[active[i]] for i in range(C)])
+        hLj = pp.enthalpy_liquid(Tj, P[j], xj)
+        hVj = pp.enthalpy_vapor(Tj, P[j], yj)
+        n_prop += 3
+        return Lj, Vj, Karr, hLj, hVj
+
+    Lc = np.empty(N)
+    Vc = np.empty(N)
+    Kc = np.empty((N, C))
+    hLc = np.empty(N)
+    hVc = np.empty(N)
+
+    for j in range(N):
+        Lc[j], Vc[j], Kc[j], hLc[j], hVc[j] = stage_eval(j, lmat[j], vmat[j], Tv[j])
+    e_ref = max(float(np.abs(hLc).max()), float(np.abs(hVc).max()), 1.0) * Ftot
+
+    def residuals(lm, vm, Lq, Vq, Kq, hLq, hVq):
+        R = np.empty(nv)
+        for j in range(N):
+            base = j * span
+            in_lh = Lq[j - 1] * hLq[j - 1] if j > 0 else 0.0
+            in_vh = Vq[j + 1] * hVq[j + 1] if j < N - 1 else 0.0
+            for i in range(C):
+                in_l = lm[j - 1, i] if j > 0 else 0.0
+                in_v = vm[j + 1, i] if j < N - 1 else 0.0
+                R[base + i] = (lm[j, i] + vm[j, i] - in_l - in_v
+                               - Fcomp[j, i]) / Ftot
+                R[base + C + i] = (vm[j, i]
+                                   - Kq[j, i] * (Vq[j] / Lq[j]) * lm[j, i]) / Ftot
+            out = Lq[j] * hLq[j] + Vq[j] * hVq[j]
+            R[base + 2 * C] = (out - in_lh - in_vh - Fh[j] - Qa[j]) / e_ref
+        return R
+
+    def build_jac(R0):
+        jac = np.empty((nv, nv))
+        for j in range(N):
+            for kind in range(span):
+                col = j * span + kind
+                lm, vm, tj = lmat, vmat, Tv[j]
+                if kind < C:
+                    dk = max(_NS_DL_FRAC * lmat[j, kind], _NS_DL_MIN)
+                    lm = lmat.copy()
+                    lm[j, kind] += dk
+                elif kind < 2 * C:
+                    i = kind - C
+                    dk = max(_NS_DL_FRAC * vmat[j, i], _NS_DL_MIN)
+                    vm = vmat.copy()
+                    vm[j, i] += dk
+                else:
+                    dk = _NS_DT
+                    tj = Tv[j] + dk
+                Lj, Vj, Kj, hLj, hVj = stage_eval(j, lm[j], vm[j], tj)
+                Lc2, Vc2 = Lc.copy(), Vc.copy()
+                Kc2, hLc2, hVc2 = Kc.copy(), hLc.copy(), hVc.copy()
+                Lc2[j], Vc2[j], Kc2[j] = Lj, Vj, Kj
+                hLc2[j], hVc2[j] = hLj, hVj
+                jac[:, col] = (residuals(lm, vm, Lc2, Vc2, Kc2, hLc2, hVc2)
+                               - R0) / dk
+        return jac
+
+    def cap(delta):
+        smax = 1.0
+        for j in range(N):
+            thr_l = _NS_STEP_REL * Lc[j]
+            thr_v = _NS_STEP_REL * Vc[j]
+            for kind in range(2 * C):
+                cur = lmat[j, kind] if kind < C else vmat[j, kind - C]
+                thr = thr_l if kind < C else thr_v
+                dd = delta[j * span + kind]
+                if dd < 0.0 and cur > thr and cur + dd > 0.0:
+                    smax = min(smax, -_NS_TRUST * cur / dd)
+        return min(1.0, smax)
+
+    def evals(delta, frac):
+        d = frac * delta
+        lm = lmat.copy()
+        vm = vmat.copy()
+        tt = Tv.copy()
+        Lt, Vt = Lc.copy(), Vc.copy()
+        Kt, hLt, hVt = Kc.copy(), hLc.copy(), hVc.copy()
+        for j in range(N):
+            b = j * span
+            for i in range(C):
+                lm[j, i] = max(lmat[j, i] + d[b + i], _NS_FLOOR)
+                vm[j, i] = max(vmat[j, i] + d[b + C + i], _NS_FLOOR)
+            tt[j] = min(max(Tv[j] + d[b + 2 * C], t_lo), t_hi)
+            Lt[j], Vt[j], Kt[j], hLt[j], hVt[j] = stage_eval(j, lm[j], vm[j], tt[j])
+        Rt = residuals(lm, vm, Lt, Vt, Kt, hLt, hVt)
+        return float(Rt @ Rt), (lm, vm, tt, Lt, Vt, Kt, hLt, hVt, Rt)
+
+    def line_search(delta, rss):
+        frac = cap(delta)
+        for _ in range(_NS_LS_MAX):
+            ss, st = evals(delta, frac)
+            if ss < (1.0 - 1e-4 * frac) * rss:
+                return ss, st
+            frac *= 0.5
+        return None, None
+
+    R0 = residuals(lmat, vmat, Lc, Vc, Kc, hLc, hVc)
+    converged = False
+    it = 0
+    rnorm = float(np.max(np.abs(R0)))
+    lam = _NS_LM_INIT
+    for it in range(1, max_iter + 1):
+        rnorm = float(np.max(np.abs(R0)))
+        if rnorm < _NS_TOL:
+            converged = True
+            break
+        rss = float(R0 @ R0)
+        jac = build_jac(R0)
+        try:
+            delta_n = np.linalg.solve(jac, -R0)
+            for _ref in range(_NS_REFINE):
+                lin = -R0 - jac @ delta_n
+                if (float(np.max(np.abs(lin)))
+                        <= 1e-13 * float(np.max(np.abs(R0)) + 1e-30)):
+                    break
+                delta_n = delta_n + np.linalg.solve(jac, lin)
+        except np.linalg.LinAlgError:
+            delta_n = np.linalg.lstsq(jac, -R0, rcond=1e-8)[0]
+        ss, state = line_search(delta_n, rss)
+        if ss is None:                  # Newton stalled: Levenberg-Marquardt
+            jtj = jac.T @ jac
+            jtr = jac.T @ R0
+            jdiag = np.maximum(np.diag(jtj), 1e-30)
+            lam = max(lam, _NS_LM_INIT)
+            for _ in range(_NS_LS_MAX):
+                try:
+                    delta_l = np.linalg.solve(jtj + lam * np.diag(jdiag), -jtr)
+                except np.linalg.LinAlgError:
+                    delta_l = -jtr / jdiag
+                ss2, st2 = evals(delta_l, cap(delta_l))
+                if ss2 < rss:
+                    ss, state = ss2, st2
+                    break
+                lam = min(lam * _NS_LM_UP, _NS_LM_MAX)
+        if state is None:
+            break
+        lmat, vmat, Tv, R0 = state[0], state[1], state[2], state[8]
+        Lc[:], Vc[:] = state[3], state[4]
+        Kc[:], hLc[:], hVc[:] = state[5], state[6], state[7]
+        lam = max(lam / _NS_LM_DOWN, _NS_LM_MIN)
+
+    if not converged:
+        raise AbsorberError(
+            f"{unit_id}: Naphtali-Sandholm simultaneous-correction did not "
+            f"converge in {max_iter} iterations (scaled residual {rnorm:.3g} vs "
+            f"{_NS_TOL}); check the specifications, or raise 'max_iter'"
+        )
+    x_out = [_normalized({active[i]: max(float(lmat[j, i]), _X_FLOOR)
+                          for i in range(C)}) for j in range(N)]
+    y_out = [_normalized({active[i]: max(float(vmat[j, i]), _X_FLOOR)
+                          for i in range(C)}) for j in range(N)]
+    return {
+        "T": [float(t) for t in Tv], "L": [float(v) for v in Lc],
+        "V": [float(v) for v in Vc], "x": x_out, "y": y_out,
+        "hL": [float(h) for h in hLc], "hV": [float(h) for h in hVc],
+        "iterations": it, "max_dT": 0.0, "max_dF_rel": 0.0, "damping": 1.0,
+        "prop_calls": n_prop, "energy_residual_rel": rnorm, "F_total": Ftot,
+    }
+
+
+def _murphree_vapor_column(
+    c: str, N: int, K: list[dict[str, float]], L: list[float], V: list[float],
+    e: float, f_stage: list[dict[str, float]], gas_f: dict[str, float],
+    y_gas: dict[str, float],
+) -> list[float]:
+    """Component balance of one kinetically-limited species (Murphree E<1),
+    solved EXACTLY in its vapor component flows ``v_j`` then returned as the
+    liquid mole fractions the sum-rates loop consumes (``l_j / L_j``).
+
+    Writing the tray relation ``v_j = E*S_j*l_j + (1-E)*(V_j/V_(j+1))*v_(j+1)``
+    (stripping factor ``S_j = V_j*K_j/L_j``) and substituting the liquid flows
+    ``l_j = [v_j - V_j*(1-E)*y_below]/(E*S_j)`` into the stage component balance
+    keeps the (1-E) coupling between adjacent vapors *tridiagonal* in ``v`` — so
+    the Murphree solution is obtained in one Thomas sweep, with no lag (unlike an
+    effective-K successive substitution, which converges only linearly). The
+    vapor entering below the bottom stage is the gas feed (``gas_f`` flows /
+    ``y_gas`` composition). At E=1 this reduces to the standard liquid-flow
+    balance (gas feed as the bottom entering vapor), so it is consistent with the
+    equilibrium path.
+    """
+    S = [V[j] * K[j][c] / L[j] for j in range(N)]   # stripping factor (K>0)
+    a = [0.0] * N
+    b = [0.0] * N
+    cc = [0.0] * N
+    d = [0.0] * N
+    for j in range(N):
+        # Liquid-side feed of this species at stage j (the gas feed enters as the
+        # bottom stage's *entering vapor*, not as a stage source).
+        f_liq = f_stage[j].get(c, 0.0) - (gas_f[c] if j == N - 1 else 0.0)
+        b[j] = -1.0 / (e * S[j]) - 1.0
+        d[j] = -f_liq
+        if j >= 1:
+            a[j] = 1.0 / (e * S[j - 1])
+            b[j] += -(1.0 - e) * (V[j - 1] / V[j]) / (e * S[j - 1])
+        if j <= N - 2:
+            cc[j] = 1.0 + (1.0 - e) * (V[j] / V[j + 1]) / (e * S[j])
+        if j == N - 1:
+            d[j] += -gas_f[c] - V[N - 1] * (1.0 - e) * y_gas[c] / (e * S[N - 1])
+    v = _thomas(a, b, cc, d)                          # vapor component flows v_j
+    cols = [0.0] * N
+    for j in range(N):
+        y_below = (v[j + 1] / V[j + 1]) if j < N - 1 else y_gas[c]
+        l_j = (v[j] - V[j] * (1.0 - e) * y_below) / (e * S[j])
+        cols[j] = l_j / L[j]                          # liquid mole fraction
+    return cols
 
 
 def _newton_temperatures(
@@ -310,7 +638,19 @@ class Absorber(UnitOp):
       * ``P`` — top-stage pressure, Pa (default: gas feed pressure).
       * ``dP_stage`` — linear pressure rise per stage going down, Pa
         (default 0).
-      * ``max_iter`` — sum-rates iteration cap (default 120).
+      * ``method`` — MESH solver: ``"sum_rates"`` (default, Burningham-Otto) or
+        ``"naphtali_sandholm"``. Sum-rates is fast and converges most absorbers
+        and strippers; the simultaneous-correction Naphtali-Sandholm method is
+        the robust fallback for cases where the alternating sum-rates iteration
+        limit-cycles — notably an **amine regenerator** (reactive desorption +
+        condensing stripping steam). NS does not support ``murphree`` yet.
+      * ``murphree`` — optional Murphree vapor stage efficiency: a scalar
+        (every component) or a ``{component: E}`` dict (others default to 1.0),
+        each in (0, 1]. Use it for kinetically limited mass transfer — e.g.
+        amine sweetening, where CO2 reacts slowly with a tertiary amine
+        (book §15.3: E_CO2 ~ 0.15, E_H2S ~ 0.8) so an equilibrium stage would
+        over-predict CO2 removal. Default: equilibrium stages. (sum_rates only.)
+      * ``max_iter`` — iteration cap (default 120).
     """
 
     design: dict[str, Any] | None = None
@@ -354,6 +694,26 @@ class Absorber(UnitOp):
         max_iter = int(self.params.get("max_iter", _MAX_ITER))
         return n_stages, P, dP, max_iter
 
+    def _murphree_map(self, active: list[str]) -> dict[str, float] | None:
+        """Parse the optional ``murphree`` param into a per-component efficiency
+        map. Accepts a scalar (applied to every component) or a
+        ``{component: E}`` dict (unspecified components default to 1.0). Returns
+        ``None`` for the equilibrium case (no param / all 1.0)."""
+        spec = self.params.get("murphree")
+        if spec is None:
+            return None
+        if isinstance(spec, dict):
+            eff = {c: float(spec.get(c, 1.0)) for c in active}
+        else:
+            eff = {c: float(spec) for c in active}
+        for c, e in eff.items():
+            if not 0.0 < e <= 1.0:
+                raise AbsorberError(
+                    f"Absorber {self.id!r}: Murphree efficiency for {c!r} is "
+                    f"{e} — it must lie in (0, 1]"
+                )
+        return eff if any(abs(e - 1.0) > 1e-12 for e in eff.values()) else None
+
     def solve(self, inlets: dict[str, Stream], pp) -> dict[str, PortStream]:
         gas = inlets.get("gas_in")
         liq = inlets.get("liquid_in")
@@ -389,12 +749,30 @@ class Absorber(UnitOp):
         f_tot = {c: f_gas[c] + f_liq[c] for c in active}
         feeds = [(0, f_liq, F_l * h_l), (N - 1, f_gas, F_g * h_g)]
 
+        method = str(self.params.get("method", "sum_rates"))
+        if method not in ("sum_rates", "naphtali_sandholm"):
+            raise AbsorberError(
+                f"Absorber {self.id!r}: unknown method {method!r}; expected "
+                f"'sum_rates' or 'naphtali_sandholm'"
+            )
+        murphree = self._murphree_map(active)
         T0, x0, y0, L0, V0 = self._initial_profiles(
             N, active, z_g, z_l, T_g, T_l, F_g, F_l)
-        res = _solve_sum_rates(
-            f"Absorber {self.id!r}", pp, active, N, P_j, feeds,
-            [0.0] * N, T0, x0, y0, L0, V0, max_iter,
-            T_bounds=(min(T_g, T_l) - 60.0, max(T_g, T_l) + 90.0))
+        t_bounds = (min(T_g, T_l) - 60.0, max(T_g, T_l) + 90.0)
+        if method == "naphtali_sandholm":
+            if murphree is not None:
+                raise AbsorberError(
+                    f"Absorber {self.id!r}: the 'naphtali_sandholm' method does "
+                    f"not support a Murphree efficiency yet — use 'sum_rates'"
+                )
+            res = _solve_ns_absorber(
+                f"Absorber {self.id!r}", pp, active, N, P_j, feeds,
+                [0.0] * N, T0, x0, y0, L0, V0, max_iter, t_bounds)
+        else:
+            res = _solve_sum_rates(
+                f"Absorber {self.id!r}", pp, active, N, P_j, feeds,
+                [0.0] * N, T0, x0, y0, L0, V0, max_iter, T_bounds=t_bounds,
+                murphree=murphree, bottom_vapor_flows=f_gas)
 
         out, design = _build_products(
             self.id, pp, comps, active, f_tot, res, P_j,

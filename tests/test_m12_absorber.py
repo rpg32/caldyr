@@ -136,6 +136,60 @@ def test_more_solvent_absorbs_more():
     assert fracs[0] < fracs[1] < fracs[2]
 
 
+# -- 2b. Murphree stage efficiency -------------------------------------------------
+def test_murphree_unity_equals_equilibrium():
+    """E=1 is a no-op: the Murphree code path must reproduce equilibrium stages
+    bit-for-bit (the vapor-flow formulation reduces to the liquid-flow one)."""
+    base = pentane_absorber(n_stages=6)
+    base.solve()
+    eff = pentane_absorber(n_stages=6)
+    eff.units["ABS"].params["murphree"] = 1.0
+    eff.solve()
+    assert absorbed_fraction(eff) == pytest.approx(absorbed_fraction(base), rel=1e-9)
+
+
+def test_murphree_efficiency_reduces_absorption_monotonically():
+    """A lower Murphree efficiency = a stage that approaches equilibrium less,
+    so less is absorbed; mass/energy balances stay closed throughout."""
+    fracs = []
+    for E in (1.0, 0.7, 0.4, 0.2):
+        fs = pentane_absorber(n_stages=6)
+        fs.units["ABS"].params["murphree"] = {"n-pentane": E}
+        assert fs.solve().converged
+        d = fs.units["ABS"].design
+        assert d["energy_residual_rel"] < 1e-6
+        fracs.append(absorbed_fraction(fs))
+    assert all(b < a for a, b in zip(fracs, fracs[1:]))
+
+
+def test_murphree_bad_value_raises():
+    fs = pentane_absorber()
+    fs.units["ABS"].params["murphree"] = 1.5
+    with pytest.raises(AbsorberError, match="Murphree"):
+        fs.solve()
+
+
+# -- 2c. Naphtali-Sandholm method (robust simultaneous-correction) -----------------
+def test_naphtali_sandholm_matches_sum_rates():
+    """The simultaneous-correction method must reach the same converged absorber
+    as sum-rates (it is the robust fallback for cases sum-rates can't converge,
+    not a different model)."""
+    base = pentane_absorber(n_stages=8)
+    base.solve()
+    ns = pentane_absorber(n_stages=8)
+    ns.units["ABS"].params["method"] = "naphtali_sandholm"
+    ns.solve()
+    assert absorbed_fraction(ns) == pytest.approx(absorbed_fraction(base), rel=1e-6)
+    assert ns.units["ABS"].design["energy_residual_rel"] < 1e-7
+
+
+def test_unknown_method_raises():
+    fs = pentane_absorber()
+    fs.units["ABS"].params["method"] = "bubble_point"
+    with pytest.raises(AbsorberError, match="unknown method"):
+        fs.solve()
+
+
 # -- 3. the book's SO2 absorber, structural ----------------------------------------
 def test_book_so2_absorber_structure():
     """Hameed 2025 sec. 9.1 (20 stages): book/HYSYS-PR gets Gas_Out =

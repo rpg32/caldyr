@@ -113,16 +113,25 @@ def amine_system(name: str) -> AmineSystem:
         ) from None
 
 
+def _clamp_exp(arg: float) -> float:
+    """``exp`` of an apparent-factor exponent, clamped to avoid the overflow that
+    extreme *extrapolation* can produce (e.g. a near-zero amine molarity on a
+    transient column iterate makes the ``jc/M`` carbamate term explode). The
+    clamp is far outside the fitted range, so valid results are untouched."""
+    return math.exp(min(max(arg, -700.0), 700.0))
+
+
 def _apparent(sys: AmineSystem, T: float, P_co2_kpa: float, amine_M: float
               ) -> tuple[float, float | None]:
     """Apparent protonation and carbamate constants K' = K·F at (T, P_CO2, M)."""
     pf = max(P_co2_kpa, 1e-6)          # F is a CO2-VLE correction; floor ln arg
+    m = max(amine_M, 1e-6)             # floor: F is undefined at zero amine
     g, k = sys.prot_F
-    kp = _arr(sys.prot, T) * math.exp(g * math.log(pf) + k * math.log(amine_M))
+    kp = _arr(sys.prot, T) * _clamp_exp(g * math.log(pf) + k * math.log(m))
     kc = None
     if sys.carb is not None and sys.carb_F is not None:
         gc, jc = sys.carb_F
-        kc = _arr(sys.carb, T) * math.exp(gc * math.log(pf) + jc / amine_M)
+        kc = _arr(sys.carb, T) * _clamp_exp(gc * math.log(pf) + jc / m)
     return kp, kc
 
 
@@ -212,3 +221,57 @@ def h2s_partial_pressure(T: float, alpha: float, amine_M: float,
     """Equilibrium H2S partial pressure (**kPa**) over an amine solution at H2S
     loading ``alpha``."""
     return _invert(h2s_loading, T, alpha, amine_M, amine)
+
+
+def acid_gas_partial_pressures(
+    T: float, alpha_co2: float, alpha_h2s: float, amine_M: float,
+    amine: str | AmineSystem = "MDEA",
+) -> tuple[float, float]:
+    """Joint inverse of :func:`acid_gas_loadings`: the ``(P_CO2, P_H2S)`` partial
+    pressures (**kPa**) whose equilibrium loadings equal ``(alpha_co2,
+    alpha_h2s)``.
+
+    When both acid gases are present they compete for the amine through the
+    shared proton/charge balance, so the equilibrium CO2 pressure depends on the
+    H2S loading and vice-versa — inverting each gas independently (with
+    :func:`co2_partial_pressure` / :func:`h2s_partial_pressure`) ignores that
+    coupling. This solves the 2x2 system simultaneously (a damped Newton on the
+    log-pressures, seeded from the independent inversions, which is already
+    close). Degenerate cases fall back to the relevant 1-D inversion. This is the
+    vapour-side driving force a CO2+H2S sweetening absorber/regenerator stage
+    needs."""
+    import numpy as np
+
+    if alpha_co2 <= 0.0 and alpha_h2s <= 0.0:
+        return 0.0, 0.0
+    if alpha_h2s <= 0.0:
+        return co2_partial_pressure(T, alpha_co2, amine_M, amine), 0.0
+    if alpha_co2 <= 0.0:
+        return 0.0, h2s_partial_pressure(T, alpha_h2s, amine_M, amine)
+
+    p = np.array([
+        math.log(max(co2_partial_pressure(T, alpha_co2, amine_M, amine), 1e-6)),
+        math.log(max(h2s_partial_pressure(T, alpha_h2s, amine_M, amine), 1e-6)),
+    ])
+    target = np.array([math.log(alpha_co2), math.log(alpha_h2s)])
+
+    def f(pv: np.ndarray) -> np.ndarray:
+        c, h = acid_gas_loadings(T, math.exp(pv[0]), math.exp(pv[1]), amine_M, amine)
+        return np.array([math.log(max(c, 1e-300)), math.log(max(h, 1e-300))]) - target
+
+    eps = 1e-6
+    for _ in range(40):
+        r = f(p)
+        if float(np.max(np.abs(r))) < 1e-9:
+            break
+        jac = np.zeros((2, 2))
+        for k in range(2):
+            pk = p.copy()
+            pk[k] += eps
+            jac[:, k] = (f(pk) - r) / eps
+        try:
+            dp = np.linalg.solve(jac, -r)
+        except np.linalg.LinAlgError:
+            break
+        p = p + dp
+    return math.exp(float(p[0])), math.exp(float(p[1]))

@@ -1,4 +1,5 @@
 from .activity_pkg import ActivityPackage
+from .amine_pkg import AmineAcidGasPackage
 from .base import PhaseResult, PropertyPackage, ThreePhaseResult
 from .coolprop_pkg import CoolPropWaterPackage
 from .thermo_pkg import ThermoPackage
@@ -56,8 +57,15 @@ def make_package(spec: str, components: list[str]) -> PropertyPackage:
       * ``thermo:NRTL`` — activity-coefficient liquid (polar systems, azeotropes).
       * ``coolprop:Water`` — pure-water steam tables (CoolProp IAPWS-95);
         single-component water flowsheets only.
+      * ``amine:DEA`` / ``amine:MDEA`` — reactive acid-gas (modified
+        Kent-Eisenberg) package for amine gas sweetening (CO2/H2S absorbers,
+        strippers and regenerators); see :mod:`caldyr.thermo.amine_pkg`.
     """
     backend, _, method = spec.partition(":")
+    if backend == "amine":
+        _reject_pseudo_components(spec, components)
+        _validate_component_ids(components)
+        return AmineAcidGasPackage(components, method or "DEA")
     if backend == "coolprop":
         if (method or "").lower() != "water":
             raise ValueError(
@@ -89,5 +97,6 @@ __all__ = [
     "ThermoPackage",
     "ActivityPackage",
     "CoolPropWaterPackage",
+    "AmineAcidGasPackage",
     "make_package",
 ]
