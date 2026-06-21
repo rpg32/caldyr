@@ -190,6 +190,107 @@ def test_unknown_method_raises():
         fs.solve()
 
 
+# -- 2b. partial condenser / reboiler (NS only) ------------------------------------
+def test_partial_condenser_pins_overhead_and_closes_balances():
+    """A partial (reflux) condenser on the top stage pins the overhead
+    temperature to ``condenser_T``, removes heat (negative duty), keeps the
+    overall mass balance machine-exact, and closes the overall energy balance
+    (the reported condenser duty IS the stage-0 balance)."""
+    fs = pentane_absorber(n_stages=8)
+    abs_unit = fs.units["ABS"]
+    abs_unit.params.update(method="naphtali_sandholm", condenser_T=285.0)
+    fs.solve()
+    d = abs_unit.design
+    assert d["energy_residual_rel"] < 1e-7
+    # overhead pinned to the condenser temperature
+    assert d["T_top"] == pytest.approx(285.0, abs=1e-3)
+    assert "condenser_duty" in d and d["condenser_duty"] < 0.0   # heat removed
+    # machine-exact component balance: feeds == vapour product + liquid product
+    gi, li = fs.streams["GAS"], fs.streams["OIL"]
+    vo, lo = fs.streams["GASOUT"], fs.streams["LIQOUT"]
+    F = gi.molar_flow + li.molar_flow
+    for c in fs.component_ids:
+        fin = gi.molar_flow * gi.z.get(c, 0.0) + li.molar_flow * li.z.get(c, 0.0)
+        out = vo.molar_flow * vo.z.get(c, 0.0) + lo.molar_flow * lo.z.get(c, 0.0)
+        assert abs(fin - out) < 1e-9 * F
+
+
+def test_partial_condenser_dries_the_overhead():
+    """Cooling the overhead in a partial condenser condenses the heavier
+    species back as internal reflux, so the product vapour is enriched in the
+    light (non-condensable) component vs the same column with no condenser."""
+    base = pentane_absorber(n_stages=8)
+    base.units["ABS"].params["method"] = "naphtali_sandholm"
+    base.solve()
+    cond = pentane_absorber(n_stages=8)
+    cond.units["ABS"].params.update(method="naphtali_sandholm", condenser_T=285.0)
+    cond.solve()
+    # nitrogen is the non-condensable; the condenser drives its overhead purity up
+    assert (cond.streams["GASOUT"].z["nitrogen"]
+            > base.streams["GASOUT"].z["nitrogen"])
+
+
+def test_condenser_requires_ns_and_two_stages():
+    fs = pentane_absorber(n_stages=6)
+    fs.units["ABS"].params["condenser_T"] = 285.0       # default method=sum_rates
+    with pytest.raises(AbsorberError, match="condenser_T.*naphtali_sandholm"):
+        fs.solve()
+    fs = pentane_absorber(n_stages=1)
+    fs.units["ABS"].params.update(method="naphtali_sandholm", condenser_T=285.0)
+    with pytest.raises(AbsorberError, match="n_stages >= 2"):
+        fs.solve()
+
+
+def test_reboiler_requires_ns_method():
+    fs = pentane_absorber(n_stages=6)
+    fs.units["ABS"].params["reboiler_T"] = 360.0        # default method=sum_rates
+    with pytest.raises(AbsorberError, match="reboiler_T.*naphtali_sandholm"):
+        fs.solve()
+
+
+def test_reboiled_stripper_no_gas_feed():
+    """A reboiler boils up the stripping vapour internally, so 'gas_in' is
+    optional. A reboiled stripper (no gas feed) on a pentane/decane liquid pins
+    the bottoms temperature, generates the boilup (positive duty), strips the
+    volatile overhead, and closes mass + energy balances exactly."""
+    fs = Flowsheet(components=[Component("nitrogen"), Component("n-pentane"),
+                               Component("n-decane")],
+                   property_package="thermo:PR")
+    fs.add(Absorber("STR", {"n_stages": 8, "P": P_ATM,
+                            "method": "naphtali_sandholm", "reboiler_T": 420.0}))
+    fs.feed("FEED", "STR:liquid_in", T=330.0, P=P_ATM, molar_flow=100.0,
+            z={"n-pentane": 0.30, "n-decane": 0.70})
+    fs.connect("VOUT", "STR:vapor_out", None)
+    fs.connect("LOUT", "STR:liquid_out", None)
+    fs.solve()
+    d = fs.units["STR"].design
+    assert d["energy_residual_rel"] < 1e-7
+    assert d["T_bottom"] == pytest.approx(420.0, abs=1e-3)
+    assert d["reboiler_duty"] > 0.0                      # heat added boils it up
+    vo, lo = fs.streams["VOUT"], fs.streams["LOUT"]
+    assert vo.z["n-pentane"] > 0.9                       # volatile to the overhead
+    assert lo.z["n-pentane"] < 0.10                      # stripped bottoms
+    F = fs.streams["FEED"].molar_flow
+    for c in fs.component_ids:
+        fin = F * fs.streams["FEED"].z.get(c, 0.0)
+        out = vo.molar_flow * vo.z.get(c, 0.0) + lo.molar_flow * lo.z.get(c, 0.0)
+        assert abs(fin - out) < 1e-9 * F
+
+
+def test_missing_gas_feed_without_reboiler_raises():
+    """With no reboiler to make the boilup, an absent gas feed is an error."""
+    fs = Flowsheet(components=[Component("nitrogen"), Component("n-pentane"),
+                               Component("n-decane")],
+                   property_package="thermo:PR")
+    fs.add(Absorber("STR", {"n_stages": 6, "P": P_ATM}))
+    fs.feed("FEED", "STR:liquid_in", T=330.0, P=P_ATM, molar_flow=100.0,
+            z={"n-pentane": 0.30, "n-decane": 0.70})
+    fs.connect("VOUT", "STR:vapor_out", None)
+    fs.connect("LOUT", "STR:liquid_out", None)
+    with pytest.raises(AbsorberError, match="gas_in.*reboiler_T"):
+        fs.solve()
+
+
 # -- 3. the book's SO2 absorber, structural ----------------------------------------
 def test_book_so2_absorber_structure():
     """Hameed 2025 sec. 9.1 (20 stages): book/HYSYS-PR gets Gas_Out =

@@ -111,6 +111,7 @@ _NS_LM_MAX = 1e10        # ... upper bound (-> short scaled gradient descent)
 _NS_LM_UP = 4.0          # ... growth on a rejected trial
 _NS_LM_DOWN = 3.0        # ... shrink on an accepted step
 _NS_REFINE = 2           # iterative-refinement passes on the Newton linear solve
+_NS_TSPEC_SCALE = 50.0   # K, scaling of a pinned-temperature (condenser) residual
 
 
 class AbsorberError(ValueError):
@@ -287,19 +288,32 @@ def _solve_ns_absorber(
     feeds: list[tuple[int, dict[str, float], float]], Q: list[float],
     T: list[float], x: list[dict[str, float]], y: list[dict[str, float]],
     L: list[float], V: list[float], max_iter: int,
-    t_bounds: tuple[float, float],
+    t_bounds: tuple[float, float], cond_T: float | None = None,
+    reb_T: float | None = None,
 ) -> dict[str, Any]:
-    """Naphtali-Sandholm (1971) simultaneous-correction MESH for a column with
-    NO condenser and NO reboiler — a gas absorber, stripper, or amine
-    regenerator (Seader, Henley & Roper 3e §10.4). ALL the MESH equations are
-    solved at once by a damped Newton over per-component flow variables, so the
-    method has none of the alternating sum-rates traffic instability that
-    limit-cycles on reactive desorption.
+    """Naphtali-Sandholm (1971) simultaneous-correction MESH for a gas absorber,
+    stripper, or amine regenerator (Seader, Henley & Roper 3e §10.4), optionally
+    with a **partial condenser** as the top stage and/or a **reboiler** as the
+    bottom stage. ALL the MESH equations are solved at once by a damped Newton
+    over per-component flow variables, so the method has none of the alternating
+    sum-rates traffic instability that limit-cycles on reactive desorption.
 
     This is a simplification of the crude-tower NS in
     :mod:`caldyr.unitops.rigorous_column`: no side draws and no
     distillate-rate spec — every stage carries an ordinary energy balance (the
     top stage's vapour and the bottom stage's liquid are simply the products).
+
+    When ``cond_T`` is given, stage 0 is a **partial (reflux) condenser**: its
+    energy balance is replaced by a pinned-temperature spec ``T_0 = cond_T`` and
+    its duty becomes a free output recovered from that balance after
+    convergence. The overhead vapour leaves at ``cond_T`` (so condensables drop
+    out as internal reflux to stage 1 — drying the product). When ``reb_T`` is
+    given, the bottom stage is a **reboiler**: its energy balance is likewise
+    replaced by ``T_{N-1} = reb_T`` and its (positive) duty boils up the
+    stripping vapour internally — no open stripping steam, so the regenerator's
+    water loop closes (only a tiny makeup for the dry overhead). The liquid feed
+    enters stage 1 when there is a condenser (else stage 0); a gas feed, if any,
+    enters the bottom stage.
 
     Variables (``N(2C+1)``): component liquid flows ``l_i,j``, component vapour
     flows ``v_i,j`` and stage temperature ``T_j``. Residuals: component material
@@ -357,7 +371,7 @@ def _solve_ns_absorber(
         Lc[j], Vc[j], Kc[j], hLc[j], hVc[j] = stage_eval(j, lmat[j], vmat[j], Tv[j])
     e_ref = max(float(np.abs(hLc).max()), float(np.abs(hVc).max()), 1.0) * Ftot
 
-    def residuals(lm, vm, Lq, Vq, Kq, hLq, hVq):
+    def residuals(lm, vm, Lq, Vq, Kq, hLq, hVq, Tq):
         R = np.empty(nv)
         for j in range(N):
             base = j * span
@@ -370,8 +384,17 @@ def _solve_ns_absorber(
                                - Fcomp[j, i]) / Ftot
                 R[base + C + i] = (vm[j, i]
                                    - Kq[j, i] * (Vq[j] / Lq[j]) * lm[j, i]) / Ftot
-            out = Lq[j] * hLq[j] + Vq[j] * hVq[j]
-            R[base + 2 * C] = (out - in_lh - in_vh - Fh[j] - Qa[j]) / e_ref
+            if cond_T is not None and j == 0:
+                # Partial condenser: pin the overhead temperature; its duty is a
+                # free output recovered from the energy balance after solving.
+                R[base + 2 * C] = (Tq[0] - cond_T) / _NS_TSPEC_SCALE
+            elif reb_T is not None and j == N - 1:
+                # Reboiler: pin the bottoms temperature; its duty (the internal
+                # boilup) is the free output, likewise recovered after solving.
+                R[base + 2 * C] = (Tq[N - 1] - reb_T) / _NS_TSPEC_SCALE
+            else:
+                out = Lq[j] * hLq[j] + Vq[j] * hVq[j]
+                R[base + 2 * C] = (out - in_lh - in_vh - Fh[j] - Qa[j]) / e_ref
         return R
 
     def build_jac(R0):
@@ -379,7 +402,7 @@ def _solve_ns_absorber(
         for j in range(N):
             for kind in range(span):
                 col = j * span + kind
-                lm, vm, tj = lmat, vmat, Tv[j]
+                lm, vm, tj, tvec = lmat, vmat, Tv[j], Tv
                 if kind < C:
                     dk = max(_NS_DL_FRAC * lmat[j, kind], _NS_DL_MIN)
                     lm = lmat.copy()
@@ -392,12 +415,14 @@ def _solve_ns_absorber(
                 else:
                     dk = _NS_DT
                     tj = Tv[j] + dk
+                    tvec = Tv.copy()
+                    tvec[j] = tj
                 Lj, Vj, Kj, hLj, hVj = stage_eval(j, lm[j], vm[j], tj)
                 Lc2, Vc2 = Lc.copy(), Vc.copy()
                 Kc2, hLc2, hVc2 = Kc.copy(), hLc.copy(), hVc.copy()
                 Lc2[j], Vc2[j], Kc2[j] = Lj, Vj, Kj
                 hLc2[j], hVc2[j] = hLj, hVj
-                jac[:, col] = (residuals(lm, vm, Lc2, Vc2, Kc2, hLc2, hVc2)
+                jac[:, col] = (residuals(lm, vm, Lc2, Vc2, Kc2, hLc2, hVc2, tvec)
                                - R0) / dk
         return jac
 
@@ -428,7 +453,7 @@ def _solve_ns_absorber(
                 vm[j, i] = max(vmat[j, i] + d[b + C + i], _NS_FLOOR)
             tt[j] = min(max(Tv[j] + d[b + 2 * C], t_lo), t_hi)
             Lt[j], Vt[j], Kt[j], hLt[j], hVt[j] = stage_eval(j, lm[j], vm[j], tt[j])
-        Rt = residuals(lm, vm, Lt, Vt, Kt, hLt, hVt)
+        Rt = residuals(lm, vm, Lt, Vt, Kt, hLt, hVt, tt)
         return float(Rt @ Rt), (lm, vm, tt, Lt, Vt, Kt, hLt, hVt, Rt)
 
     def line_search(delta, rss):
@@ -440,7 +465,7 @@ def _solve_ns_absorber(
             frac *= 0.5
         return None, None
 
-    R0 = residuals(lmat, vmat, Lc, Vc, Kc, hLc, hVc)
+    R0 = residuals(lmat, vmat, Lc, Vc, Kc, hLc, hVc, Tv)
     converged = False
     it = 0
     rnorm = float(np.max(np.abs(R0)))
@@ -495,12 +520,22 @@ def _solve_ns_absorber(
                           for i in range(C)}) for j in range(N)]
     y_out = [_normalized({active[i]: max(float(vmat[j, i]), _X_FLOOR)
                           for i in range(C)}) for j in range(N)]
+    # Partial-condenser duty (heat ADDED at stage 0 — negative, heat removed):
+    # the stage-0 energy balance with no feed and no liquid from above.
+    cond_duty = (float(Lc[0] * hLc[0] + Vc[0] * hVc[0] - Vc[1] * hVc[1])
+                 if cond_T is not None else None)
+    # Reboiler duty (heat ADDED at the bottom stage — positive): its energy
+    # balance with no vapour from below.
+    reb_duty = (float(Lc[N - 1] * hLc[N - 1] + Vc[N - 1] * hVc[N - 1]
+                      - Lc[N - 2] * hLc[N - 2] - Fh[N - 1])
+                if reb_T is not None else None)
     return {
         "T": [float(t) for t in Tv], "L": [float(v) for v in Lc],
         "V": [float(v) for v in Vc], "x": x_out, "y": y_out,
         "hL": [float(h) for h in hLc], "hV": [float(h) for h in hVc],
         "iterations": it, "max_dT": 0.0, "max_dF_rel": 0.0, "damping": 1.0,
         "prop_calls": n_prop, "energy_residual_rel": rnorm, "F_total": Ftot,
+        "condenser_duty": cond_duty, "reboiler_duty": reb_duty,
     }
 
 
@@ -650,6 +685,22 @@ class Absorber(UnitOp):
         amine sweetening, where CO2 reacts slowly with a tertiary amine
         (book §15.3: E_CO2 ~ 0.15, E_H2S ~ 0.8) so an equilibrium stage would
         over-predict CO2 removal. Default: equilibrium stages. (sum_rates only.)
+      * ``condenser_T`` — optional **partial (reflux) condenser** temperature, K
+        (Naphtali-Sandholm only, ``n_stages >= 2``). Stage 0 becomes a partial
+        condenser pinned to this temperature; condensables drop out as internal
+        reflux to stage 1, so the overhead product leaves dried — the natural
+        refinement for an amine regenerator's wet acid-gas overhead. The reported
+        ``design['condenser_duty']`` (negative) closes the overall energy balance.
+        The liquid feed then enters the top tray (stage 1).
+      * ``reboiler_T`` — optional **reboiler** temperature, K (Naphtali-Sandholm
+        only). The bottom stage boils up the stripping vapour internally (pinned
+        to this temperature, ``design['reboiler_duty']`` positive), so ``gas_in``
+        is then optional — an internally-boiled stripper with no open steam.
+        Robust on well-conditioned systems; **combining it with ``condenser_T``,
+        or using it on the reactive amine regenerator, is numerically stiff** in
+        the FD-Jacobian endgame (a robust reboiled-NS amine regenerator is
+        tracked follow-up work), so the validated amine path uses open stripping
+        steam plus the reflux condenser.
       * ``max_iter`` — iteration cap (default 120).
     """
 
@@ -714,25 +765,102 @@ class Absorber(UnitOp):
                 )
         return eff if any(abs(e - 1.0) > 1e-12 for e in eff.values()) else None
 
+    def _condenser_T(self, method: str, N: int) -> float | None:
+        """Parse the optional ``condenser_T`` param (the reflux/overhead
+        temperature, K, of a partial condenser on the top stage). Returns
+        ``None`` when absent. The partial condenser dries the overhead product
+        (condensables drop out as internal reflux) — the natural refinement for
+        an amine regenerator's wet acid-gas product. Requires the
+        Naphtali-Sandholm method and ``n_stages >= 2`` (stage 0 is the
+        condenser, the top tray is stage 1)."""
+        spec = self.params.get("condenser_T")
+        if spec is None:
+            return None
+        cond_T = float(spec)
+        if method != "naphtali_sandholm":
+            raise AbsorberError(
+                f"Absorber {self.id!r}: 'condenser_T' (a partial condenser) is "
+                f"only supported with method='naphtali_sandholm'"
+            )
+        if N < 2:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: a partial condenser needs n_stages >= 2 "
+                f"(stage 0 is the condenser, the top tray is stage 1); got {N}"
+            )
+        if cond_T <= 0.0:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: condenser_T={cond_T} K must be > 0"
+            )
+        return cond_T
+
+    def _reboiler_T(self, method: str, N: int, has_condenser: bool) -> float | None:
+        """Parse the optional ``reboiler_T`` param (the bottoms temperature, K,
+        of a reboiler on the bottom stage). Returns ``None`` when absent. The
+        reboiler boils up the stripping vapour internally — so an amine
+        regenerator needs no open stripping steam and its water loop closes
+        (only a tiny makeup for the dry overhead). Requires the
+        Naphtali-Sandholm method; with a condenser too the column needs
+        ``n_stages >= 3`` (condenser, >=1 tray, reboiler)."""
+        spec = self.params.get("reboiler_T")
+        if spec is None:
+            return None
+        reb_T = float(spec)
+        if method != "naphtali_sandholm":
+            raise AbsorberError(
+                f"Absorber {self.id!r}: 'reboiler_T' (a reboiler) is only "
+                f"supported with method='naphtali_sandholm'"
+            )
+        n_min = 3 if has_condenser else 2
+        if N < n_min:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: a reboiler needs n_stages >= {n_min} "
+                f"(the bottom stage is the reboiler); got {N}"
+            )
+        if reb_T <= 0.0:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: reboiler_T={reb_T} K must be > 0"
+            )
+        return reb_T
+
     def solve(self, inlets: dict[str, Stream], pp) -> dict[str, PortStream]:
         gas = inlets.get("gas_in")
         liq = inlets.get("liquid_in")
-        if gas is None or not gas.molar_flow:
-            raise AbsorberError(
-                f"Absorber {self.id!r}: missing or empty inlet on 'gas_in'"
-            )
         if liq is None or not liq.molar_flow:
             raise AbsorberError(
                 f"Absorber {self.id!r}: missing or empty inlet on 'liquid_in'"
             )
-        T_g, P_g, F_g = gas.require_state()
+        method = str(self.params.get("method", "sum_rates"))
+        if method not in ("sum_rates", "naphtali_sandholm"):
+            raise AbsorberError(
+                f"Absorber {self.id!r}: unknown method {method!r}; expected "
+                f"'sum_rates' or 'naphtali_sandholm'"
+            )
+        # A reboiler supplies the stripping vapour internally, so 'gas_in' is
+        # then optional (a regenerator with no open steam).
+        reboiled = self.params.get("reboiler_T") is not None
+        gas_present = gas is not None and bool(gas.molar_flow)
+        if not gas_present and not reboiled:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: missing or empty inlet on 'gas_in' "
+                f"(or set 'reboiler_T' for an internally-boiled stripper)"
+            )
+
         T_l, P_l, F_l = liq.require_state()
-        z_g, z_l = gas.normalized_z(), liq.normalized_z()
-        comps = list(gas.components)
+        z_l = liq.normalized_z()
+        comps = list(liq.components)
+        gas_key: tuple
+        if gas is not None and gas_present:
+            T_g, P_g, F_g = gas.require_state()
+            z_g = gas.normalized_z()
+            comps = list(gas.components)
+            h_g = gas.H if gas.H is not None else pp.enthalpy(T_g, P_g, z_g)
+            gas_key = (T_g, P_g, F_g, tuple(sorted(z_g.items())), gas.H)
+        else:
+            T_g, P_g, F_g, z_g, h_g = T_l, P_l, 0.0, {}, 0.0
+            gas_key = (None,)
         n_stages, P, dP, max_iter = self._read_params(P_g)
 
-        key = (repr(sorted(self.params.items())),
-               T_g, P_g, F_g, tuple(sorted(z_g.items())), gas.H,
+        key = (repr(sorted(self.params.items())), gas_key,
                T_l, P_l, F_l, tuple(sorted(z_l.items())), liq.H)
         if key == self._cache_key and self._cache_out is not None:
             assert self._cache_design is not None
@@ -742,23 +870,29 @@ class Absorber(UnitOp):
         active = _active_components(comps, z_g, z_l)
         N = n_stages
         P_j = [P + j * dP for j in range(N)]
-        h_g = gas.H if gas.H is not None else pp.enthalpy(T_g, P_g, z_g)
         h_l = liq.H if liq.H is not None else pp.enthalpy(T_l, P_l, z_l)
         f_gas = {c: F_g * z_g.get(c, 0.0) for c in active}
         f_liq = {c: F_l * z_l.get(c, 0.0) for c in active}
         f_tot = {c: f_gas[c] + f_liq[c] for c in active}
-        feeds = [(0, f_liq, F_l * h_l), (N - 1, f_gas, F_g * h_g)]
 
-        method = str(self.params.get("method", "sum_rates"))
-        if method not in ("sum_rates", "naphtali_sandholm"):
-            raise AbsorberError(
-                f"Absorber {self.id!r}: unknown method {method!r}; expected "
-                f"'sum_rates' or 'naphtali_sandholm'"
-            )
         murphree = self._murphree_map(active)
+        cond_T = self._condenser_T(method, N)
+        reb_T = self._reboiler_T(method, N, cond_T is not None)
+        # With a partial condenser, stage 0 is the condenser and the liquid feed
+        # enters the top tray (stage 1); otherwise it enters stage 0.
+        liq_stage = 1 if cond_T is not None else 0
+        feeds = [(liq_stage, f_liq, F_l * h_l)]
+        if gas_present:
+            feeds.append((N - 1, f_gas, F_g * h_g))
         T0, x0, y0, L0, V0 = self._initial_profiles(
-            N, active, z_g, z_l, T_g, T_l, F_g, F_l)
-        t_bounds = (min(T_g, T_l) - 60.0, max(T_g, T_l) + 90.0)
+            N, active, z_g, z_l, T_g, T_l, F_g, F_l, cond_T, reb_T)
+        t_lo = min(T_g, T_l) - 60.0
+        t_hi = max(T_g, T_l) + 90.0
+        if cond_T is not None:
+            t_lo = min(t_lo, cond_T - 30.0)
+        if reb_T is not None:
+            t_hi = max(t_hi, reb_T + 30.0)
+        t_bounds = (t_lo, t_hi)
         if method == "naphtali_sandholm":
             if murphree is not None:
                 raise AbsorberError(
@@ -767,18 +901,27 @@ class Absorber(UnitOp):
                 )
             res = _solve_ns_absorber(
                 f"Absorber {self.id!r}", pp, active, N, P_j, feeds,
-                [0.0] * N, T0, x0, y0, L0, V0, max_iter, t_bounds)
+                [0.0] * N, T0, x0, y0, L0, V0, max_iter, t_bounds, cond_T, reb_T)
         else:
             res = _solve_sum_rates(
                 f"Absorber {self.id!r}", pp, active, N, P_j, feeds,
                 [0.0] * N, T0, x0, y0, L0, V0, max_iter, T_bounds=t_bounds,
                 murphree=murphree, bottom_vapor_flows=f_gas)
 
+        q_cond = res.get("condenser_duty") if cond_T is not None else None
+        q_reb = res.get("reboiler_duty") if reb_T is not None else None
+        q_added = (q_cond or 0.0) + (q_reb or 0.0)
         out, design = _build_products(
             self.id, pp, comps, active, f_tot, res, P_j,
-            feeds_enthalpy=F_g * h_g + F_l * h_l, q_added=0.0,
+            feeds_enthalpy=F_g * h_g + F_l * h_l, q_added=q_added,
             vapor_port="vapor_out", liquid_port="liquid_out")
-        design["N"] = float(N)            # ideal stages (no condenser/reboiler)
+        if q_cond is not None:
+            design["condenser_T"] = cond_T
+            design["condenser_duty"] = q_cond
+        if q_reb is not None:
+            design["reboiler_T"] = reb_T
+            design["reboiler_duty"] = q_reb
+        design["N"] = float(N)            # ideal stages (incl. condenser if any)
         design["absorbed"] = {
             c: (1.0 - design["vapor_flows"][c] / f_gas[c]) if f_gas[c] > 0.0
             else 0.0
@@ -796,7 +939,8 @@ class Absorber(UnitOp):
         self._cache_design = _copy_design(design)
         return out
 
-    def _initial_profiles(self, N, active, z_g, z_l, T_g, T_l, F_g, F_l):
+    def _initial_profiles(self, N, active, z_g, z_l, T_g, T_l, F_g, F_l,
+                          cond_T=None, reb_T=None):
         w = self._warm
         z_tot = _normalized({c: F_g * z_g.get(c, 0.0) + F_l * z_l.get(c, 0.0)
                              for c in active})
@@ -804,12 +948,28 @@ class Absorber(UnitOp):
                 and max(abs(w["z"].get(c, 0.0) - z_tot[c]) for c in active)
                 < _WARM_Z_TOL):
             return w["T"], w["x"], w["y"], w["L"], w["V"]
-        T0 = [T_l + (T_g - T_l) * (j / max(N - 1, 1)) for j in range(N)]
+        # End temperatures anchor the linear seed (cool top with a condenser,
+        # hot bottom with a reboiler) so the Newton starts on the right slope.
+        t_top = cond_T if cond_T is not None else T_l
+        t_bot = reb_T if reb_T is not None else T_g
+        T0 = [t_top + (t_bot - t_top) * (j / max(N - 1, 1)) for j in range(N)]
         x0 = [_normalized({c: max(z_l.get(c, 0.0), _X_FLOOR) for c in active})
               for _ in range(N)]
-        y0 = [_normalized({c: max(z_g.get(c, 0.0), _X_FLOOR) for c in active})
+        # With no gas feed (internally boiled), seed the vapour from the liquid
+        # feed (the boilup rises off the descending liquid).
+        z_v = z_g if F_g > 0.0 else z_l
+        y0 = [_normalized({c: max(z_v.get(c, 0.0), _X_FLOOR) for c in active})
               for _ in range(N)]
-        return T0, x0, y0, [F_l] * N, [F_g] * N
+        boilup = F_l if reb_T is not None else F_g
+        L0, V0 = [F_l] * N, [max(boilup, F_g)] * N
+        if cond_T is not None:
+            # Seed the partial-condenser stage cool: condensables reflux, so the
+            # overhead vapour leaving is a fraction of the rising traffic.
+            T0[0] = cond_T
+            V0[0] = 0.5 * max(boilup, F_g)
+        if reb_T is not None:
+            T0[N - 1] = reb_T
+        return T0, x0, y0, L0, V0
 
 
 @register("ReboiledAbsorber")

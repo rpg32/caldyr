@@ -287,6 +287,48 @@ def test_amine_recycle_loop_closes():
             / sour["CO2"]) > 0.9
 
 
+def test_regenerator_reflux_condenser_dries_the_acid_gas():
+    """The amine regenerator's open-steam overhead is water-rich (most of the
+    stripping steam leaves with the acid gas). A partial **reflux condenser** on
+    the top stage (``condenser_T``) condenses that water back as internal reflux,
+    so the acid-gas product leaves dried — the natural §15.3 refinement. The NS
+    solve stays robust (the condenser alone, not combined with a reboiler); the
+    overhead temperature pins to ``condenser_T``, the duty is reported, and mass
+    balance stays machine-exact."""
+    pp = _pkg()
+    Prg = 1.8e5
+    rich = {"DEA": 52.0, "water": 800.0, "CO2": 14.5, "H2S": 6.0, "methane": 0.0}
+    steam = {"water": 140.0}
+
+    wet = Absorber("REGw", {"n_stages": 9, "method": "naphtali_sandholm",
+                            "max_iter": 80})
+    ow = wet.solve({"liquid_in": _stream(rich, 388.0, Prg),
+                    "gas_in": _stream(steam, 396.0, Prg)}, pp)
+
+    dry = Absorber("REGd", {"n_stages": 9, "method": "naphtali_sandholm",
+                            "max_iter": 120, "condenser_T": 320.0})
+    od = dry.solve({"liquid_in": _stream(rich, 388.0, Prg),
+                    "gas_in": _stream(steam, 396.0, Prg)}, pp)
+    d = dry.design
+    assert d["energy_residual_rel"] < 1e-6
+    assert d["T_top"] == pytest.approx(320.0, abs=1e-3)
+    assert d["condenser_duty"] < 0.0                       # heat removed
+    # the overhead is dramatically drier than the open-steam (no-condenser) case
+    assert ow["vapor_out"].z["water"] > 0.7               # wet
+    assert od["vapor_out"].z["water"] < 0.2               # dried
+    # and the water carried off with the acid gas collapses
+    w_wet = ow["vapor_out"].molar_flow * ow["vapor_out"].z["water"]
+    w_dry = od["vapor_out"].molar_flow * od["vapor_out"].z["water"]
+    assert w_dry < 0.1 * w_wet
+    # still a regenerated lean solvent, mass balance machine-exact
+    lean = _flows(od["liquid_out"])
+    assert lean["CO2"] / lean["DEA"] < 0.01
+    feed = {c: rich.get(c, 0.0) + steam.get(c, 0.0) for c in _COMPS}
+    acid = _flows(od["vapor_out"])
+    for c in _COMPS:
+        assert abs(feed[c] - lean[c] - acid[c]) < 1e-7 * sum(feed.values())
+
+
 def test_more_solvent_absorbs_more():
     """Structural monotonicity: a higher solvent rate removes at least as much
     acid gas (a sanity check that the package drives the column physically)."""
