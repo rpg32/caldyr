@@ -185,6 +185,12 @@ _NS_LS_MAX = 24          # backtracking line-search halvings
 _NS_TRUST = 0.5          # max fractional reduction a flow may take in one step
 _NS_STEP_REL = 1e-4      # only flows above this fraction of the stage total
 #                          constrain the fractional Newton step
+_NS_TOL_REBOILED = 1e-8  # reboiled/total-condenser NS scaled-residual tol: the
+#                          extra global reboiler-duty unknown + the appended
+#                          bubble-point row floor the float64 endgame near ~2e-9
+#                          (the same marginality as the resid tower); 1e-8 is
+#                          still very tight -- products match the bubble-point
+#                          method to ~5 digits and the balances close ~1e-8
 _NS_WARM_ITERS = 40      # inside-out homotopy warm-start iteration cap
 _NS_CONT_STEP0 = 0.3     # draw-rate continuation (broader-basin fallback for
 #                          draw-heavy towers): initial fraction step, ramping the
@@ -564,14 +570,16 @@ class RigorousColumn(UnitOp):
                 f"'sum_rates'"
             )
         reboiled = bool(self.params.get("reboiled", True))
-        if reboiled and method in ("sum_rates", "inside_out",
-                                   "naphtali_sandholm"):
+        if reboiled and method in ("sum_rates", "inside_out"):
             raise RigorousColumnError(
                 f"RigorousColumn {self.id!r}: method={method!r} is "
                 f"implemented for the non-reboiled (steam-stripped main "
                 f"fractionator) form only — set reboiled=False, or use the "
                 f"default bubble_point method for a reboiled column"
             )
+        # method="naphtali_sandholm" + reboiled=True is the total-condenser +
+        # reboiler simultaneous-correction form (specs D + reflux_ratio, same as
+        # the bubble-point method; the reboiler/condenser duties are recovered).
         # a non-reboiled column's bottom stage is an ordinary stage and may
         # receive a feed (the stripping steam)
         max_feed_stage = n_stages if not reboiled else n_stages - 1
@@ -823,6 +831,15 @@ class RigorousColumn(UnitOp):
             self._store_cache(key, out)
             return out
 
+        if method == "naphtali_sandholm":
+            feed_h = sum(Fi * Hi for Fi, Hi in zip(F_k, H_k))
+            out = self._solve_reboiled_ns(
+                pp, comps, active, N, P_j, F, f, z, fz_stage, fh_stage,
+                feed_info, feed_flashes, u, w, draws, R, D, B, q, max_iter,
+                feed_h)
+            self._store_cache(key, out)
+            return out
+
         # Cumulative (feeds - draws - distillate) above-and-including stage j:
         # the total balance reads L_j = V_{j+1} + A_j (A_{N-1} = B).
         A = [0.0] * N
@@ -1024,6 +1041,175 @@ class RigorousColumn(UnitOp):
         for i, s in enumerate(side_streams):
             out[f"side{i + 1}"] = s
         self._store_cache(key, out)
+        return out
+
+    # -- reboiled column on Naphtali-Sandholm (total condenser + reboiler) --------
+    def _solve_reboiled_ns(self, pp, comps: list[str], active: list[str],
+                           N: int, P_j: list[float], F: float,
+                           f: dict[str, float], z: dict[str, float],
+                           fz_stage: list[dict[str, float]],
+                           fh_stage: list[float],
+                           feed_info: list[tuple[int, float, float]],
+                           feed_flashes: list,
+                           u: list[float], w: list[float],
+                           draws: list[tuple[int, str, float]],
+                           R: float, D: float, B: float, q: float,
+                           max_iter: int, feed_h: float,
+                           ) -> dict[str, PortStream]:
+        """Reboiled distillation column on the Naphtali-Sandholm simultaneous-
+        correction method (Seader 3e §10.4) — the total-condenser + reboiler
+        form of :meth:`_solve_ns`. Specs are the distillate rate ``D`` and the
+        reflux ratio ``R`` (the same pair as the bubble-point method); the
+        reboiler and condenser duties are recovered outputs.
+
+        Two end-stage changes vs the steam-stripped main fractionator (handled
+        inside ``_solve_ns`` under ``total_condenser=True``):
+
+        * **stage 0 = total condenser** — the distillate is the liquid draw
+          ``U_0 = D``, the stage-0 vapour is pinned to zero, the reflux
+          ``L_0 = R*D`` is pinned (its 3rd row), and an appended global
+          equation sets ``T_0`` to the condenser-liquid bubble point.
+        * **stage N-1 = reboiler** — its energy balance carries one extra global
+          unknown, the reboiler duty, boiling up the internal vapour (no open
+          stripping steam). The duty is the recovered output.
+
+        Wide-boiling reboiled columns (vacuum towers, reboiled fractionators)
+        are where the simultaneous-correction method earns its keep over the
+        bubble-point recurrence; this routes them to NS. The mass balance closes
+        by difference (machine-exact) and the recovered duties close the overall
+        energy balance.
+        """
+        # Total condenser: the distillate leaves stage 0 as the liquid draw D.
+        u = list(u)
+        u[0] = D
+
+        # Seed: a Fenske composition ramp + constant-molal-overflow traffic with
+        # a total condenser (V_0 = 0) and the reflux R.
+        x = self._initial_x(pp, P_j[0], f, D, N, z)
+        L, V = self._initial_traffic(N, feed_info, R, D, F, False,
+                                     [B] * N, w)
+        T, K, _hL, _hV, _nf = self._stage_bubble_points(pp, P_j, x, active, 0)
+        y = [{c: max(K[j][c] * x[j].get(c, 0.0), _X_FLOOR) for c in active}
+             for j in range(N)]
+        for j in range(N):
+            tot = sum(y[j].values())
+            y[j] = {c: v / tot for c, v in y[j].items()}
+        t_bounds = (max(min(T) - 120.0, _BUBBLE_T_LO),
+                    min(max(T) + 300.0, _BUBBLE_T_HI))
+
+        (T, x, y, K, L, V, hL, hV, it, dF, n_prop, converged) = \
+            self._solve_ns(
+                pp, N, P_j, active, fz_stage, fh_stage, u, w, [0.0] * N, D,
+                partial=False, T=T, x=x, y=y, L=L, V=V, t_bounds=t_bounds,
+                max_iter=max_iter, total_condenser=True, reflux=R,
+                tol=_NS_TOL_REBOILED)
+        if not converged:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: reboiled naphtali_sandholm did not "
+                f"converge in {it} iterations (scaled residual {dF:.3g} vs "
+                f"{_NS_TOL}). Check the specs (D={D:.4g} mol/s, reflux_ratio="
+                f"{R:.4g}, n_stages={N}) or raise 'max_iter'"
+            )
+
+        # -- products (liquid distillate; mass balance closed by difference) -----
+        x_d = dict(x[0])
+        d_flows = {c: D * x_d.get(c, 0.0) for c in active}
+        draw_flows: list[dict[str, float]] = []
+        for stage, phase, rate in draws:
+            comp = x[stage - 1] if phase == "liquid" else y[stage - 1]
+            draw_flows.append({c: rate * comp.get(c, 0.0) for c in active})
+        b_flows = {c: f[c] - d_flows[c]
+                   - sum(df[c] for df in draw_flows) for c in active}
+        neg = min(b_flows.values())
+        if neg < -1e-7 * F:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: converged distillate/side draws "
+                f"would carry more of a component than the feed supplies "
+                f"(bottoms {neg:.3g} mol/s) — check D and the reflux ratio"
+            )
+        if neg < 0.0:
+            donor = max(b_flows, key=lambda c: b_flows[c])
+            for c, v in b_flows.items():
+                if v < 0.0:
+                    d_flows[c] += v
+                    d_flows[donor] -= v
+                    b_flows[c] = 0.0
+            b_flows[donor] = (f[donor] - d_flows[donor]
+                              - sum(df[donor] for df in draw_flows))
+            x_d = {c: v / D for c, v in d_flows.items()}
+        x_b = {c: v / B for c, v in b_flows.items()}
+        z_dist = {c: x_d.get(c, 0.0) for c in comps}
+        z_bot = {c: x_b.get(c, 0.0) for c in comps}
+
+        side_streams: list[Stream] = []
+        side_h = 0.0
+        for i, (stage, phase, rate) in enumerate(draws):
+            j = stage - 1
+            comp = x[j] if phase == "liquid" else y[j]
+            h_draw = hL[j] if phase == "liquid" else hV[j]
+            side_h += rate * h_draw
+            side_streams.append(Stream(
+                id=f"{self.id}.side{i + 1}", components=comps,
+                T=T[j], P=P_j[j], molar_flow=rate,
+                z={c: comp.get(c, 0.0) for c in comps},
+                H=h_draw, phase=phase,
+                vapor_fraction=0.0 if phase == "liquid" else 1.0))
+
+        # Duties (both recovered). Reboiler from the bottom-stage energy balance
+        # (a bubble-point stage with the duty as the NS global free var):
+        #   Q_reb = B h_B + V_{N-1} h_V,N-1 - L_{N-2} h_L,N-2.
+        # Condenser closes the overall balance (absolute / formation-inclusive
+        # enthalpies):  feed_h + Q_cond + Q_reb = D h_D + B h_B + sum draws.
+        h_D, h_B = hL[0], hL[N - 1]
+        q_reb = B * h_B + V[N - 1] * hV[N - 1] - L[N - 2] * hL[N - 2]
+        q_cond = D * h_D + B * h_B + side_h - feed_h - q_reb
+        # Diagnostic: the independently computed stage-0 (condenser) balance,
+        #   V_1 h_V1 + Q_cond = (L_0 + D) h_L0.
+        q_cond_stage = (L[0] + D) * hL[0] - V[1] * hV[1]
+        energy_residual = abs(q_cond - q_cond_stage) / max(
+            abs(q_cond), abs(q_reb), 1.0)
+
+        distillate = Stream(
+            id=f"{self.id}.distillate", components=comps,
+            T=T[0], P=P_j[0], molar_flow=D, z=z_dist, H=h_D,
+            phase="liquid", vapor_fraction=0.0)
+        bottoms = Stream(
+            id=f"{self.id}.bottoms", components=comps,
+            T=T[N - 1], P=P_j[-1], molar_flow=B, z=z_bot, H=h_B,
+            phase="liquid", vapor_fraction=0.0)
+
+        self._warm = {"n_stages": N, "partial": False, "active": list(active),
+                      "z": dict(z), "x": [dict(row) for row in x]}
+        self.design = {
+            "N": float(N - 1), "P": P_j[0], "x_D": dict(x_d), "x_B": dict(x_b),
+            "T_top": T[0], "T_top_dew": T[1], "T_bottom": T[N - 1],
+            "V_top": V[1], "Q_condenser": q_cond, "Q_reboiler": q_reb,
+            "D": D, "B": B, "R": L[0] / D, "q": q,
+            "feed_stage": feed_info[0][0] + 1,
+            "partial_condenser": False, "method": "naphtali_sandholm",
+            "reboiled": True,
+            "feeds": [{"stage": j + 1, "F": Fi, "q": qi}
+                      for j, Fi, qi in feed_info],
+            "side_draws": [{"stage": stage, "phase": phase, "rate": rate}
+                           for stage, phase, rate in draws],
+            "distillate_flows": dict(d_flows), "bottoms_flows": dict(b_flows),
+            "side_draw_flows": [dict(df) for df in draw_flows],
+            "n_stages": N, "T_profile": list(T), "P_profile": list(P_j),
+            "L_profile": list(L), "V_profile": list(V),
+            "x_profile": [{c: row.get(c, 0.0) for c in comps} for row in x],
+            "y_profile": [{c: row.get(c, 0.0) for c in comps} for row in y],
+            "iterations": it, "energy_residual_rel": energy_residual,
+            "prop_evals": n_prop,
+        }
+        out: dict[str, PortStream] = {
+            "distillate": distillate, "bottoms": bottoms,
+            "condenser_duty": EnergyStream(
+                id=f"{self.id}.condenser_duty", duty=q_cond),
+            "reboiler_duty": EnergyStream(
+                id=f"{self.id}.reboiler_duty", duty=q_reb),
+        }
+        for i, s in enumerate(side_streams):
+            out[f"side{i + 1}"] = s
         return out
 
     def _store_cache(self, key: tuple, out: dict[str, PortStream]) -> None:
@@ -1995,7 +2181,8 @@ class RigorousColumn(UnitOp):
                   T: list[float], x: list[dict[str, float]],
                   y: list[dict[str, float]], L: list[float], V: list[float],
                   t_bounds: tuple[float, float], max_iter: int,
-                  force_fd: bool = False):
+                  force_fd: bool = False, total_condenser: bool = False,
+                  reflux: float = 1.0, tol: float = _NS_TOL):
         """Naphtali & Sandholm (1971) simultaneous-correction method for the
         non-reboiled, partial-condenser steam-stripped main fractionator —
         Seader, Henley & Roper 3e sec. 10.4. ALL the MESH equations are solved
@@ -2030,7 +2217,13 @@ class RigorousColumn(UnitOp):
         t_lo, t_hi = t_bounds
         C = len(active)
         span = 2 * C + 1
-        nv = N * span
+        # A total-condenser/reboiler column adds ONE global unknown -- the
+        # reboiler duty -- and ONE equation (the stage-0 bubble point), so the
+        # uniform per-stage layout is preserved and only the system is extended
+        # by one. The extra variable lives at index N*span; the extra residual
+        # at the same index.
+        nv = N * span + (1 if total_condenser else 0)
+        qi_reb = N * span                                # index of the reb-duty var
         P = np.array(P_j, dtype=float)
         Fcomp = np.zeros((N, C))
         for j in range(N):
@@ -2081,8 +2274,12 @@ class RigorousColumn(UnitOp):
         refresh_all()
         e_ref = max(float(np.abs(hLc).max()), float(np.abs(hVc).max()),
                     1.0) * Ftot
+        # Reboiler-duty unknown (total condenser only): seed from the bottom-
+        # stage energy balance of the initial profile.
+        qreb = (Lc[N - 1] * hLc[N - 1] + Vc[N - 1] * hVc[N - 1]
+                - Lc[N - 2] * hLc[N - 2]) if total_condenser else 0.0
 
-        def residuals(lm, vm, Lq, Vq, Kq, hLq, hVq):
+        def residuals(lm, vm, Lq, Vq, Kq, hLq, hVq, qrb=0.0):
             R = np.empty(nv)
             for j in range(N):
                 base = j * span
@@ -2096,15 +2293,31 @@ class RigorousColumn(UnitOp):
                     R[base + C + i] = (vm[j, i]
                                        - Kq[j, i] * (Vq[j] / Lq[j]) * lm[j, i]
                                        ) / Ftot
-                if j == 0:
+                if j == 0 and total_condenser:
+                    # TOTAL CONDENSER: distillate is the liquid draw U[0]=D; the
+                    # vapour is pinned to zero (E rows overwritten); the reflux
+                    # is pinned L_0 = R*D (this 3rd row). T_0 is set by the
+                    # appended bubble-point row below.
+                    for i in range(C):
+                        R[base + C + i] = vm[0, i] / Ftot
+                    R[base + 2 * C] = (Lq[0] - reflux * D) / Ftot
+                elif j == 0:
                     R[base + 2 * C] = (Vq[0] - D) / D
                 else:
                     in_l = Lq[j - 1] * hLq[j - 1]
                     in_v = Vq[j + 1] * hVq[j + 1] if j < N - 1 else 0.0
                     out_l = (Lq[j] + U[j]) * hLq[j]
                     out_v = (Vq[j] + W[j]) * hVq[j]
+                    # The reboiler (bottom stage, total-condenser mode) carries
+                    # the global reboiler-duty unknown ``qrb`` as a heat input.
+                    qj = Q[j] + (qrb if (total_condenser and j == N - 1) else 0.0)
                     R[base + 2 * C] = (out_l + out_v - in_l - in_v
-                                       - Fh[j] - Q[j]) / e_ref
+                                       - Fh[j] - qj) / e_ref
+            if total_condenser:
+                # Appended global equation: the condenser liquid is at its
+                # bubble point, sum_i K_i,0 x_i,0 = 1 -> determines T_0.
+                R[qi_reb] = (sum(Kq[0, i] * lm[0, i] for i in range(C))
+                             / Lq[0] - 1.0)
             return R
 
         def build_jac():
@@ -2130,14 +2343,29 @@ class RigorousColumn(UnitOp):
                     Kc2, hLc2, hVc2 = Kc.copy(), hLc.copy(), hVc.copy()
                     Lc2[j], Vc2[j], Kc2[j] = Lj, Vj, Kj
                     hLc2[j], hVc2[j] = hLj, hVj
-                    R1 = residuals(lm, vm, Lc2, Vc2, Kc2, hLc2, hVc2)
+                    R1 = residuals(lm, vm, Lc2, Vc2, Kc2, hLc2, hVc2, qreb)
                     jac[:, col] = (R1 - R0) / dk
+            if total_condenser:
+                # Column for the reboiler-duty unknown. The variable is scaled by
+                # e_ref (the duty is ~e_ref in magnitude while the energy residual
+                # is divided by e_ref, so the raw column would be ~1/e_ref^2 and
+                # the endgame would stall); a unit step in the SCALED variable is
+                # e_ref watts, giving an O(1) column. Perturbing the duty changes
+                # only the reboiler energy row (no property re-evaluation).
+                dk = _NS_DT
+                R1 = residuals(lmat, vmat, Lc, Vc, Kc, hLc, hVc, qreb + dk * e_ref)
+                jac[:, qi_reb] = (R1 - R0) / dk
             return jac
 
         # active-component indices in the property package's full ordering
         pp_comps = list(getattr(pp, "components", active))
         act_idx = np.array([pp_comps.index(c) for c in active])
-        has_analytic = hasattr(pp, "stage_derivs") and not force_fd
+        # The analytic Jacobian hardcodes the partial-condenser distillate-rate
+        # spec and has no reboiler-duty column; the total-condenser/reboiler form
+        # uses the finite-difference Jacobian (it differences whatever the
+        # residual set, including the appended global equation).
+        has_analytic = (hasattr(pp, "stage_derivs") and not force_fd
+                        and not total_condenser)
 
         def build_jac_analytic():
             # Per-stage analytic K-value / enthalpy derivatives (Naphtali-
@@ -2262,8 +2490,11 @@ class RigorousColumn(UnitOp):
                 tt[j] = min(max(Tv[j] + d[b + 2 * C], t_lo), t_hi)
                 Lt[j], Vt[j], Kt[j], hLt[j], hVt[j] = stage_eval(
                     j, lm[j], vm[j], tt[j])
-            Rt = residuals(lm, vm, Lt, Vt, Kt, hLt, hVt)
-            return float(Rt @ Rt), (lm, vm, tt, Lt, Vt, Kt, hLt, hVt, Rt)
+            # The reboiler-duty step is in the e_ref-scaled variable (see
+            # build_jac): a unit Newton step is e_ref watts.
+            qrb = qreb + d[qi_reb] * e_ref if total_condenser else 0.0
+            Rt = residuals(lm, vm, Lt, Vt, Kt, hLt, hVt, qrb)
+            return float(Rt @ Rt), (lm, vm, tt, Lt, Vt, Kt, hLt, hVt, Rt, qrb)
 
         def _ns_try(delta, rss):
             ss, st = evals(delta, cap(delta))
@@ -2278,14 +2509,14 @@ class RigorousColumn(UnitOp):
                 frac *= 0.5
             return None, None
 
-        R0 = residuals(lmat, vmat, Lc, Vc, Kc, hLc, hVc)
+        R0 = residuals(lmat, vmat, Lc, Vc, Kc, hLc, hVc, qreb)
         converged = False
         it = 0
         rnorm = float(np.max(np.abs(R0)))
         lam = _NS_LM_INIT      # Levenberg-Marquardt damping
         for it in range(1, max_iter + 1):
             rnorm = float(np.max(np.abs(R0)))
-            if rnorm < _NS_TOL:
+            if rnorm < tol:
                 converged = True
                 break
             rss = float(R0 @ R0)
@@ -2353,6 +2584,7 @@ class RigorousColumn(UnitOp):
                 lmat, vmat, Tv, R0 = state[0], state[1], state[2], state[8]
                 Lc[:], Vc[:] = state[3], state[4]
                 Kc[:], hLc[:], hVc[:] = state[5], state[6], state[7]
+                qreb = state[9]
                 lam = max(lam / _NS_LM_DOWN, _NS_LM_MIN)
             if getattr(self, "_ns_debug", False):
                 km = int(np.argmax(np.abs(R0)))

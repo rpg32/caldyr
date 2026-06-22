@@ -351,3 +351,57 @@ def test_missing_stage_params_raise():
     fs = bt_rigorous(n_stages=None)
     with pytest.raises(RigorousColumnError, match="n_stages"):
         fs.solve()
+
+
+# -- reboiled column on Naphtali-Sandholm (total condenser + reboiler) --------
+@pytest.mark.slow
+def test_reboiled_naphtali_sandholm_matches_bubble_point():
+    """The reboiled column solved by the simultaneous-correction (Naphtali-
+    Sandholm) method with a total condenser + reboiler must reproduce the
+    bubble-point (Wang-Henke) solution of the SAME column (same D + reflux
+    ratio): the two methods solve identical MESH equations, so the converged
+    products, duties and reflux must agree. This validates the additive
+    reboiled/total-condenser NS path (the simultaneous-correction alternative
+    for wide-boiling reboiled towers) against the already-FUG-validated
+    bubble-point method."""
+    fb = bt_rigorous(method="bubble_point")
+    assert fb.solve().converged
+    db = fb.units["COL"].design
+
+    fn = bt_rigorous(method="naphtali_sandholm", max_iter=200)
+    assert fn.solve().converged
+    dn = fn.units["COL"].design
+
+    assert dn["method"] == "naphtali_sandholm"
+    assert dn["reboiled"] is True
+    assert dn["partial_condenser"] is False
+
+    # products + duties + reflux match the bubble-point solution
+    assert dn["x_D"]["benzene"] == pytest.approx(db["x_D"]["benzene"], abs=1e-3)
+    assert dn["x_B"]["benzene"] == pytest.approx(db["x_B"]["benzene"], abs=1e-3)
+    assert dn["Q_reboiler"] == pytest.approx(db["Q_reboiler"], rel=1e-3)
+    assert dn["Q_condenser"] == pytest.approx(db["Q_condenser"], rel=1e-3)
+    assert dn["R"] == pytest.approx(db["R"], rel=1e-4)
+
+    # liquid distillate (total condenser) + machine-exact mass balance
+    dist, bot, feed = fn.streams["DIST"], fn.streams["BOT"], fn.streams["FEED"]
+    assert dist.vapor_fraction == 0.0
+    assert dist.molar_flow + bot.molar_flow == pytest.approx(
+        feed.molar_flow, rel=1e-10)
+    for c in ("benzene", "toluene"):
+        c_in = feed.molar_flow * feed.z[c]
+        c_out = dist.molar_flow * dist.z.get(c, 0.0) + bot.molar_flow * bot.z.get(c, 0.0)
+        assert c_out == pytest.approx(c_in, rel=1e-7, abs=1e-7)
+    # the energy balance closes (condenser duty recovered from the stage-0 bal.)
+    assert dn["energy_residual_rel"] < 1e-7
+
+
+def test_reboiled_naphtali_sandholm_recovers_reboiler_and_condenser_ports():
+    """The reboiled NS column reports both duty ports (the reboiler duty is the
+    recovered NS global unknown, the condenser duty closes the overall balance)
+    with the heater sign convention (reboiler heats > 0, condenser cools < 0)."""
+    fn = bt_rigorous(method="naphtali_sandholm", max_iter=200)
+    report = fn.solve()
+    assert "QR" in report.duties and "QC" in report.duties
+    assert fn.units["COL"].design["Q_reboiler"] > 0.0
+    assert fn.units["COL"].design["Q_condenser"] < 0.0
