@@ -7,7 +7,7 @@ from .thermo_pkg import ThermoPackage
 
 # Which backend builds each `thermo:<method>` selector.
 _CUBIC = {"PR", "SRK"}
-_ACTIVITY = {"NRTL"}
+_ACTIVITY = {"NRTL", "UNIFAC", "UNIFAC-LLE"}
 
 
 def _validate_component_ids(components: list[str]) -> None:
@@ -56,6 +56,10 @@ def make_package(spec: str, components: list[str]) -> PropertyPackage:
         only packages supporting petroleum pseudo-components (assay cuts; see
         :mod:`caldyr.assay`).
       * ``thermo:NRTL`` — activity-coefficient liquid (polar systems, azeotropes).
+      * ``thermo:UNIFAC`` — predictive Modified UNIFAC (Dortmund) gamma-phi liquid
+        with automatic group assignment; the simultaneous VLE+LLE model for
+        heteroazeotropic (3-phase) distillation. ``thermo:UNIFAC-LLE`` is the
+        Magnussen LLE-fit variant.
       * ``coolprop:Water`` — pure-water steam tables (CoolProp IAPWS-95);
         single-component water flowsheets only.
       * ``amine:DEA`` / ``amine:MDEA`` / ``amine:MEA`` — reactive acid-gas

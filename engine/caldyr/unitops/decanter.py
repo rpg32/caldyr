@@ -17,8 +17,9 @@ port and the remainder drawn on ``product`` — and treats any flashed vapor as 
 vented stream rather than a primary product (a decanter is liquid-liquid).
 
 Three-phase (VLLE) flashes are implemented by the cubic-EOS packages
-(``thermo:PR`` / ``thermo:SRK``) and the activity package
-(``thermo:NRTL``, via an isoactivity liquid-liquid split). A fully miscible
+(``thermo:PR`` / ``thermo:SRK``) and the activity packages (``thermo:NRTL`` /
+``thermo:UNIFAC``, via an isoactivity liquid-liquid split — UNIFAC is the
+predictive simultaneous VLE+LLE model for heteroazeotropes). A fully miscible
 feed degrades gracefully: everything leaves on ``liquid_light`` with an empty
 ``liquid_heavy`` (and ``reflux``/``product``) — not an error.
 """
@@ -84,7 +85,7 @@ class Decanter(UnitOp):
             raise ValueError(
                 f"Decanter {self.id!r}: the property package does not implement "
                 f"the three-phase (VLLE) flash — use thermo:PR / thermo:SRK / "
-                f"thermo:NRTL")
+                f"thermo:NRTL / thermo:UNIFAC")
         layer = str(self.params.get("reflux_layer", "light"))
         if layer not in ("light", "heavy"):
             raise ValueError(

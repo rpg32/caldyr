@@ -159,6 +159,10 @@ def property_packages() -> list[dict]:
         {"id": "thermo:PR", "name": "Peng-Robinson (cubic EOS)", "use": "non-polar systems"},
         {"id": "thermo:SRK", "name": "Soave-Redlich-Kwong (cubic EOS)", "use": "non-polar"},
         {"id": "thermo:NRTL", "name": "NRTL gamma-phi", "use": "polar mixtures / azeotropes"},
+        {"id": "thermo:UNIFAC", "name": "Modified UNIFAC (Dortmund) gamma-phi",
+         "use": "predictive VLE+LLE / heteroazeotropes (3-phase distillation)"},
+        {"id": "thermo:UNIFAC-LLE", "name": "UNIFAC-LLE gamma-phi",
+         "use": "liquid-liquid (Magnussen LLE table)"},
         {"id": "coolprop:Water", "name": "Steam tables (IAPWS-95 via CoolProp)",
          "use": "pure-water / steam systems"},
     ]

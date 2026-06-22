@@ -1,16 +1,34 @@
 """Activity-coefficient (gamma-phi) property package wrapping `thermo`.
 
-The liquid is modelled with an excess-Gibbs activity-coefficient model (NRTL)
-and the vapor as an ideal gas — the standard low-pressure gamma-phi approach.
-Unlike a cubic EOS, this captures strongly non-ideal polar liquids and the
-azeotropes they form (e.g. ethanol + water). Binary interaction parameters come
-from the ChemSep dataset bundled with `thermo` (via its IPDB); pairs without
-data fall back to an ideal-solution liquid, and that fallback is warned about
-rather than applied silently.
+The liquid is modelled with an excess-Gibbs activity-coefficient model and the
+vapor as an ideal gas — the standard low-pressure gamma-phi approach. Unlike a
+cubic EOS, this captures strongly non-ideal polar liquids and the azeotropes
+they form (e.g. ethanol + water), and it stays robust on near-pure-water trays
+where a cubic EOS loses its all-liquid root.
 
-Validated against the ethanol/water minimum-boiling azeotrope (~89 mol% ethanol,
-78.2 C at 1 atm — DePriester / Gmehling DECHEMA), which a cubic EOS cannot
-represent.
+Three excess-Gibbs models are available, selected by the ``property_package``
+string:
+
+  * ``thermo:NRTL`` — NRTL with binary interaction parameters from the ChemSep
+    dataset bundled with `thermo` (via its IPDB). Pairs without data fall back
+    to an ideal-solution liquid, warned about rather than applied silently.
+    Excellent VLE for fitted pairs; the bundled params are VLE-fit, so a single
+    NRTL set carries no liquid-liquid miscibility gap.
+  * ``thermo:UNIFAC`` — **Modified UNIFAC (Dortmund)**, a predictive
+    group-contribution model fit *simultaneously* to VLE and LLE. Per-component
+    UNIFAC groups are assigned automatically from the DDBST fragmentation
+    database shipped with `thermo` (no per-system fitting). This is the model
+    that unblocks heteroazeotropic (3-phase) distillation: it gives both the
+    heteroazeotrope (VLE) and the decanter's liquid-liquid split (LLE) from one
+    consistent set of parameters.
+  * ``thermo:UNIFAC-LLE`` — the original Magnussen (1981) UNIFAC-LLE parameter
+    table (version 0), LLE-fit. Stronger near a miscibility gap, weaker VLE than
+    the Dortmund model; offered as a secondary cross-check.
+
+Validated against the ethanol/water minimum-boiling azeotrope (~89.4 mol%
+ethanol, 78.2 C at 1 atm — DePriester / Gmehling DECHEMA), which a cubic EOS
+cannot represent, and (UNIFAC) the ethanol/water/cyclohexane ternary decant of
+heterogeneous-azeotrope ethanol dehydration.
 """
 from __future__ import annotations
 
@@ -23,6 +41,84 @@ from ._flasher import FlasherPackage, formation_props
 
 # ChemSep NRTL stores tau as b_ij / T and the non-randomness as alpha_ij.
 _NRTL_TABLE = "ChemSep NRTL"
+
+# Supported excess-Gibbs liquid models (uppercase keys, as `make_package` sends).
+_NRTL = "NRTL"
+_UNIFAC_DMD = "UNIFAC"        # Modified UNIFAC (Dortmund), thermo version=1
+_UNIFAC_LLE = "UNIFAC-LLE"    # original Magnussen LLE table, thermo version=0
+
+
+@lru_cache(maxsize=1)
+def _orig_to_lle_subgroup() -> dict[int, int]:
+    """Remap original-UNIFAC subgroup IDs (what the DDBST 'UNIFAC' fragmentation
+    returns) onto the UNIFAC-LLE table's subgroup IDs. The two numberings agree
+    for the hydrocarbon backbone but diverge from subgroup 15 on (the LLE table
+    inserts the P1/P2 main groups, shifting H2O from 16 to 17, etc.). We match by
+    subgroup *name*, which is stable across the two tables."""
+    from thermo.unifac import LLEUFSG, UFSG
+
+    name_to_lle: dict[str, int] = {}
+    for sid, entry in LLEUFSG.items():
+        name_to_lle.setdefault(entry.group, sid)
+    return {sid: name_to_lle[entry.group]
+            for sid, entry in UFSG.items() if entry.group in name_to_lle}
+
+
+def _unifac_chemgroups(cass: tuple[str, ...], ddbst_model: str) -> list[dict[int, int]]:
+    """Per-component UNIFAC subgroup-count dicts from the DDBST fragmentation
+    database (``ddbst_model`` is 'MODIFIED_UNIFAC' or 'UNIFAC'). Raises naming
+    any component the database cannot fragment — there is no honest gamma without
+    its groups."""
+    from thermo.unifac import UNIFAC_group_assignment_DDBST
+
+    groups: list[dict[int, int]] = []
+    missing: list[str] = []
+    for cas in cass:
+        g = UNIFAC_group_assignment_DDBST(cas, ddbst_model)
+        if not g:
+            missing.append(cas)
+        groups.append(g)
+    if missing:
+        raise ValueError(
+            f"no DDBST {ddbst_model} group assignment for component(s) {missing}; "
+            f"UNIFAC cannot model them. Use 'thermo:NRTL' (if ChemSep has the "
+            f"binary parameters) or a cubic EOS instead."
+        )
+    return groups
+
+
+def _build_unifac_ge(cass: tuple[str, ...], model: str):
+    """Build a `thermo` UNIFAC excess-Gibbs model for an ordered component tuple,
+    with groups assigned automatically from the DDBST database. ``model`` is
+    ``_UNIFAC_DMD`` (Dortmund, version 1) or ``_UNIFAC_LLE`` (Magnussen, version
+    0)."""
+    from thermo.unifac import UNIFAC, LLEUFIP, LLEUFSG
+
+    n = len(cass)
+    xs = [1.0 / n] * n
+    if model == _UNIFAC_DMD:
+        chemgroups = _unifac_chemgroups(cass, "MODIFIED_UNIFAC")
+        return UNIFAC.from_subgroups(T=298.15, xs=xs, chemgroups=chemgroups,
+                                     version=1)
+    # UNIFAC-LLE: DDBST returns original-UNIFAC numbering; remap to the LLE table.
+    remap = _orig_to_lle_subgroup()
+    orig = _unifac_chemgroups(cass, "UNIFAC")
+    lle_groups: list[dict[int, int]] = []
+    for cas, g in zip(cass, orig):
+        out: dict[int, int] = {}
+        for sid, count in g.items():
+            if sid not in remap:
+                raise ValueError(
+                    f"component {cas} uses UNIFAC subgroup {sid}, which has no "
+                    f"UNIFAC-LLE equivalent; use 'thermo:UNIFAC' (Dortmund) for "
+                    f"this system."
+                )
+            out[remap[sid]] = out.get(remap[sid], 0) + count
+        lle_groups.append(out)
+    return UNIFAC.from_subgroups(T=298.15, xs=xs, chemgroups=lle_groups,
+                                 version=0, subgroups=LLEUFSG,
+                                 interaction_data=LLEUFIP)
+
 
 # Liquid-liquid (isoactivity) flash tuning.
 _LLE_MAX_IT = 300        # successive-substitution iterations per seed
@@ -52,8 +148,11 @@ def _build_flasher(components: tuple[str, ...], model: str):
     )
     from thermo.interaction_parameters import IPDB
 
-    if model != "NRTL":
-        raise ValueError(f"unsupported activity model {model!r}; expected 'NRTL'")
+    if model not in (_NRTL, _UNIFAC_DMD, _UNIFAC_LLE):
+        raise ValueError(
+            f"unsupported activity model {model!r}; expected one of "
+            f"{(_NRTL, _UNIFAC_DMD, _UNIFAC_LLE)}"
+        )
 
     constants, props = ChemicalConstantsPackage.from_IDs(list(components))
     gas = IdealGas(HeatCapacityGases=props.HeatCapacityGases)
@@ -71,28 +170,34 @@ def _build_flasher(components: tuple[str, ...], model: str):
         return FlashPureVLS(constants, props, gas=gas, liquids=[liquid], solids=[]), hf, gf
 
     cas = constants.CASs
-    tau_bs = IPDB.get_ip_asymmetric_matrix(_NRTL_TABLE, cas, "bij")
-    alpha_cs = IPDB.get_ip_asymmetric_matrix(_NRTL_TABLE, cas, "alphaij")
-    if not _has_offdiagonal(tau_bs):
-        warnings.warn(
-            f"no ChemSep NRTL parameters for {list(components)}; the liquid "
-            f"falls back to an ideal solution (no activity correction). Results "
-            f"for polar mixtures may be inaccurate.",
-            stacklevel=2,
-        )
-    n = len(components)
-    ge_model = NRTL(T=298.15, xs=[1.0 / n] * n, tau_bs=tau_bs, alpha_cs=alpha_cs)
+    if model == _NRTL:
+        tau_bs = IPDB.get_ip_asymmetric_matrix(_NRTL_TABLE, cas, "bij")
+        alpha_cs = IPDB.get_ip_asymmetric_matrix(_NRTL_TABLE, cas, "alphaij")
+        if not _has_offdiagonal(tau_bs):
+            warnings.warn(
+                f"no ChemSep NRTL parameters for {list(components)}; the liquid "
+                f"falls back to an ideal solution (no activity correction). Results "
+                f"for polar mixtures may be inaccurate.",
+                stacklevel=2,
+            )
+        n = len(components)
+        ge_model = NRTL(T=298.15, xs=[1.0 / n] * n, tau_bs=tau_bs, alpha_cs=alpha_cs)
+    else:
+        ge_model = _build_unifac_ge(tuple(cas), model)
+
     liquid = GibbsExcessLiquid(GibbsExcessModel=ge_model, **liquid_kwargs)
     return FlashVL(constants, props, liquid=liquid, gas=gas), hf, gf
 
 
 class ActivityPackage(FlasherPackage):
-    """NRTL (gamma) + ideal-gas (phi) property package over a fixed component
-    list. Selected by ``property_package`` strings like ``"thermo:NRTL"``."""
+    """Gamma-phi property package: an excess-Gibbs liquid (NRTL or UNIFAC) plus
+    an ideal-gas vapor, over a fixed component list. Selected by
+    ``property_package`` strings ``"thermo:NRTL"``, ``"thermo:UNIFAC"`` (Modified
+    UNIFAC / Dortmund) or ``"thermo:UNIFAC-LLE"`` (Magnussen LLE table)."""
 
-    SUPPORTED = ("NRTL",)
+    SUPPORTED = (_NRTL, _UNIFAC_DMD, _UNIFAC_LLE)
 
-    def __init__(self, components: list[str], model: str = "NRTL") -> None:
+    def __init__(self, components: list[str], model: str = _NRTL) -> None:
         model = model.upper()
         if model not in self.SUPPORTED:
             raise ValueError(
@@ -104,13 +209,14 @@ class ActivityPackage(FlasherPackage):
 
     @classmethod
     def from_spec(cls, spec: str, components: list[str]) -> "ActivityPackage":
-        """Build from a flowsheet `property_package` string like ``"thermo:NRTL"``."""
+        """Build from a flowsheet `property_package` string like ``"thermo:NRTL"``
+        or ``"thermo:UNIFAC"``."""
         backend, _, model = spec.partition(":")
         if backend != "thermo":
             raise ValueError(
                 f"ActivityPackage cannot build backend {backend!r} (got {spec!r})"
             )
-        return cls(components, model or "NRTL")
+        return cls(components, model or _NRTL)
 
     # -- three-phase (VLLE) flashes via an NRTL liquid-liquid split ----------
     # The cubic-EOS FlasherPackage builds three-phase results from thermo's
