@@ -60,12 +60,27 @@ class KineticReaction:
     mol/m^3 (e.g. 1/s for first order, m^3/(mol·s) for second). ``Ea`` is in
     J/mol. Concentrations are clamped at zero so a component driven to
     exhaustion stops the reaction instead of producing NaNs.
+
+    **Reversible reactions.** Supplying ``k0_rev``/``Ea_rev`` (and optional
+    ``orders_rev`` over the products, defaulting to the product stoichiometry)
+    adds a reverse term so the *net* rate is
+
+        r = k_f · Π C_i^order_i  −  k_r · Π C_j^order_rev,j
+
+    which vanishes — and pins the conversion — at the equilibrium
+    ``Π C_prod^ν / Π C_react^ν = k_f/k_r``. This is what an esterification or
+    etherification in a reactive-distillation column needs: a forward-only fast
+    reaction would drive to complete (unphysical) conversion. Without the
+    reverse parameters the rate is forward-only (unchanged).
     """
     stoich: dict[str, float]
     key: str
     k0: float
     Ea: float
     orders: dict[str, float] = field(default_factory=dict)
+    k0_rev: float = 0.0
+    Ea_rev: float = 0.0
+    orders_rev: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def from_param(cls, d: dict) -> "KineticReaction":
@@ -82,14 +97,27 @@ class KineticReaction:
             raise ValueError(f"kinetic reaction is missing field(s) {missing} "
                              f"(power law needs k0 and Ea)")
         orders = {k: float(v) for k, v in d.get("orders", {key: 1.0}).items()}
+        # Reverse term: default the orders to the product stoichiometry.
+        k0_rev = float(d.get("k0_rev", 0.0))
+        Ea_rev = float(d.get("Ea_rev", 0.0))
+        default_rev = {c: nu for c, nu in stoich.items() if nu > 0}
+        orders_rev = {k: float(v)
+                      for k, v in d.get("orders_rev", default_rev).items()}
         return cls(stoich=stoich, key=key, k0=float(d["k0"]), Ea=float(d["Ea"]),
-                   orders=orders)
+                   orders=orders, k0_rev=k0_rev, Ea_rev=Ea_rev,
+                   orders_rev=orders_rev)
 
     def rate(self, conc: dict[str, float], T: float) -> float:
-        """Rate in mol/(m^3·s) at concentrations ``conc`` (mol/m^3) and T (K)."""
+        """Net rate in mol/(m^3·s) at concentrations ``conc`` (mol/m^3) and
+        T (K): forward minus reverse (reverse is zero unless ``k0_rev`` is set)."""
         r = self.k0 * math.exp(-self.Ea / (_R * T))
         for comp, order in self.orders.items():
             r *= max(conc.get(comp, 0.0), 0.0) ** order
+        if self.k0_rev > 0.0:
+            rr = self.k0_rev * math.exp(-self.Ea_rev / (_R * T))
+            for comp, order in self.orders_rev.items():
+                rr *= max(conc.get(comp, 0.0), 0.0) ** order
+            r -= rr
         return r
 
 

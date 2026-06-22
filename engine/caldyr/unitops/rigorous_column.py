@@ -125,6 +125,7 @@ from scipy.optimize import brentq
 from ..core import EnergyStream, Port, Stream, UnitOp
 from ..core.unitop import PortStream
 from .base import register
+from .reaction import KineticReaction
 
 
 class RigorousColumnError(ValueError):
@@ -139,6 +140,11 @@ _X_FLOOR = 1e-15         # floor for stage mole fractions (Thomas can go negativ
 _V_FLOOR_FRAC = 1e-8     # vapor/liquid traffic floor, as a fraction of the feed
 _WARM_Z_TOL = 0.1        # max |dz| of the feed for warm-starting from last solve
 _FENSKE_CLAMP = 50.0     # caps the logistic exponent in the Fenske initializer
+_RXN_RELAX = 0.5         # under-relaxation on the lagged reaction source (reactive
+#                          distillation) — eases the generation in as the profile
+#                          settles; at convergence the used == newly-computed rate
+_RXN_MAX_CONV = 0.95     # per-stage extent cap: fraction of a reactant's liquid
+#                          traffic a single stage may consume (flash conditioning)
 
 # sum-rates mode (steam-stripped / non-reboiled main fractionator)
 _SR_TOL_FLOW = 1e-7      # relative traffic convergence
@@ -456,6 +462,15 @@ class RigorousColumn(UnitOp):
       * ``partial_condenser`` — vapor distillate at its dew point (default
         False: total condenser, liquid distillate at its bubble point).
       * ``max_iter`` — MESH iteration cap (default 200).
+      * ``reactions`` — reactive distillation: a list of kinetic-reaction dicts
+        (see :class:`caldyr.unitops.reaction.KineticReaction`, plus a
+        ``"stages": [first, last]`` 1-based inclusive tray range) run on their
+        stages, with ``tray_holdup`` the per-stage liquid holdup volume (m^3).
+        The per-stage generation enters the component balances and the heat of
+        reaction rides the formation-inclusive stage enthalpies. Reversible
+        kinetics (``k0_rev``/``Ea_rev``) bound the conversion at equilibrium.
+        Implemented for the default reboiled bubble-point column; see
+        :meth:`_read_reactions`.
       * ``reboiled`` — default True. ``False`` removes the reboiler: stage
         ``n_stages`` becomes an ordinary (adiabatic) stage that may receive a
         feed — open stripping steam, the crude-tower configuration. The
@@ -761,6 +776,7 @@ class RigorousColumn(UnitOp):
         P_in = feed_streams[0].require_state()[1]
         (n_stages, feed_stages, draws, R, D, P, dP, partial, max_iter,
          method, reboiled, duties) = self._read_params(F, P_in)
+        reactions, holdup = self._read_reactions(n_stages, reboiled, method)
 
         # Exact-repeat cache (see __init__): same params + same inlet states
         # -> return copies of the previous result without re-iterating MESH.
@@ -841,12 +857,20 @@ class RigorousColumn(UnitOp):
             return out
 
         # Cumulative (feeds - draws - distillate) above-and-including stage j:
-        # the total balance reads L_j = V_{j+1} + A_j (A_{N-1} = B).
-        A = [0.0] * N
-        run = -D
-        for j in range(N):
-            run += sum(fz_stage[j].values()) - u[j] - w[j]
-            A[j] = run
+        # the total balance reads L_j = V_{j+1} + A_j (A_{N-1} = B). A reactive
+        # stage adds its net mole change (zero for a mole-conserving reaction);
+        # `gen_stage[j]` is recomputed each MESH iteration from the liquid profile.
+        def _cumulative_A(gen_stage: list[dict[str, float]]) -> list[float]:
+            A_local = [0.0] * N
+            run_local = -D
+            for j in range(N):
+                run_local += (sum(fz_stage[j].values())
+                              + sum(gen_stage[j].values()) - u[j] - w[j])
+                A_local[j] = run_local
+            return A_local
+
+        no_gen: list[dict[str, float]] = [{} for _ in range(N)]
+        A = _cumulative_A(no_gen)
 
         x = self._initial_x(pp, P, f, D, N, z)
         L, V = self._initial_traffic(N, feed_info, R, D, F, partial, A, w)
@@ -862,8 +886,31 @@ class RigorousColumn(UnitOp):
         converged = False
         it = 0
         dT = dV = math.inf
+        gen_stage = no_gen
+        B_eff = B
         for it in range(1, max_iter + 1):
-            x = self._component_balances(N, active, fz_stage, D, K, L, V,
+            # Reaction generation from the current (x, T) profile, injected as an
+            # extra per-stage source into the component balances (the heat of
+            # reaction is carried automatically by the formation-inclusive stage
+            # enthalpies). A re-derives from the net mole change each iteration.
+            # The lagged source is under-relaxed for stability (at convergence the
+            # used generation equals the freshly computed rate).
+            if reactions:
+                gen_new = self._stage_generation(pp, reactions, holdup, x, T,
+                                                 P_j, L, active)
+                gen_stage = [
+                    {c: gen_stage[j].get(c, 0.0)
+                     + _RXN_RELAX * (gen_new[j].get(c, 0.0) - gen_stage[j].get(c, 0.0))
+                     for c in set(gen_stage[j]) | set(gen_new[j])}
+                    for j in range(N)]
+                src_stage = [{c: fz_stage[j].get(c, 0.0) + gen_stage[j].get(c, 0.0)
+                              for c in set(fz_stage[j]) | set(gen_stage[j])}
+                             for j in range(N)]
+                A = _cumulative_A(gen_stage)
+                B_eff = A[N - 1]
+            else:
+                src_stage = fz_stage
+            x = self._component_balances(N, active, src_stage, D, K, L, V,
                                          partial, u, w)
             T_new, K, hL, hV, n_flash = \
                 self._stage_bubble_points(pp, P_j, x, active, n_flash)
@@ -885,7 +932,7 @@ class RigorousColumn(UnitOp):
             dV = max(abs(vn - vo) for vn, vo in zip(V_new[1:], V[1:])) / max(V_new[1:])
             V = [V[0]] + [max(vo + omega * (vn - vo), v_floor)
                           for vo, vn in zip(V[1:], V_new[1:])]
-            L = [max(V[j + 1] + A[j], v_floor) for j in range(N - 1)] + [B]
+            L = [max(V[j + 1] + A[j], v_floor) for j in range(N - 1)] + [B_eff]
 
             if dT <= _TOL_T and dV <= _TOL_V:
                 converged = True
@@ -923,15 +970,20 @@ class RigorousColumn(UnitOp):
         for stage, phase, rate in draws:
             comp = x[stage - 1] if phase == "liquid" else y[stage - 1]
             draw_flows.append({c: rate * comp[c] for c in active})
-        b_flows = {c: f[c] - d_flows[c]
+        # Net component feed including reaction generation across all stages:
+        # the overall balance is f + Σ_j gen_j = D x_D + B x_B + Σ draws.
+        gen_tot = {c: sum(gen_stage[j].get(c, 0.0) for j in range(N))
+                   for c in active}
+        f_eff = {c: f[c] + gen_tot[c] for c in active}
+        b_flows = {c: f_eff[c] - d_flows[c]
                    - sum(df[c] for df in draw_flows) for c in active}
         neg = min(b_flows.values())
         if neg < -1e-7 * F:
             raise RigorousColumnError(
                 f"RigorousColumn {self.id!r}: converged distillate/side draws "
-                f"would carry more of a component than the feed supplies "
-                f"(bottoms flow {neg:.3g} mol/s) — tighten tolerances or check "
-                f"the rate specs"
+                f"would carry more of a component than the feed (plus reaction) "
+                f"supplies (bottoms flow {neg:.3g} mol/s) — tighten tolerances or "
+                f"check the rate specs"
             )
         if neg < 0.0:
             # Trace negatives from finite MESH tolerance (a light component
@@ -945,10 +997,10 @@ class RigorousColumn(UnitOp):
                     d_flows[c] += v
                     d_flows[donor] -= v
                     b_flows[c] = 0.0
-            b_flows[donor] = (f[donor] - d_flows[donor]
+            b_flows[donor] = (f_eff[donor] - d_flows[donor]
                               - sum(df[donor] for df in draw_flows))
             x_d = {c: v / D for c, v in d_flows.items()}
-        x_b = {c: v / B for c, v in b_flows.items()}
+        x_b = {c: v / B_eff for c, v in b_flows.items()}
 
         z_dist = {c: x_d.get(c, 0.0) for c in comps}
         z_bot = {c: x_b.get(c, 0.0) for c in comps}
@@ -964,7 +1016,7 @@ class RigorousColumn(UnitOp):
         )
         bottoms = Stream(
             id=f"{self.id}.bottoms", components=comps,
-            T=res_b.T, P=P_j[-1], molar_flow=B, z=z_bot,
+            T=res_b.T, P=P_j[-1], molar_flow=B_eff, z=z_bot,
             H=res_b.H, phase=res_b.phase, vapor_fraction=res_b.vapor_fraction,
         )
 
@@ -993,9 +1045,9 @@ class RigorousColumn(UnitOp):
         else:
             q_cond = (L[0] + D) * res_d.H - V[1] * hV[1]
         feed_h = sum(Fi * Hi for Fi, Hi in zip(F_k, H_k))
-        q_reb = D * res_d.H + B * res_b.H + side_h - feed_h - q_cond
+        q_reb = D * res_d.H + B_eff * res_b.H + side_h - feed_h - q_cond
         # Diagnostic: the independently computed stage-N (reboiler) balance.
-        q_reb_stage = V[N - 1] * hV[N - 1] + B * hL[N - 1] - L[N - 2] * hL[N - 2]
+        q_reb_stage = V[N - 1] * hV[N - 1] + B_eff * hL[N - 1] - L[N - 2] * hL[N - 2]
         e_scale = max(abs(q_reb), abs(q_cond), 1.0)
         energy_residual = abs(q_reb - q_reb_stage) / e_scale
 
@@ -1010,7 +1062,7 @@ class RigorousColumn(UnitOp):
             "N": float(N - 1), "P": P_j[0], "x_D": dict(x_d), "x_B": dict(x_b),
             "T_top": res_d.T, "T_top_dew": dew_d, "T_bottom": res_b.T,
             "V_top": V[1], "Q_condenser": q_cond, "Q_reboiler": q_reb,
-            "D": D, "B": B, "R": R, "q": q, "feed_stage": feed_stages[0],
+            "D": D, "B": B_eff, "R": R, "q": q, "feed_stage": feed_stages[0],
             "partial_condenser": partial,
             "feeds": [{"stage": j + 1, "F": Fi, "q": qi}
                       for j, Fi, qi in feed_info],
@@ -2775,6 +2827,97 @@ class RigorousColumn(UnitOp):
             tot = sum(row.values())
             x.append({c: v / tot for c, v in row.items()})
         return x
+
+    def _read_reactions(self, n_stages: int, reboiled: bool, method: str
+                        ) -> tuple[list[tuple[KineticReaction, frozenset[int]]], float]:
+        """Parse the optional ``reactions`` / ``tray_holdup`` params for reactive
+        distillation. Returns a list of ``(KineticReaction, reactive stages as a
+        0-based frozenset)`` and the per-stage liquid holdup volume (m^3).
+
+        Each ``reactions`` entry is a JSON-friendly kinetic-reaction dict (see
+        :class:`caldyr.unitops.reaction.KineticReaction` — ``stoich``/``key``/
+        ``k0``/``Ea``/``orders``) plus a ``"stages": [first, last]`` 1-based,
+        inclusive range naming the trays the reaction runs on. ``k0`` is on the
+        SI molar basis (concentrations in mol/m^3), ``Ea`` in J/mol. The rate
+        ``r = k0·exp(-Ea/RT)·Π C_i^order_i`` [mol/(m^3·s)] is turned into a stage
+        extent by the liquid holdup: ``ξ_j = r_j · tray_holdup``."""
+        raw = self.params.get("reactions")
+        if not raw:
+            return [], 0.0
+        if method != "bubble_point" or not reboiled:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: reactive distillation ('reactions') "
+                f"is implemented for the default reboiled bubble-point column "
+                f"(method='bubble_point', reboiled=True); got method={method!r}, "
+                f"reboiled={reboiled}"
+            )
+        try:
+            holdup = float(self.params.get("tray_holdup", 1.0))
+        except (TypeError, ValueError) as exc:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: 'tray_holdup' (liquid holdup volume "
+                f"per reactive stage, m^3) must be numeric"
+            ) from exc
+        if holdup <= 0.0:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: tray_holdup={holdup} m^3 must be > 0")
+        out: list[tuple[KineticReaction, frozenset[int]]] = []
+        for k, entry in enumerate(raw):
+            try:
+                rxn = KineticReaction.from_param(entry)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: reactions[{k}] is not a valid "
+                    f"kinetic reaction ({exc})"
+                ) from exc
+            stages_spec = entry.get("stages")
+            if (not isinstance(stages_spec, (list, tuple)) or len(stages_spec) != 2):
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: reactions[{k}] needs "
+                    f"'stages': [first, last] (1-based, inclusive); got "
+                    f"{stages_spec!r}")
+            first, last = int(stages_spec[0]), int(stages_spec[1])
+            if not 1 <= first <= last <= n_stages:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: reactions[{k}] stages "
+                    f"[{first}, {last}] out of range 1..{n_stages}")
+            out.append((rxn, frozenset(range(first - 1, last))))
+        return out, holdup
+
+    def _stage_generation(self, pp, reactions, holdup: float,
+                          x: list[dict[str, float]], T: list[float],
+                          P_j: list[float], L: list[float], active: list[str]
+                          ) -> list[dict[str, float]]:
+        """Per-stage component generation (mol/s) from the kinetic reactions on
+        their reactive stages, evaluated at the current liquid profile. Negative
+        for consumed reactants, positive for products; sums to the stage net mole
+        change (zero for a mole-conserving reaction). Concentrations are the
+        liquid molar densities C_i = x_i / v_liquid(T, P, x).
+
+        The extent is capped so a stage cannot consume more than a fraction
+        ``_RXN_MAX_CONV`` of any reactant in its liquid traffic — a numerical
+        rail that keeps the per-stage flash well-conditioned while the lagged
+        reaction source settles (at the converged steady state, which for a
+        reversible reaction is equilibrium-bounded, the cap does not bind)."""
+        N = len(x)
+        g: list[dict[str, float]] = [{} for _ in range(N)]
+        for rxn, stages in reactions:
+            for j in stages:
+                v_liq = pp.volume_liquid(T[j], P_j[j], x[j])     # m^3/mol
+                if v_liq <= 0.0:
+                    continue
+                conc = {c: x[j].get(c, 0.0) / v_liq for c in active}
+                xi = rxn.rate(conc, T[j]) * holdup               # mol/s extent
+                # Cap by reactant (xi>0) or product (xi<0) availability in L_j.
+                for c, nu in rxn.stoich.items():
+                    consumed = -nu if xi > 0 else nu            # >0 if depleting c
+                    if consumed > 0:
+                        avail = _RXN_MAX_CONV * L[j] * x[j].get(c, 0.0)
+                        xi = min(xi, avail / consumed) if xi > 0 else \
+                            max(xi, -avail / consumed)
+                for c, nu in rxn.stoich.items():
+                    g[j][c] = g[j].get(c, 0.0) + nu * xi
+        return g
 
     def _stage_bubble_points(self, pp, P_j: list[float], x: list[dict[str, float]],
                              active: list[str], n_flash: int):
