@@ -7,10 +7,10 @@ and where it appears in the web app.
 
 | Tool | Engine | API | Web UI |
 |---|---|---|---|
-| Pinch analysis | `caldyr.analysis.pinch_analysis` | — | — (Python only) |
-| Property tables | `caldyr.analysis.property_table` | — | — (Python only) |
+| Pinch analysis | `caldyr.analysis.pinch_analysis` | `POST /pinch` | Tools tab → Heat integration |
+| Property tables | `caldyr.analysis.property_table` | `POST /property-table` | Tools tab → Property table |
 | Psychrometrics | `caldyr.analysis.humidity` | — | — (Python only) |
-| Relief-valve sizing | `caldyr.analysis.relief_vapor` / `relief_liquid` | — | — (Python only) |
+| Relief-valve sizing | `caldyr.analysis.relief_vapor` / `relief_liquid` | `POST /relief` | Tools tab → Relief valve |
 | Balance report | `caldyr.solver.balance_report` | `POST /balance` | Streams tab → balance check |
 | Phase envelopes | `PropertyPackage.bubble_dew` | `POST /envelope` | Stream inspector → *Phase envelope* |
 | Optimization | `caldyr.solver.optimize` | `POST /optimize` | Opt tab |
@@ -33,7 +33,9 @@ heat-recovery potential — *before* designing any exchanger network.
 - `pinch_from_streams(streams, dt_min=10.0)` targets a plain list of
   `{"Tin", "Tout", "Q"}` specs with no flowsheet at all.
 
-Validated against Kemp 2e. See `examples/12_heat_integration.py`.
+Validated against Kemp 2e. See `examples/12_heat_integration.py`. Exposed on
+`POST /pinch` (solves, then targets); the **Tools** tab shows the targets and the
+hot/cold composite curves.
 
 ## Property tables
 
@@ -42,6 +44,8 @@ Validated against Kemp 2e. See `examples/12_heat_integration.py`.
 (Hameed 2025 §2.1.4): plot-ready 2-D arrays of density, enthalpy, vapor
 fraction, etc. for any property package and composition. Failed flash points
 become NaN (logged) instead of killing the grid. See `examples/15_utilities.py`.
+Exposed on `POST /property-table` (composition from a named stream or explicit
+`z`); the **Tools** tab plots the property isobars.
 
 ## Psychrometrics (humidity)
 
@@ -64,7 +68,8 @@ Analysis → PSV sizing* equivalent (Hameed 2025 sec. 7.3):
 Both return the required effective discharge area and the standard API 526
 orifice letter (D through T). Validated against the book's worked
 blocked-outlet steam PSV (10.13 vs 10.17 cm², same orifice selection); see
-`examples/16_pipe_relief.py`.
+`examples/16_pipe_relief.py`. Exposed on `POST /relief` (vapor M may be derived
+from a flow+stream composition); the **Tools** tab is a fill-in sizing form.
 
 ## Balance report
 

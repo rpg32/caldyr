@@ -24,7 +24,7 @@ import type {
   BalanceResult, CostResponse, FlowDoc, PropertyPackage, SolveResponse, UnitType,
 } from "./types";
 
-export type Tab = "params" | "streams" | "economics" | "optimize" | "study" | "calc";
+export type Tab = "params" | "streams" | "economics" | "optimize" | "study" | "calc" | "tools";
 export type Busy = "solve" | "cost" | null;
 export type ColorMode = "none" | "phase" | "temperature";
 export type ViewMode = "bfd" | "pfd" | "pid";

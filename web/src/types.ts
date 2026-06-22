@@ -119,6 +119,44 @@ export interface EnvelopeResponse {
   points: { P: number; T_bubble: number; T_dew: number }[];
 }
 
+// ---- analysis tools: property table / relief / pinch ----
+export interface PropertyTableResponse {
+  T: number[];
+  P: number[];
+  props: string[];
+  z: Record<string, number>;
+  values: Record<string, (number | null)[][]>;   // [name][i_T][j_P]
+  failures: { T: number; P: number; error: string }[];
+}
+
+export interface ReliefResponse {
+  area_m2: number;
+  area_cm2: number;
+  orifice: string | null;
+  orifice_area_m2: number | null;
+  capacity_used: number | null;
+  phase: string;
+  critical: boolean | null;
+  details: Record<string, number>;
+  notes: string[];
+}
+
+export interface PinchResponse {
+  report: SolveReport;
+  dt_min: number;
+  qh_min: number;
+  qc_min: number;
+  pinch_T_hot: number | null;
+  pinch_T_cold: number | null;
+  pinch_T_shifted: number | null;
+  current_hot_utility: number;
+  current_cold_utility: number;
+  heat_recovery_potential: number;
+  hot_composite: [number, number][];     // (H W, T K)
+  cold_composite: [number, number][];
+  streams: { id: string; T_in: number; T_out: number; Q: number; kind: string }[];
+}
+
 // ---- balance diagnostics (mirrors caldyr.solver.balance_report) ----
 export interface BalanceRow {
   unit_id?: string;

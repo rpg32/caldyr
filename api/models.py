@@ -116,6 +116,56 @@ class EnvelopeRequest(BaseModel):
     p_max: float | None = None  # Pa; default 5x stream P
 
 
+class PropertyTableRequest(BaseModel):
+    """Stream properties over a (T, P) grid — the HYSYS Property Table tool
+    (analysis.property_table). Composition comes from a named ``stream`` in the
+    .flow document, or from an explicit ``z`` (overrides the stream)."""
+    flow: FlowDoc
+    stream: str | None = None
+    z: dict[str, float] | None = None
+    T: list[float] = Field(min_length=1)        # K, one or more grid values
+    P: list[float] = Field(min_length=1)        # Pa, one or more grid values
+    props: list[str] | None = None              # default analysis.DEFAULT_PROPS
+
+
+class ReliefRequest(BaseModel):
+    """Pressure-relief valve sizing (API 520/526; analysis.relief).
+
+    ``phase='vapor'`` needs W, T, M, Z, k, P1 (+ optional coefficients);
+    ``phase='liquid'`` needs W, rho, P1, P2 (+ optional coefficients). All SI;
+    P1/P2 absolute Pa. ``M`` (vapor) may be omitted and derived from a stream's
+    composition when ``flow``+``stream`` are supplied."""
+    phase: Literal["vapor", "liquid"]
+    W: float                                    # relieving mass flow, kg/s
+    P1: float                                   # upstream relieving pressure, Pa abs
+    # vapor
+    T: float | None = None
+    M: float | None = None                      # kg/mol (or derived from stream)
+    Z: float = 1.0
+    k: float | None = None                      # Cp/Cv
+    backpressure: float = 101_325.0
+    # liquid
+    rho: float | None = None                    # kg/m^3
+    P2: float | None = None                     # downstream pressure, Pa abs
+    # coefficients (defaults match the physics functions)
+    Kd: float | None = None
+    Kb: float = 1.0
+    Kc: float = 1.0
+    Kw: float = 1.0
+    Kv: float = 1.0
+    # optional composition source for M
+    flow: FlowDoc | None = None
+    stream: str | None = None
+
+
+class PinchRequest(BaseModel):
+    """Heat-integration pinch targeting on a solved flowsheet (analysis.pinch)."""
+    flow: FlowDoc
+    backend: Literal["sequential", "equation_oriented"] = "sequential"
+    dt_min: float = Field(default=10.0, gt=0.0)   # minimum approach ΔT, K
+    tol: float = 1e-6
+
+
 class MetricSpec(BaseModel):
     """A scalar read off the solved flowsheet."""
     type: Literal["duty", "flow", "component_rate"]

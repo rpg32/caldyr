@@ -7,6 +7,9 @@
     POST /cost                 - full techno-economic analysis of a flowsheet
     POST /optimize             - minimize/maximize a metric over unit parameters
     POST /flow/roundtrip       - parse + re-serialize a .flow document (validate)
+    POST /property-table       - stream properties over a (T, P) grid
+    POST /relief               - pressure-relief valve sizing (API 520/526)
+    POST /pinch                - heat-integration pinch targets + composite curves
 """
 from __future__ import annotations
 
@@ -29,6 +32,9 @@ from .models import (
     MetricSpec,
     ObjectiveSpec,
     OptimizeRequest,
+    PinchRequest,
+    PropertyTableRequest,
+    ReliefRequest,
     SolveRequest,
     SolveResponse,
 )
@@ -342,6 +348,117 @@ def balance(req: SolveRequest) -> dict:
     except Exception as exc:
         raise HTTPException(400, f"balance report failed: {exc}") from exc
     return {"report": _report_dict(report), "balance": bal}
+
+
+# -- analysis tools: property table / relief / pinch -------------------------
+@app.post("/property-table")
+def property_table_endpoint(req: PropertyTableRequest) -> dict:
+    """Stream properties over a (T, P) grid (HYSYS Property Table; §2.1.4).
+
+    Composition from explicit ``z`` or a named ``stream`` in the .flow doc.
+    Returns plot-ready 2-D arrays (NaN where a flash failed) + the failure list.
+    """
+    from caldyr.analysis.property_table import DEFAULT_PROPS, property_table
+    from caldyr.thermo import make_package
+
+    fs = _validated(req.flow)
+    if req.z:
+        z = req.z
+    elif req.stream:
+        s = fs.streams.get(req.stream)
+        if s is None or not s.z:
+            raise HTTPException(422,
+                f"stream {req.stream!r} not found or has no composition "
+                "(provide z, or solve the flowsheet first)")
+        z = s.normalized_z()
+    else:
+        raise HTTPException(422, "provide either a stream name or an explicit z")
+
+    pp = make_package(fs.property_package, fs.component_ids)
+    props = req.props or list(DEFAULT_PROPS)
+    try:
+        grid = property_table(pp, z, T=req.T, P=req.P, props=props)
+    except Exception as exc:
+        raise HTTPException(400, f"property table failed: {exc}") from exc
+
+    # numpy -> JSON-safe (None for NaN so the client gets nulls, not the string)
+    def _clean(a) -> list:
+        return [None if v != v else float(v) for v in a.tolist()]
+
+    out: dict = {"T": grid["T"].tolist(), "P": grid["P"].tolist(),
+                 "props": props, "z": z,
+                 "failures": [{"T": t, "P": p, "error": m}
+                              for (t, p, m) in grid["failures"]]}
+    out["values"] = {name: [_clean(row) for row in grid[name]] for name in props}
+    return out
+
+
+@app.post("/relief")
+def relief_endpoint(req: ReliefRequest) -> dict:
+    """Pressure-relief valve sizing (API 520 area + API 526 orifice select)."""
+    from caldyr.analysis.relief import relief_liquid, relief_vapor
+
+    try:
+        if req.phase == "vapor":
+            M = req.M
+            if M is None and req.flow and req.stream:
+                fs = _validated(req.flow)
+                s = fs.streams.get(req.stream)
+                if s is not None and s.z:
+                    from caldyr.core.components_db import molar_mass
+                    M = sum(f * molar_mass(c) for c, f in s.normalized_z().items())
+            if req.T is None or M is None or req.k is None:
+                raise HTTPException(422,
+                    "vapor relief needs T, k, and M (or flow+stream to derive M)")
+            res = relief_vapor(
+                W=req.W, T=req.T, M=M, Z=req.Z, k=req.k, P1=req.P1,
+                backpressure=req.backpressure,
+                **({"Kd": req.Kd} if req.Kd is not None else {}),
+                Kb=req.Kb, Kc=req.Kc)
+        else:
+            if req.rho is None or req.P2 is None:
+                raise HTTPException(422, "liquid relief needs rho and P2")
+            res = relief_liquid(
+                W=req.W, rho=req.rho, P1=req.P1, P2=req.P2,
+                **({"Kd": req.Kd} if req.Kd is not None else {}),
+                Kw=req.Kw, Kc=req.Kc, Kv=req.Kv)
+    except HTTPException:
+        raise
+    except Exception as exc:  # ReliefSizingError + anything else
+        raise HTTPException(400, f"relief sizing failed: {exc}") from exc
+
+    return {
+        "area_m2": res.area_m2, "area_cm2": res.area_m2 * 1e4,
+        "orifice": res.orifice, "orifice_area_m2": res.orifice_area_m2,
+        "capacity_used": res.capacity_used, "phase": res.phase,
+        "critical": res.critical, "details": res.details, "notes": res.notes,
+    }
+
+
+@app.post("/pinch")
+def pinch_endpoint(req: PinchRequest) -> dict:
+    """Heat-integration pinch targeting on the solved flowsheet (§heat-integ)."""
+    from caldyr.analysis.pinch import pinch_analysis
+
+    fs, report = _solve(req.flow, req.backend, tol=req.tol)
+    try:
+        r = pinch_analysis(fs, report, dt_min=req.dt_min)
+    except Exception as exc:
+        raise HTTPException(400, f"pinch analysis failed: {exc}") from exc
+    return {
+        "report": _report_dict(report),
+        "dt_min": r.dt_min,
+        "qh_min": r.qh_min, "qc_min": r.qc_min,
+        "pinch_T_hot": r.pinch_T_hot, "pinch_T_cold": r.pinch_T_cold,
+        "pinch_T_shifted": r.pinch_T_shifted,
+        "current_hot_utility": r.current_hot_utility,
+        "current_cold_utility": r.current_cold_utility,
+        "heat_recovery_potential": r.heat_recovery_potential,
+        "hot_composite": [list(p) for p in r.hot_composite],
+        "cold_composite": [list(p) for p in r.cold_composite],
+        "streams": [{"id": s.unit_id, "T_in": s.T_in, "T_out": s.T_out,
+                     "Q": s.Q, "kind": s.kind} for s in r.streams],
+    }
 
 
 # -- AI: direct tool dispatch (no LLM — fallback + one-click buttons) ---------

@@ -196,3 +196,101 @@ def test_solve_report_includes_residual_history():
     h = d["report"]["history"]
     assert len(h) == d["report"]["iterations"] >= 2
     assert h[-1] < h[0]                              # residual fell
+
+
+# -- analysis tools: property table / relief / pinch -------------------------
+def npentane_flow() -> dict:
+    """A single n-pentane stream, the book's §2.1.4 Property Table case."""
+    return {
+        "schema": "caldyr.flow/1",
+        "components": [{"id": "n-pentane"}],
+        "property_package": "thermo:PR",
+        "units": [{"id": "H", "type": "Heater", "params": {"T_out": 350.0, "dP": 0.0}}],
+        "streams": [
+            {"id": "F", "from": None, "to": "H:in1",
+             "spec": {"T": 300.0, "P": 1.2e6, "molar_flow": 10, "z": {"n-pentane": 1.0}}},
+            {"id": "O", "from": "H:out", "to": None},
+            {"id": "Q", "from": "H:duty", "to": None},
+        ],
+    }
+
+
+def test_property_table_grid_and_trends():
+    d = client.post("/property-table", json={
+        "flow": npentane_flow(), "stream": "F",
+        "T": [500.0, 550.0, 600.0], "P": [1.2e6, 1.6e6],
+        "props": ["mass_density", "vapor_fraction"],
+    }).json()
+    assert d["T"] == [500.0, 550.0, 600.0] and d["P"] == [1.2e6, 1.6e6]
+    rho = d["values"]["mass_density"]
+    assert len(rho) == 3 and len(rho[0]) == 2          # (n_T, n_P) grid
+    # density falls with T (down a column) and rises with P (across a row) — the
+    # qualitative shape of the book's Fig. 2.20.
+    assert rho[0][0] > rho[2][0]
+    assert rho[0][1] > rho[0][0]
+    assert d["failures"] == []
+
+
+def test_property_table_explicit_z_overrides_stream():
+    d = client.post("/property-table", json={
+        "flow": npentane_flow(), "z": {"n-pentane": 1.0},
+        "T": [550.0], "P": [1.5e6], "props": ["mass_density"],
+    }).json()
+    assert d["values"]["mass_density"][0][0] > 0.0
+
+
+def test_property_table_needs_a_composition_source():
+    r = client.post("/property-table", json={
+        "flow": npentane_flow(), "T": [500.0], "P": [1.2e6]})
+    assert r.status_code == 422
+
+
+def test_relief_vapor_sizes_and_selects_orifice():
+    d = client.post("/relief", json={
+        "phase": "vapor", "W": 10.0, "T": 500.0, "M": 0.072,
+        "Z": 0.9, "k": 1.05, "P1": 1.2e6,
+    }).json()
+    assert d["phase"] == "vapor" and d["critical"] is True
+    assert d["area_m2"] > 0.0 and d["area_cm2"] == pytest.approx(d["area_m2"] * 1e4)
+    assert d["orifice"] in list("DEFGHJKLMNPQRT")     # an API 526 letter
+    assert 0.0 < d["capacity_used"] <= 1.0            # fits the selected orifice
+
+
+def test_relief_vapor_derives_M_from_stream():
+    """M omitted -> derived from the flow/stream composition."""
+    d = client.post("/relief", json={
+        "phase": "vapor", "W": 10.0, "T": 500.0, "k": 1.05, "P1": 1.2e6,
+        "flow": npentane_flow(), "stream": "F",
+    }).json()
+    # n-pentane M ~ 0.0721 kg/mol -> a sane area.
+    assert d["area_m2"] > 0.0 and d["orifice"] is not None
+
+
+def test_relief_liquid_path():
+    d = client.post("/relief", json={
+        "phase": "liquid", "W": 5.0, "rho": 600.0, "P1": 1.2e6, "P2": 1.0e5,
+    }).json()
+    assert d["phase"] == "liquid" and d["critical"] is None
+    assert d["area_m2"] > 0.0
+
+
+def test_relief_bad_inputs_are_handled():
+    # vapor missing T/k -> 422
+    assert client.post("/relief", json={
+        "phase": "vapor", "W": 10.0, "M": 0.072, "P1": 1.2e6}).status_code == 422
+    # subcritical backpressure -> the physics raises -> 400
+    r = client.post("/relief", json={
+        "phase": "vapor", "W": 10.0, "T": 500.0, "M": 0.072, "Z": 0.9,
+        "k": 1.4, "P1": 1.2e6, "backpressure": 1.1e6})
+    assert r.status_code == 400
+
+
+def test_pinch_targets_and_composites():
+    d = client.post("/pinch", json={"flow": ammonia_flow(), "dt_min": 10.0}).json()
+    assert d["dt_min"] == 10.0
+    assert d["qh_min"] >= 0.0 and d["qc_min"] >= 0.0
+    assert d["heat_recovery_potential"] >= -1e-6
+    # composite curves are plot-ready (H, T) point lists when both kinds exist
+    assert isinstance(d["hot_composite"], list)
+    assert isinstance(d["cold_composite"], list)
+    assert {s["kind"] for s in d["streams"]} <= {"hot", "cold"}
