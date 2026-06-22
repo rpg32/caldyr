@@ -124,7 +124,9 @@ What exists today:
 - `unitops`: Mixer, Heater, Splitter, Valve, Pump, Compressor, FlashDrum,
   HeatExchanger (LMTD + effectiveness-NTU), MultiStreamExchanger (N-pass LNG/
   plate-fin; weighted zone composite-curve analysis, MITA/UA, global
-  min_approach/ua specs — Hameed §9.5.2), ConversionReactor, EquilibriumReactor,
+  min_approach/ua specs — Hameed §9.5.2), Saturator (gas humidifier / HYSYS
+  Stream Saturator analogue — saturation y* from a probe flash, RH knob, latent
+  duty), ConversionReactor, EquilibriumReactor,
   ShortcutColumn (FUG: Fenske/Underwood/Gilliland/Kirkbride, validated vs Wankat;
   sized & costed as tower + sieve trays + condenser/reboiler), Expander (isentropic
   turbine, Turton axial-turbine costing), ComponentSplitter (black-box splits with

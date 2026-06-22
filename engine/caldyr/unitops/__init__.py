@@ -28,6 +28,7 @@ from .pipe import PipeFlowError, PipeSegment
 from .pump import Pump
 from .reaction import KineticReaction, Reaction
 from .rigorous_column import RigorousColumn, RigorousColumnError
+from .saturator import Saturator, SaturatorError
 from .shortcut_column import ShortcutColumn, ShortcutColumnError
 from .solids import BaghouseFilter, Cyclone, RotaryVacuumFilter, SolidsOperationError
 from .source import Source
@@ -79,6 +80,8 @@ __all__ = [
     "ShortcutColumnError",
     "RigorousColumn",
     "RigorousColumnError",
+    "Saturator",
+    "SaturatorError",
     "Absorber",
     "ReboiledAbsorber",
     "AbsorberError",

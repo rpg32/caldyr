@@ -333,6 +333,24 @@ def _separator_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
     return _vessel_size(unit, ctx, ctx.opts.vessel_residence_s)
 
 
+@register_sizer("Saturator")
+def _saturator_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Gas saturator: a vertical contacting vessel sized on the gas residence
+    time (like a flash drum), on the gas being saturated (``gas_in``)."""
+    gas = ctx.ins["gas_in"]
+    vol_flow = gas.molar_flow * ctx.pp.volume(gas.T, gas.P, gas.normalized_z())
+    volume = vol_flow * ctx.opts.vessel_residence_s
+    diameter = (4.0 * volume / (math.pi * ctx.opts.ld_ratio)) ** (1.0 / 3.0)
+    return [EquipmentSize(
+        unit_id=unit.id, equipment_type="vessel_vertical",
+        attribute=volume, attribute_name="volume_m3",
+        pressure_barg=_pa_to_barg(gas.P), material=ctx.opts.material,
+        diameter_m=diameter,
+        notes=[f"gas saturator vessel: V = {vol_flow:.3g} m^3/s x "
+               f"{ctx.opts.vessel_residence_s:.0f} s; D={diameter:.2f} m"],
+    )]
+
+
 @register_sizer("ThreePhaseSeparator", "Decanter")
 def _three_phase_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
     """Three-phase separators and decanters are horizontal drums (liquid-liquid
