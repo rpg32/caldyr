@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..unitops.heat_exchanger import HeatExchanger
-from . import data, tray_sizing
+from . import data, packed_sizing, tray_sizing
 
 _MIN_APPROACH = 10.0   # K, minimum temperature approach when picking a utility
 
@@ -442,11 +442,62 @@ def _column_loads(design) -> list[tray_sizing.StageLoad]:
     ]
 
 
-def _tower_and_trays(unit_id: str, design, pp, opts: SizingOptions,
+def _aqueous_service(design) -> bool:
+    """Whether the column liquid is water-rich (sets the packed HETP
+    underwetting penalty): any stage with a liquid water fraction > 0.3."""
+    prof = design.get("x_profile") or []
+    return any(row.get("water", 0.0) > 0.3 for row in prof)
+
+
+def _tower_and_packing(unit, design, pp, opts: SizingOptions
+                       ) -> list[EquipmentSize]:
+    """Packed tower shell + a random-packing bed: diameter from the GPDC flood
+    point and height from the HETP (see economics.packed_sizing). Selected by
+    the column param ``internals='packed'`` (``packing`` names the packing,
+    default 50 mm metal Pall rings)."""
+    packing = str(unit.params.get("packing", "pall_metal_50mm"))
+    flood = float(unit.params.get("flood_fraction",
+                                  packed_sizing._FLOOD_FRACTION))
+    aqueous = bool(unit.params.get("aqueous", _aqueous_service(design)))
+    n_ideal = float(design["N"])
+    hetp, hnotes = packed_sizing.hetp_m(packing, aqueous=aqueous)
+    packed_depth = n_ideal * hetp
+    height = packed_depth + TOWER_EXTRA_HEIGHT_M
+    hyd = packed_sizing.governing_packed(pp, _column_loads(design), packing,
+                                         flood_fraction=flood)
+    diameter, area = hyd.diameter_m, hyd.area_m2
+    pbarg = _pa_to_barg(design["P"])
+    tower = EquipmentSize(
+        unit_id=unit.id, equipment_type="vessel_vertical",
+        attribute=area * height, attribute_name="volume_m3",
+        pressure_barg=pbarg, material=opts.material, diameter_m=diameter,
+        notes=[f"packed tower: {n_ideal:.1f} ideal stages x HETP={hetp:.2f} m "
+               f"= {packed_depth:.1f} m packed; H={height:.1f} m, "
+               f"D={diameter:.2f} m", *hyd.notes, *hnotes])
+    bed = EquipmentSize(
+        unit_id=f"{unit.id}.packing", equipment_type="packing_random",
+        attribute=packed_sizing.packing_volume_m3(diameter, packed_depth),
+        attribute_name="volume_m3", pressure_barg=pbarg, material=opts.material,
+        diameter_m=diameter,
+        notes=[f"{packing}: {packed_sizing.packing_volume_m3(diameter, packed_depth):.2f} "
+               f"m^3 packed-bed volume"])
+    return [tower, bed]
+
+
+def _tower_and_trays(unit, design, pp, opts: SizingOptions,
                      efficiency: float) -> list[EquipmentSize]:
     """Tower shell + sieve trays, diameter from Fair flooding at the
     governing tray. Shared by every tray column (distillation, absorber,
-    reboiled absorber)."""
+    reboiled absorber). With the column param ``internals='packed'`` the tower
+    is sized as a packed bed instead (see :func:`_tower_and_packing`)."""
+    internals = str(unit.params.get("internals", "trays"))
+    if internals == "packed":
+        return _tower_and_packing(unit, design, pp, opts)
+    if internals != "trays":
+        raise ValueError(
+            f"{type(unit).__name__} {unit.id!r}: internals={internals!r} must "
+            f"be 'trays' or 'packed'")
+    unit_id = unit.id
     n_real = math.ceil(design["N"] / efficiency)
     height = n_real * TRAY_SPACING_M + TOWER_EXTRA_HEIGHT_M
     hyd = tray_sizing.governing_tray(
@@ -515,7 +566,7 @@ def _column_sizes(unit, ctx: SizerContext) -> list[EquipmentSize]:
     pp, opts = ctx.pp, ctx.opts
     design = _require_design(unit)
     pbarg = _pa_to_barg(design["P"])
-    tower, trays = _tower_and_trays(unit.id, design, pp, opts, TRAY_EFFICIENCY)
+    tower, trays = _tower_and_trays(unit, design, pp, opts, TRAY_EFFICIENCY)
 
     # Condenser: condensing overhead (T_dew -> T_top) against a cooling utility.
     q_cond = abs(design["Q_condenser"])
@@ -541,7 +592,7 @@ def _absorber_sizes(unit, ctx: SizerContext) -> list[EquipmentSize]:
     of the converged stage profiles; the tray count uses the (low) absorption
     stage efficiency."""
     design = _require_design(unit)
-    return _tower_and_trays(unit.id, design, ctx.pp, ctx.opts,
+    return _tower_and_trays(unit, design, ctx.pp, ctx.opts,
                             ABSORBER_TRAY_EFFICIENCY)
 
 
@@ -551,7 +602,7 @@ def _reboiled_absorber_sizes(unit, ctx: SizerContext) -> list[EquipmentSize]:
     reboiler exchanger (no condenser). ``design['N']`` already excludes the
     reboiler stage; stripping-service tray efficiency."""
     design = _require_design(unit)
-    sizes = _tower_and_trays(unit.id, design, ctx.pp, ctx.opts,
+    sizes = _tower_and_trays(unit, design, ctx.pp, ctx.opts,
                              STRIPPER_TRAY_EFFICIENCY)
     sizes.append(_reboiler_size(unit.id, design, ctx.opts,
                                 _pa_to_barg(design["P"])))

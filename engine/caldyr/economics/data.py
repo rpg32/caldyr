@@ -111,6 +111,16 @@ PURCHASED: dict[str, Purchased] = {
     "tray_sieve": Purchased(
         2.9949, 0.4465, 0.3961, 0.07, 12.3, "area_m2",
         "Turton 4e Table A.1, sieve trays (0.07-12.3 m^2 per tray)"),
+    # Random tower packing, costed per packed-bed volume. Turton has no packing
+    # row; this lumps the packing itself (Perry 8e Table 14-18: metal random
+    # packing ~$18-30/ft^3 in 1990) with the bed internals — support plate,
+    # hold-down, liquid distributor (Perry 8e Fig. 14-81) — into ~$1300/m^3
+    # installed on the CEPCI-397 (2001) basis. Linear in volume (K2=1). ORDER-
+    # OF-MAGNITUDE, for screening like the solids rows.
+    "packing_random": Purchased(
+        3.1139, 1.0, 0.0, 0.01, 2000.0, "volume_m3",
+        "Perry 8e Table 14-18 random packing + Fig. 14-81 internals, lumped "
+        "~$1300/m^3 installed (CEPCI-397) [order-of-magnitude]"),
     "turbine_axial": Purchased(
         2.7051, 1.4398, -0.1776, 100.0, 4000.0, "power_kW",
         "Turton 4e Table A.1, axial gas turbine (100-4000 kW shaft)"),
@@ -210,6 +220,9 @@ BARE_MODULE: dict[str, BareModule] = {
 FBM_DIRECT: dict[str, FbmDirect] = {
     "compressor_centrifugal": FbmDirect(2.7, "Turton 4e, centrifugal compressor + drive (CS)"),
     "tray_sieve": FbmDirect(1.0, "Turton 4e Table A.6, sieve tray, carbon steel"),
+    # The packing correlation already lumps an installed cost (packing + bed
+    # internals), so Fbm = 1, like the pipe row.
+    "packing_random": FbmDirect(1.0, "lumped installed packing + bed internals, Fbm=1"),
     # Turbines take a direct bare-module factor, like compressors (no Fp/Fm
     # correlation): Turton 4e Fig. A.19 gives FBM ~ 3.5 for an axial gas
     # turbine in carbon steel.
