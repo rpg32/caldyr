@@ -247,6 +247,33 @@ def _hx_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
     )]
 
 
+@register_sizer("MultiStreamExchanger")
+def _mshe_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Multi-stream (LNG / plate-fin) exchanger: costed on the equivalent area
+    A = UA/U from the unit's weighted zone analysis (``design['UA']``). The
+    Turton shell-and-tube area cost is an order-of-magnitude stand-in for a
+    brazed-aluminium plate-fin core (no open plate-fin correlation), so this is
+    a class-5 figure — flagged in the notes."""
+    design = getattr(unit, "design", None)
+    if not design or not design.get("UA"):
+        raise ValueError(
+            f"MultiStreamExchanger {unit.id!r}: solve the flowsheet before sizing "
+            f"(no design['UA'])")
+    ua = float(design["UA"])
+    area = ua / ctx.opts.hx_overall_U
+    pressures = [s.P for s in (*ctx.ins.values(), *ctx.outs.values()) if s.P is not None]
+    return [EquipmentSize(
+        unit_id=unit.id, equipment_type="heat_exchanger",
+        attribute=area, attribute_name="area_m2",
+        pressure_barg=_pa_to_barg(min(pressures) if pressures else 1.01325e5),
+        material=ctx.opts.material,
+        notes=[f"multi-stream (LNG) exchanger, {design['n_passes']} passes; "
+               f"UA={ua / 1000:.1f} kW/K, MITA={design['min_approach']:.1f} K, "
+               f"area=UA/U at U={ctx.opts.hx_overall_U} W/m^2/K (plate-fin core "
+               f"costed as shell-and-tube area — order-of-magnitude)"],
+    )]
+
+
 def _rotating_size(unit, ctx: SizerContext, eq_type: str) -> list[EquipmentSize]:
     duty = ctx.duty(unit)
     power_kW = abs(duty) / 1000.0

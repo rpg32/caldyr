@@ -19,6 +19,10 @@ from .heat_exchanger import HeatExchanger
 from .heater import Heater
 from .makeup import Makeup
 from .mixer import Mixer
+from .multistream_exchanger import (
+    MultiStreamExchanger,
+    MultiStreamExchangerError,
+)
 from .pfr import PFR
 from .pipe import PipeFlowError, PipeSegment
 from .pump import Pump
@@ -58,6 +62,8 @@ __all__ = [
     "ThreePhaseSeparator",
     "Decanter",
     "HeatExchanger",
+    "MultiStreamExchanger",
+    "MultiStreamExchangerError",
     "ConversionReactor",
     "EquilibriumReactor",
     "GibbsReactor",

@@ -122,7 +122,9 @@ What exists today:
   vapor vs liquid). NRTL validated vs the ethanol/water azeotrope; `lnKeq` vs the
   Haber-Bosch ammonia equilibrium.
 - `unitops`: Mixer, Heater, Splitter, Valve, Pump, Compressor, FlashDrum,
-  HeatExchanger (LMTD + effectiveness-NTU), ConversionReactor, EquilibriumReactor,
+  HeatExchanger (LMTD + effectiveness-NTU), MultiStreamExchanger (N-pass LNG/
+  plate-fin; weighted zone composite-curve analysis, MITA/UA, global
+  min_approach/ua specs — Hameed §9.5.2), ConversionReactor, EquilibriumReactor,
   ShortcutColumn (FUG: Fenske/Underwood/Gilliland/Kirkbride, validated vs Wankat;
   sized & costed as tower + sieve trays + condenser/reboiler), Expander (isentropic
   turbine, Turton axial-turbine costing), ComponentSplitter (black-box splits with
