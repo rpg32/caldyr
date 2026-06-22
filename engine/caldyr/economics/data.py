@@ -193,14 +193,18 @@ PRESSURE: dict[str, Pressure] = {
                                "Turton 4e Table A.2, shell-and-tube"),
     "pump_centrifugal": Pressure(-0.3935, 0.3957, -0.00226, 10.0, 100.0,
                                  "Turton 4e Table A.2, centrifugal pump"),
-    # AUDIT NOTE (2026-06-11): this C-triple may belong to Table A.2's
-    # *pyrolysis furnace* row; the non-reactive fired-heater row is possibly
-    # (0.1347, -0.2368, 0.1021). Both give Fp ~ 1.0-1.15 below ~40 barg, so the
-    # impact is small at typical process pressures; verify against a physical
-    # Turton 4e before relying on >40 barg fired-heater costs.
-    "fired_heater": Pressure(0.1017, -0.1957, 0.09403, 10.0, 200.0,
-                             "Turton 4e Table A.2, non-reactive fired heater "
-                             "(tube-side P, 10-200 barg)"),
+    # VERIFIED & CORRECTED (2026-06-22, P13) against the authoritative CAPCOST
+    # spreadsheet (Turton CD, "Equipment Cost Data" sheet) and Table A.2: the
+    # 2026-06-11 audit was right — the previous C-triple (0.1017, -0.1957,
+    # 0.09403) is the *pyrolysis furnace* row (a REACTIVE heater), not the
+    # non-reactive process heater. The non-reactive process/fired heater row is
+    # (0.1347, -0.2368, 0.1021). Row identity confirmed by the purchased-cost
+    # K-triple, which is the non-reactive Process Heater's (7.3488, -1.1666,
+    # 0.2028) above. Impact of the fix: Fp +1.6% at 20 barg, +2.8% at 40 barg,
+    # +4.3% at 200 barg (the previous pyrolysis row under-priced pressure).
+    "fired_heater": Pressure(0.1347, -0.2368, 0.1021, 10.0, 200.0,
+                             "Turton 4e Table A.2 / CAPCOST, non-reactive "
+                             "process (fired) heater (tube-side P, 10-200 barg)"),
     "air_cooler": Pressure(-0.1250, 0.15361, -0.02861, 10.0, 100.0,
                            "Turton 4e Table A.2, air cooler (tube-side P, 10-100 barg)"),
     # Vessels use a wall-stress formula (costing.vessel_pressure_factor);

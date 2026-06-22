@@ -33,3 +33,5 @@ _probe_*.py
 
 # reference papers (copyrighted journal PDFs) — kept locally, never committed
 docs/*.pdf
+# Turton textbook + CAPCOST CD (copyrighted; used to verify costing data, P13)
+docs/Analysis Synthesis and Design of Chemical Processes by Truton*/

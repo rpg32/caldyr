@@ -10,9 +10,12 @@ heater, capacity = absorbed duty Q in kW (Table A.1: K1=7.3488, K2=-1.1666,
 K3=0.2028, valid 1,000-100,000 kW). Hand-checked point: at Q = 10,000 kW,
 log10 Cp0 = 7.3488 - 1.1666*4 + 0.2028*16 = 5.9272 -> Cp0 ~ $845,800 (CEPCI
 397 basis). Bare module Cbm = Cp0 * Fbm * Fp with Fbm = 2.13 (Table A.7, CS)
-and the Table A.2 pressure factor (C1=0.1017, C2=-0.1957, C3=0.09403,
-10-200 barg): at 50 barg, log10 Fp = 0.1017 - 0.1957*log10(50)
-+ 0.09403*(log10 50)^2 = 0.0406 -> Fp ~ 1.098.
+and the Table A.2 pressure factor. P13 (2026-06-22) verified these against the
+authoritative CAPCOST spreadsheet (Turton CD): the non-reactive *process heater*
+pressure-factor row is (C1=0.1347, C2=-0.2368, C3=0.1021, 10-200 barg) — the
+earlier (0.1017, -0.1957, 0.09403) was the *pyrolysis furnace* (reactive) row.
+At 50 barg, log10 Fp = 0.1347 - 0.2368*log10(50) + 0.1021*(log10 50)^2 = 0.0271
+-> Fp ~ 1.064.
 """
 import pytest
 
@@ -123,11 +126,27 @@ def test_purchased_cost_matches_turton_hand_point():
 
 
 def test_pressure_factor_applies_above_10_barg():
-    """Turton 4e Table A.2 fired heater: at 50 barg, Fp ~ 1.098."""
+    """Turton 4e Table A.2 / CAPCOST non-reactive process heater: at 50 barg,
+    Fp ~ 1.064 (P13-corrected from the pyrolysis-furnace row's ~1.098)."""
     lo = cost_equipment(EquipmentSize("F", "fired_heater", 10_000.0, "duty_kW",
                                       pressure_barg=5.0), year=2001)
     hi = cost_equipment(EquipmentSize("F", "fired_heater", 10_000.0, "duty_kW",
                                       pressure_barg=50.0), year=2001)
     assert lo.factors["Fp"] == pytest.approx(1.0)
-    assert hi.factors["Fp"] == pytest.approx(1.098, abs=0.01)
+    assert hi.factors["Fp"] == pytest.approx(1.064, abs=0.01)
     assert hi.bare_module > lo.bare_module
+
+
+def test_fired_heater_factors_are_the_nonreactive_process_heater_row():
+    """P13: lock the fired-heater costing factors to the CAPCOST/Table A.2
+    *non-reactive process heater* row (the purchased K-triple and the Fp
+    C-triple must come from the SAME row, not a mix with the pyrolysis furnace)."""
+    from caldyr.economics import data
+
+    # Purchased cost: non-reactive Process Heater K-triple (CAPCOST).
+    k = data.PURCHASED["fired_heater"]
+    assert (k.K1, k.K2, k.K3) == (7.3488, -1.1666, 0.2028)
+    # Pressure factor: the MATCHING Process Heater C-triple, NOT the pyrolysis
+    # furnace's (0.1017, -0.1957, 0.09403).
+    p = data.PRESSURE["fired_heater"]
+    assert (p.C1, p.C2, p.C3) == (0.1347, -0.2368, 0.1021)
