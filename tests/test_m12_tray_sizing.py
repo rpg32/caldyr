@@ -150,3 +150,77 @@ def test_flood_fraction_option_scales_the_tower():
         fs, rep, pp, SizingOptions(tray_flood_fraction=0.4))
         if s.unit_id == "COL").diameter_m
     assert d40 == pytest.approx(d80 * math.sqrt(2.0), rel=1e-9)
+
+
+# -- 5. tray internals rating (P10): pressure drop, weeping, downcomer backup --
+def _bt_load(V=100.0, L=80.0):
+    return tray_sizing.StageLoad(
+        stage=10, V=V, L=L, T=370.0, P=1.2e5,
+        x={"benzene": 0.5, "toluene": 0.5},
+        y={"benzene": 0.7, "toluene": 0.3})
+
+
+def test_tray_rating_pressure_drop_is_physical():
+    """A sieve tray's total pressure drop is a few tenths of a kPa to ~1 kPa
+    (Seader 3e sec. 6.6; Kister ch. 6): dry head + clear-liquid head, each tens
+    of mm of liquid."""
+    pp = make_package("thermo:PR", ["benzene", "toluene"])
+    hyd = tray_sizing.size_tray(pp, _bt_load(), flood_fraction=0.8)
+    r = hyd.rating
+    assert r is not None
+    assert 0.02 < r.head_dry_m < 0.15           # dry head 20-150 mm
+    assert 0.0 < r.weir_crest_m < 0.05          # weir crest a few cm
+    assert r.head_total_m == pytest.approx(r.head_dry_m + r.head_liquid_m)
+    assert 300.0 < r.delta_P_Pa < 1500.0        # ~0.3-1.5 kPa per tray
+    # delta_P is the static head of the total froth height
+    assert r.delta_P_Pa == pytest.approx(hyd.rho_L * 9.80665 * r.head_total_m)
+
+
+def test_tray_rating_matches_the_hand_correlations():
+    """Recompute h_d and the Francis weir crest from first principles and match
+    the rating — the formulas are the citation."""
+    pp = make_package("thermo:PR", ["benzene", "toluene"])
+    load = _bt_load()
+    hyd = tray_sizing.size_tray(pp, load, flood_fraction=0.8,
+                                downcomer_frac=0.10)
+    r = hyd.rating
+    a_active = hyd.area_m2 * (1.0 - 2.0 * 0.10)
+    a_hole = 0.10 * a_active
+    q_v = load.V * pp.volume_vapor(load.T, load.P, load.y)
+    q_l = load.L * pp.volume_liquid(load.T, load.P, load.x)
+    u_h = q_v / a_hole
+    h_d = u_h ** 2 / (2.0 * 9.80665) * (hyd.rho_V / hyd.rho_L) / 0.73 ** 2
+    L_w = 0.73 * hyd.diameter_m * r.n_passes
+    how = 0.664 * (q_l / L_w) ** (2.0 / 3.0)
+    assert r.head_dry_m == pytest.approx(h_d, rel=1e-9)
+    assert r.weir_crest_m == pytest.approx(how, rel=1e-9)
+
+
+def test_low_vapor_rate_weeps():
+    """At a low vapour rate the dynamic + surface-tension head can no longer
+    hold the liquid on the tray (h_d + h_sigma < h_w + how) -> weeping."""
+    pp = make_package("thermo:PR", ["benzene", "toluene"])
+    high = tray_sizing.size_tray(pp, _bt_load(V=120.0, L=60.0), flood_fraction=0.85)
+    low = tray_sizing.size_tray(pp, _bt_load(V=12.0, L=60.0), flood_fraction=0.85)
+    assert not high.rating.weeps                 # comfortably above the weep point
+    assert low.rating.weeps                       # starved of vapour -> weeps
+    assert low.rating.weep_margin_m < 0.0
+
+
+def test_n_passes_increases_with_diameter():
+    assert tray_sizing._n_passes(1.5) == 1
+    assert tray_sizing._n_passes(3.0) == 2
+    assert tray_sizing._n_passes(4.5) == 3
+    assert tray_sizing._n_passes(6.0) == 4
+
+
+def test_column_sizer_surfaces_the_internals_note():
+    """The internals rating rides through to the equipment-size notes so the
+    tray pressure drop and operability flags are visible after costing."""
+    fs = bt_column()
+    rep = fs.solve()
+    pp = make_package("thermo:PR", ["benzene", "toluene"])
+    tower = next(s for s in size_flowsheet(fs, rep, pp, SizingOptions())
+                 if s.unit_id == "COL")
+    joined = " ".join(tower.notes)
+    assert "internals:" in joined and "tray dP" in joined

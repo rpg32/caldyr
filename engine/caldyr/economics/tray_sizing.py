@@ -48,6 +48,19 @@ from . import data
 _F_LV_MIN = 0.01
 _F_LV_MAX = 1.0
 
+_G = 9.80665                      # m/s^2
+
+# -- sieve-tray internals defaults (Seader 3e sec. 6.6; Kister, Distillation
+#    Design, ch. 6) ----------------------------------------------------------
+_WEIR_HEIGHT_M = 0.05            # h_w, 50 mm — the standard sieve-tray weir
+_HOLE_DIAMETER_M = 0.0048        # d_h, 3/16 in sieve holes
+_HOLE_AREA_FRAC = 0.10           # A_hole / A_active
+_ORIFICE_CV = 0.73              # dry-tray orifice coefficient (Seader fig. 6.30)
+_AERATION_PHI = 0.5             # effective relative froth density (Seader 6.29)
+_SURFACE_TENSION = 0.020         # N/m (20 dyn/cm — same basis as the Fair calc)
+_DOWNCOMER_CLEARANCE_M = 0.038   # downcomer-apron clearance under the apron
+_WEIR_LENGTH_FRAC = 0.73         # L_w / D for a ~10-12 % segmental downcomer
+
 
 @dataclass
 class StageLoad:
@@ -59,6 +72,27 @@ class StageLoad:
     P: float                    # Pa
     x: dict[str, float]         # liquid composition
     y: dict[str, float]         # vapor composition
+
+
+@dataclass
+class TrayRating:
+    """Sieve-tray internals rating at one tray (Seader 3e sec. 6.6): the tray
+    pressure drop and the two operability checks (weeping at low vapour rate,
+    downcomer backup at high liquid rate)."""
+    n_passes: int               # liquid flow passes (1 for D < ~2 m)
+    weir_length_m: float        # total weir length (all passes)
+    weir_crest_m: float         # how, height of liquid crest over the weir
+    head_dry_m: float           # h_d, dry-tray head (m of clear liquid)
+    head_liquid_m: float        # h_l, equivalent clear-liquid head on the tray
+    head_total_m: float         # h_t = h_d + h_l
+    delta_P_Pa: float           # tray pressure drop = rho_L g h_t
+    head_surface_m: float       # h_sigma, surface-tension head
+    weep_margin_m: float        # (h_d + h_sigma) - (h_w + how); >=0 -> no weep
+    weeps: bool                 # True if the tray weeps at the design rate
+    downcomer_backup_m: float   # h_dc, aerated liquid height in the downcomer
+    downcomer_backup_frac: float  # h_dc / (tray spacing + weir height)
+    downcomer_floods: bool      # True if backup exceeds half the spacing+weir
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -74,6 +108,7 @@ class TrayHydraulics:
     rho_V: float                # kg/m^3
     rho_L: float                # kg/m^3
     flood_fraction: float
+    rating: TrayRating | None = None     # internals rating (pressure drop, weep)
     notes: list[str] = field(default_factory=list)
 
 
@@ -129,10 +164,95 @@ def size_tray(pp: Any, load: StageLoad, *, tray_spacing_m: float = 0.61,
         f"{tray_spacing_m:.2f} m spacing; designed at "
         f"{flood_fraction:.0%} of flood with {downcomer_frac:.0%} downcomer"
     ))
+    rating = rate_tray(pp, load, diameter, a_total, rho_v, rho_l,
+                       tray_spacing_m, downcomer_frac)
+    notes.append(
+        f"internals: {rating.n_passes}-pass, weir crest {rating.weir_crest_m * 1e3:.0f} mm, "
+        f"tray dP {rating.delta_P_Pa / 1e3:.2f} kPa (h_d {rating.head_dry_m * 1e3:.0f} + "
+        f"h_l {rating.head_liquid_m * 1e3:.0f} mm); "
+        f"{'WEEPS' if rating.weeps else 'no weep'} (margin "
+        f"{rating.weep_margin_m * 1e3:.0f} mm), downcomer backup "
+        f"{rating.downcomer_backup_frac:.0%}"
+        f"{' — FLOODS' if rating.downcomer_floods else ''}")
     return TrayHydraulics(
         diameter_m=diameter, area_m2=a_total, stage=load.stage,
         u_flood_ms=u_flood, u_design_ms=u_design, F_LV=f_lv, C_F=c_f,
-        rho_V=rho_v, rho_L=rho_l, flood_fraction=flood_fraction, notes=notes,
+        rho_V=rho_v, rho_L=rho_l, flood_fraction=flood_fraction,
+        rating=rating, notes=notes,
+    )
+
+
+def _n_passes(diameter_m: float) -> int:
+    """Number of liquid flow passes from the tower diameter (Koch-Glitsch /
+    Kister rule of thumb): 1 pass to ~2 m, then 2/3/4 as the diameter grows."""
+    if diameter_m <= 2.0:
+        return 1
+    if diameter_m <= 3.6:
+        return 2
+    if diameter_m <= 5.0:
+        return 3
+    return 4
+
+
+def rate_tray(pp: Any, load: StageLoad, diameter_m: float, area_total_m2: float,
+              rho_v: float, rho_l: float, tray_spacing_m: float,
+              downcomer_frac: float, *,
+              weir_height_m: float = _WEIR_HEIGHT_M,
+              hole_diameter_m: float = _HOLE_DIAMETER_M,
+              hole_area_frac: float = _HOLE_AREA_FRAC) -> TrayRating:
+    """Rate the sieve-tray internals at one tray: pressure drop plus the weeping
+    and downcomer-backup operability checks (Seader, Henley & Roper 3e sec. 6.6;
+    Kister, *Distillation Design*, ch. 6).
+
+    Heads are in metres of clear liquid. The dry head is the orifice loss
+    ``h_d = 0.186/C_v^2 · (rho_V/rho_L) · u_h^2`` (eq. 6-50) at the hole velocity
+    ``u_h``; the weir crest is the Francis formula
+    ``how = 0.664 (q_L/L_w)^(2/3)`` (eq. 6-54); the clear-liquid head on the tray
+    is ``h_l = phi_e (h_w + how)`` (eq. 6-51). Weeping is avoided while the gas
+    plus surface-tension head exceeds the static liquid head
+    (``h_d + h_sigma >= h_w + how``); downcomer backup
+    ``h_dc = h_t + h_w + how + h_da`` (eq. 6-55/56) must stay below half the
+    tray spacing plus weir (the froth-in-downcomer flooding limit)."""
+    n_passes = _n_passes(diameter_m)
+    # Areas. Active (bubbling) area = tower minus the two segmental downcomers;
+    # the hole area is a fixed fraction of it (per pass scales the weir length).
+    a_active = area_total_m2 * (1.0 - 2.0 * downcomer_frac)
+    a_hole = hole_area_frac * a_active
+    weir_length = _WEIR_LENGTH_FRAC * diameter_m * n_passes
+
+    q_v = load.V * pp.volume_vapor(load.T, load.P, load.y)    # m^3/s vapour
+    q_l = load.L * pp.volume_liquid(load.T, load.P, load.x)   # m^3/s liquid
+    u_hole = q_v / a_hole
+
+    # Dry-tray head: the orifice velocity head, in m of clear liquid
+    # (h_d = u_h^2/(2g) * (rho_V/rho_L) / C_v^2 — the SI form of Seader eq. 6-50;
+    # the textbook 0.186 constant is for inches of liquid with u_h in ft/s).
+    head_dry = u_hole ** 2 / (2.0 * _G) * (rho_v / rho_l) / _ORIFICE_CV ** 2
+    # Francis weir crest (eq. 6-54): liquid load per pass over the weir.
+    weir_crest = 0.664 * (q_l / weir_length) ** (2.0 / 3.0)
+    # Clear-liquid head on the tray (eq. 6-51) with the aeration factor.
+    head_liquid = _AERATION_PHI * (weir_height_m + weir_crest)
+    head_total = head_dry + head_liquid
+    delta_p = rho_l * _G * head_total
+
+    # Surface-tension head through the holes (eq. 6-52).
+    head_sigma = 6.0 * _SURFACE_TENSION / (rho_l * _G * hole_diameter_m)
+    weep_margin = (head_dry + head_sigma) - (weir_height_m + weir_crest)
+
+    # Downcomer backup (eq. 6-55/56): apron head loss then the aerated height.
+    a_downcomer = area_total_m2 * downcomer_frac
+    a_apron = min(a_downcomer, weir_length * _DOWNCOMER_CLEARANCE_M)
+    head_apron = 0.165 * (q_l / a_apron) ** 2
+    head_dc = head_total + weir_height_m + weir_crest + head_apron
+    backup_limit = 0.5 * (tray_spacing_m + weir_height_m)
+
+    return TrayRating(
+        n_passes=n_passes, weir_length_m=weir_length, weir_crest_m=weir_crest,
+        head_dry_m=head_dry, head_liquid_m=head_liquid, head_total_m=head_total,
+        delta_P_Pa=delta_p, head_surface_m=head_sigma, weep_margin_m=weep_margin,
+        weeps=weep_margin < 0.0, downcomer_backup_m=head_dc,
+        downcomer_backup_frac=head_dc / backup_limit,
+        downcomer_floods=head_dc > backup_limit,
     )
 
 
