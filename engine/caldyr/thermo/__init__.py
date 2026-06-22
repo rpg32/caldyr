@@ -2,6 +2,7 @@ from .activity_pkg import ActivityPackage
 from .amine_pkg import AmineAcidGasPackage
 from .base import PhaseResult, PropertyPackage, ThreePhaseResult
 from .coolprop_pkg import CoolPropWaterPackage
+from .nasa_pkg import NasaGasPackage
 from .thermo_pkg import ThermoPackage
 
 # Which backend builds each `thermo:<method>` selector.
@@ -61,8 +62,16 @@ def make_package(spec: str, components: list[str]) -> PropertyPackage:
         (modified Kent-Eisenberg) package for amine gas sweetening (CO2/H2S
         absorbers, strippers and regenerators); see
         :mod:`caldyr.thermo.amine_pkg`.
+      * ``nasa:gas`` (alias ``nasa:claus``) — ideal-gas package over Cantera's
+        NASA polynomials, carrying combustion/Claus species (incl. the sulfur
+        allotropes S2/S8 the cubic EOS cannot); see
+        :mod:`caldyr.thermo.nasa_pkg`.
     """
     backend, _, method = spec.partition(":")
+    if backend == "nasa":
+        _reject_pseudo_components(spec, components)
+        _validate_component_ids(components)
+        return NasaGasPackage(components, method or "gas")
     if backend == "amine":
         _reject_pseudo_components(spec, components)
         _validate_component_ids(components)
@@ -99,5 +108,6 @@ __all__ = [
     "ActivityPackage",
     "CoolPropWaterPackage",
     "AmineAcidGasPackage",
+    "NasaGasPackage",
     "make_package",
 ]

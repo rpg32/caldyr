@@ -2,6 +2,7 @@ from .absorber import Absorber, AbsorberError, ReboiledAbsorber
 from .air_cooler import AirCooler, AirCoolerApproachError
 from .balance import Balance
 from .base import REGISTRY, register
+from .claus_reactor import ClausReactor, ClausReactorError
 from .component_splitter import ComponentSplitter
 from .compressor import Compressor
 from .conversion_reactor import ConversionReactor
@@ -26,6 +27,7 @@ from .shortcut_column import ShortcutColumn, ShortcutColumnError
 from .solids import BaghouseFilter, Cyclone, RotaryVacuumFilter, SolidsOperationError
 from .source import Source
 from .splitter import Splitter
+from .sulfur_condenser import SulfurCondenser, SulfurCondenserError
 from .three_phase_separator import ThreePhaseSeparator
 from .valve import Valve
 
@@ -58,6 +60,10 @@ __all__ = [
     "EquilibriumReactor",
     "GibbsReactor",
     "CanteraSpeciesError",
+    "ClausReactor",
+    "ClausReactorError",
+    "SulfurCondenser",
+    "SulfurCondenserError",
     "CSTR",
     "PFR",
     "KineticSolveError",
