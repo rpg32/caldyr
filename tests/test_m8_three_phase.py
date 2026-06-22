@@ -155,9 +155,11 @@ def test_missing_t_raises_a_clear_error():
         fs.solve()
 
 
-def test_activity_package_raises_not_implemented():
-    """Three-phase flashes are PR/SRK-only for now; the NRTL activity package
-    must fail loudly with a clear message, not mislabel phases."""
+def test_activity_package_vlle_degrades_for_a_miscible_pair():
+    """The NRTL activity package now has a three-phase (isoactivity) flash.
+    Water/ethanol is fully miscible (the ChemSep NRTL parameters carry no
+    miscibility gap), so the flash must return ONE liquid — the separator
+    degrades gracefully (heavy phase empty), not invent a spurious split."""
     fs = Flowsheet(components=[Component("water"), Component("ethanol")],
                    property_package="thermo:NRTL")
     fs.add(ThreePhaseSeparator("SEP", {"T": 298.15, "P": P_ATM}))
@@ -167,8 +169,9 @@ def test_activity_package_raises_not_implemented():
     fs.connect("L1", "SEP:liquid_light", None)
     fs.connect("L2", "SEP:liquid_heavy", None)
     fs.connect("Q", "SEP:duty", None)
-    with pytest.raises(NotImplementedError, match="three-phase"):
-        fs.solve()
+    assert fs.solve().converged
+    assert fs.streams["L1"].molar_flow > 0
+    assert fs.streams["L2"].molar_flow < 1e-9
 
 
 def test_pure_component_three_phase_flash_raises():

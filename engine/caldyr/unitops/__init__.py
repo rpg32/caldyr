@@ -7,6 +7,7 @@ from .component_splitter import ComponentSplitter
 from .compressor import Compressor
 from .conversion_reactor import ConversionReactor
 from .cstr import CSTR, KineticSolveError
+from .decanter import Decanter
 from .equilibrium_reactor import EquilibriumReactor
 from .evaporator import Evaporator
 from .expander import Expander
@@ -55,6 +56,7 @@ __all__ = [
     "Evaporator",
     "Balance",
     "ThreePhaseSeparator",
+    "Decanter",
     "HeatExchanger",
     "ConversionReactor",
     "EquilibriumReactor",

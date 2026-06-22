@@ -300,11 +300,14 @@ def test_missing_or_bad_stage_count_raises():
         fs.solve()
 
 
-def test_nrtl_package_raises_clear_error():
-    """The NRTL activity package has no three-phase flash; the column must
-    say so instead of failing inside the property package."""
+def test_nrtl_package_fully_miscible_raises_clear_error():
+    """The NRTL activity package now provides a three-phase (isoactivity)
+    flash, but its ChemSep parameters are VLE-fit and carry no miscibility gap
+    for this system, so every stage flashes to a single liquid. The column must
+    report that the phases are fully miscible (LLE cannot operate) rather than
+    failing inside the property package."""
     fs = methanol_extractor(3, 10.0, pkg="thermo:NRTL")
-    with pytest.raises(ExtractionColumnError, match="three-phase"):
+    with pytest.raises(ExtractionColumnError, match="miscible"):
         fs.solve()
 
 

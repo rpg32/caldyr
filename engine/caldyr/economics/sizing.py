@@ -306,10 +306,10 @@ def _separator_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
     return _vessel_size(unit, ctx, ctx.opts.vessel_residence_s)
 
 
-@register_sizer("ThreePhaseSeparator")
+@register_sizer("ThreePhaseSeparator", "Decanter")
 def _three_phase_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
-    """Three-phase separators are horizontal drums (liquid-liquid disengagement
-    needs settling length, not height)."""
+    """Three-phase separators and decanters are horizontal drums (liquid-liquid
+    disengagement needs settling length, not height)."""
     return _vessel_size(unit, ctx, ctx.opts.vessel_residence_s,
                         orientation="vessel_horizontal")
 
