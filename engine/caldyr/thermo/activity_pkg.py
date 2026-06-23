@@ -321,6 +321,14 @@ class ActivityPackage(FlasherPackage):
                 return None
             xI = [v / sI for v in xI]
             xII = [v / sII for v in xII]
+            # Early trivial bail: a STABLE mixture's successive substitution drifts
+            # the two trial phases together. Detecting that here (rather than only
+            # after the loop) is the difference between a stable stage costing a
+            # few iterations and costing the full _LLE_MAX_IT — and most trays of
+            # a heteroazeotropic column are single-phase, so this dominates the
+            # column's runtime.
+            if max(abs(a - b) for a, b in zip(xI, xII)) < _LLE_TRIVIAL:
+                return None
             gI, gII = self._gammas(T, xI), self._gammas(T, xII)
             Knew = [gI[i] / gII[i] for i in range(n)]
             if max(abs(math.log(Knew[i] / K[i])) for i in range(n)) < _LLE_TOL:
