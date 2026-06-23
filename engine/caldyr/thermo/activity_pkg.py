@@ -126,6 +126,9 @@ _LLE_TOL = 1e-11         # max |d ln K| convergence on the distribution ratios
 _LLE_TRIVIAL = 0.02      # min |x_I - x_II|_inf for a split to count as two phases
 _LLE_PSI_EPS = 1e-4      # keep the phase split strictly interior (0, 1)
 _LLE_G_TOL = 1e-9        # the split must lower the molar Gibbs energy by this
+_LLE_GAMMA_INF_GATE = 7.0  # min infinite-dilution gamma for a gap to be possible
+_LLE_CACHE_MAX = 200_000  # bound on the per-instance (T, z) -> split memo
+_LLE_MISS = object()      # sentinel: cache miss (None is a valid cached result)
 
 
 def _has_offdiagonal(matrix) -> bool:
@@ -204,8 +207,35 @@ class ActivityPackage(FlasherPackage):
                 f"unsupported activity model {model!r}; expected one of {self.SUPPORTED}"
             )
         self.model = model
+        self._lle_cache: dict = {}
         flasher, hf, gf = _build_flasher(tuple(components), model)
         self._init(components, flasher, hf, gf)
+
+    def _lle_potential(self) -> bool:
+        """Does this component set have ANY liquid-liquid miscibility gap to look
+        for? Computed once: a gap requires strong positive deviation, i.e. some
+        component's infinite-dilution activity coefficient is large. If no pair
+        comes close (benzene/toluene, ideal-ish polar mixes), the per-stage
+        stability test is skipped entirely — the cubic/NRTL columns keep their
+        exact behavior and speed, and only a genuinely partially-miscible system
+        (water/organic) pays for the VLLE-aware stage flash. Evaluating gamma at
+        the BULK composition is NOT a reliable gate (a ~50/50 split mixture shows
+        only modest gamma), so we probe each component at infinite dilution."""
+        cached = getattr(self, "_lle_pot", None)
+        if cached is not None:
+            return cached
+        ge = self._ge_model()
+        n = len(self.components)
+        result = False
+        if ge is not None and n >= 2:
+            gmax = 0.0
+            for i in range(n):                 # component i infinitely dilute
+                probe = [(1.0 - 1e-6) / (n - 1)] * n
+                probe[i] = 1e-6
+                gmax = max(gmax, self._gammas(350.0, probe)[i])
+            result = gmax >= _LLE_GAMMA_INF_GATE
+        self._lle_pot = result
+        return result
 
     @classmethod
     def from_spec(cls, spec: str, components: list[str]) -> "ActivityPackage":
@@ -313,21 +343,41 @@ class ActivityPackage(FlasherPackage):
         return psi, xI, xII
 
     def _lle_split(self, T: float, z: list[float]):
+        """Memoized wrapper over :meth:`_lle_split_compute`. A finite-difference
+        MESH Jacobian re-evaluates the stage residuals once per perturbed
+        variable, and every UNperturbed stage passes a byte-identical
+        ``(T, z)`` — so an exact-match cache turns the per-stage liquid-liquid
+        stability test (the dominant cost of a heteroazeotropic column) into one
+        evaluation per distinct stage state instead of one per Jacobian column.
+        The cache is bounded and keyed on the exact floats (the Jacobian reuses
+        them verbatim); it is cleared wholesale when it grows past the bound."""
+        key = (float(T), tuple(z))
+        cache = self._lle_cache
+        hit = cache.get(key, _LLE_MISS)
+        if hit is not _LLE_MISS:
+            return hit
+        out = self._lle_split_compute(float(T), list(z))
+        if len(cache) > _LLE_CACHE_MAX:
+            cache.clear()
+        cache[key] = out
+        return out
+
+    def _lle_split_compute(self, T: float, z: list[float]):
         """Split a liquid of composition ``z`` into two liquid phases at ``T``
-        if an NRTL miscibility gap exists. Tries seeds enriched in each
-        component (to break the trivial symmetry) and keeps the converged split
-        that most lowers the Gibbs energy. Returns ``(psi, xI, xII)`` (psi =
-        fraction in phase II) or None for a single stable liquid."""
+        if a miscibility gap exists. Tries seeds enriched in each component (to
+        break the trivial symmetry) and keeps the converged split that most
+        lowers the Gibbs energy. Returns ``(psi, xI, xII)`` (psi = fraction in
+        phase II) or None for a single stable liquid."""
         n = len(z)
-        if n < 2 or self._ge_model() is None:
+        if n < 2 or self._ge_model() is None or not self._lle_potential():
             return None
         g_single = self._g_mix(T, z)
+        gI0 = self._gammas(T, z)
         best = None
         best_g = g_single - _LLE_G_TOL
         for k in range(n):                     # seed phase II near-pure in comp k
             xII0 = [(0.02 / (n - 1)) for _ in range(n)]
             xII0[k] = 0.98
-            gI0 = self._gammas(T, z)
             gII0 = self._gammas(T, xII0)
             K0 = [gI0[i] / gII0[i] for i in range(n)]
             out = self._lle_one(T, z, K0)
@@ -338,6 +388,119 @@ class ActivityPackage(FlasherPackage):
             if g_two < best_g:
                 best_g, best = g_two, (psi, xI, xII)
         return best
+
+    # -- VLLE-aware stage flash (two-liquid trays) --------------------------
+    # A heteroazeotropic column has trays whose liquid is INSIDE the miscibility
+    # gap (water + entrainer coexisting). The single-liquid bubble point of such
+    # a tray is meaningless — thermo returns an unstable metastable root (wrong T
+    # and a spurious vapor). We keep the MESH single-liquid-per-stage (the tray
+    # holdup is ONE liquid stream of the combined composition) but make its
+    # equilibrium honest: when the stage liquid splits, the equilibrium vapor is
+    # the one in equilibrium with BOTH settled layers (isoactivity makes them
+    # agree), and the stage enthalpy is the molar-combined two-liquid enthalpy.
+    # This is the lumped-two-liquid-stage treatment of heterogeneous-azeotrope
+    # distillation (Seader, Henley & Roper 3e sec. 11.6 / Prausnitz). Stages
+    # outside the gap fall straight through to the single-liquid path, and the
+    # cubic/NRTL packages (no GE gap or no GE model) are untouched.
+    def k_values(self, T: float, P: float, x: dict[str, float],
+                 y: dict[str, float]) -> dict[str, float]:
+        xs = self._zs(x)
+        split = self._lle_split(float(T), xs)
+        if split is None:
+            return super().k_values(T, P, x, y)
+        _psi, xI, _xII = split
+        # Ideal-gas vapor => lnphi_V = 0, so super().k_values at liquid comp xI
+        # returns gamma_i(xI)*Psat_i/P; the equilibrium vapor over the two layers
+        # is y_i ∝ gamma_i^I xI_i Psat_i, and K_i is taken over the COMBINED
+        # liquid xs (the actual tray composition).
+        K_I = super().k_values(T, P, self._comp(xI), self._comp(xI))
+        out: dict[str, float] = {}
+        for i, c in enumerate(self.components):
+            yi = K_I[c] * xI[i]
+            out[c] = yi / xs[i] if xs[i] > 0.0 else 0.0
+        return out
+
+    def enthalpy_liquid(self, T: float, P: float, x: dict[str, float]) -> float:
+        xs = self._zs(x)
+        split = self._lle_split(float(T), xs)
+        if split is None:
+            return super().enthalpy_liquid(T, P, x)
+        psi, xI, xII = split
+        hI = super().enthalpy_liquid(T, P, self._comp(xI))
+        hII = super().enthalpy_liquid(T, P, self._comp(xII))
+        return (1.0 - psi) * hI + psi * hII
+
+    def bubble_point(self, P: float, x: dict[str, float]):
+        """Saturated-liquid state of ``x`` at ``P``. When the liquid is a single
+        phase this is the base gamma-phi bubble point unchanged; when it lies
+        inside a miscibility gap the single-liquid VF=0 flash returns a spurious
+        metastable root, so we instead solve the *heterogeneous* bubble point —
+        the temperature at which the vapor is in equilibrium with the two settled
+        layers — via the VLLE-aware effective K-values."""
+        from .base import PhaseResult
+
+        xs = self._zs(x)
+        base = None
+        try:
+            base = super().bubble_point(P, x)
+        except Exception:
+            base = None
+        probe_T = base.T if (base is not None and math.isfinite(base.T)) else 350.0
+        if self._lle_split(float(probe_T), xs) is None:
+            if base is not None and base.H_vapor is not None \
+                    and base.H_liquid is not None \
+                    and base.H_vapor > base.H_liquid:
+                return base
+            # else fall through: the single-liquid root is unphysical (dH<0) even
+            # though no split was found at probe_T — re-solve robustly below.
+
+        # Heterogeneous bubble point: f(T) = ln(sum_i K_eff_i x_i) is monotone
+        # increasing in T (volatility rises); bracket its zero from probe_T.
+        def f(T: float) -> float:
+            K = self.k_values(T, P, x, x)
+            s = sum(K[c] * xs[i] for i, c in enumerate(self.components))
+            return math.log(s) if s > 0.0 else -50.0
+
+        lo, hi = 200.0, 600.0
+        Ta = min(max(float(probe_T), lo + 1.0), hi - 1.0)
+        fa = f(Ta)
+        step = 20.0 if fa < 0.0 else -20.0
+        Tb, fb = Ta, fa
+        for _ in range(60):
+            Tb = min(max(Ta + step, lo), hi)
+            fb = f(Tb)
+            if (fa < 0.0) != (fb < 0.0):
+                break
+            if Tb in (lo, hi):
+                raise ValueError(
+                    f"no heterogeneous bubble point for {x} at P={P:.4g} Pa "
+                    f"within {lo:.0f}-{hi:.0f} K (ln sum Kx={fb:.3g})")
+            Ta, fa = Tb, fb
+        # regula falsi to tolerance
+        Tbub = Tb
+        for _ in range(80):
+            if fb == fa:
+                break
+            Tc = Tb - fb * (Tb - Ta) / (fb - fa)
+            Tc = min(max(Tc, min(Ta, Tb)), max(Ta, Tb))
+            fc = f(Tc)
+            Tbub = Tc
+            if abs(fc) < 1e-10:
+                break
+            if (fa < 0.0) != (fc < 0.0):
+                Tb, fb = Tc, fc
+            else:
+                Ta, fa = Tc, fc
+        K = self.k_values(Tbub, P, x, x)
+        s = sum(K[c] * xs[i] for i, c in enumerate(self.components))
+        y = {c: K[c] * xs[i] / s for i, c in enumerate(self.components)}
+        hL = self.enthalpy_liquid(Tbub, P, x)
+        hV = self.enthalpy_vapor(Tbub, P, y)
+        xnorm = self._comp(xs)
+        return PhaseResult(
+            T=Tbub, P=float(P), H=hL, phase="liquid", vapor_fraction=0.0,
+            x=xnorm, y=y, H_liquid=hL, H_vapor=hV,
+        )
 
     def flash_pt_3p(self, T: float, P: float,
                     z: dict[str, float]) -> ThreePhaseResult:

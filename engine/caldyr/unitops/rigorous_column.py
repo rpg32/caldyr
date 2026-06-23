@@ -872,6 +872,36 @@ class RigorousColumn(UnitOp):
         no_gen: list[dict[str, float]] = [{} for _ in range(N)]
         A = _cumulative_A(no_gen)
 
+        # Energy-balance basis. A non-reactive column conditions its stage energy
+        # balances far better on a SENSIBLE basis — subtract each stream's
+        # composition-weighted formation-enthalpy offset (admissible: a
+        # per-component constant cancels against the conserved component balances
+        # at convergence; the same reconditioning the non-reboiled envelope form
+        # uses). This keeps the recurrence pivot hV_{j+1} - hL_j ~ the true latent
+        # heat > 0 even where stage compositions swing between components with very
+        # different formation enthalpies (water -242 vs cyclohexane -123 kJ/mol in
+        # a heteroazeotrope); on the bare formation-inclusive basis that pivot goes
+        # sign-indefinite and the recurrence reports a spurious "degenerate energy
+        # balance". A REACTIVE column is LEFT on the formation-inclusive basis —
+        # that is exactly how it carries the heat of reaction — so reactive results
+        # stay byte-for-byte unchanged.
+        use_sensible = not reactions
+        _form_fn = getattr(pp, "formation_enthalpies", None)
+        if use_sensible and callable(_form_fn):
+            _hf_all = _form_fn()
+            hf_c = {c: float(_hf_all.get(c, 0.0)) for c in active}
+        else:
+            hf_c = {c: 0.0 for c in active}
+
+        def _hf_mix(row: dict[str, float]) -> float:
+            return sum(hf_c[c] * row.get(c, 0.0) for c in active)
+
+        fh_stage_s = [
+            fh_stage[j] - sum(Fk * _hf_mix(zk)
+                              for st, Fk, zk in zip(feed_stages, F_k, z_k)
+                              if st - 1 == j)
+            for j in range(N)]
+
         x = self._initial_x(pp, P, f, D, N, z)
         L, V = self._initial_traffic(N, feed_info, R, D, F, partial, A, w)
 
@@ -927,7 +957,18 @@ class RigorousColumn(UnitOp):
                 worsened = 0
             dT_prev = dT
 
-            V_new = self._energy_balances(N, fh_stage, A, u, w, hL, hV, V,
+            if use_sensible:
+                y_eb = []
+                for j in range(N):
+                    yj = {c: K[j][c] * x[j][c] for c in active}
+                    ytot = sum(yj.values()) or 1.0
+                    y_eb.append({c: v / ytot for c, v in yj.items()})
+                hL_eb = [hL[j] - _hf_mix(x[j]) for j in range(N)]
+                hV_eb = [hV[j] - _hf_mix(y_eb[j]) for j in range(N)]
+                fh_eb = fh_stage_s
+            else:
+                hL_eb, hV_eb, fh_eb = hL, hV, fh_stage
+            V_new = self._energy_balances(N, fh_eb, A, u, w, hL_eb, hV_eb, V,
                                           v_floor)
             dV = max(abs(vn - vo) for vn, vo in zip(V_new[1:], V[1:])) / max(V_new[1:])
             V = [V[0]] + [max(vo + omega * (vn - vo), v_floor)
