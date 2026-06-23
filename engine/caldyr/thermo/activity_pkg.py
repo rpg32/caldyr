@@ -129,6 +129,7 @@ _LLE_G_TOL = 1e-9        # the split must lower the molar Gibbs energy by this
 _LLE_GAMMA_INF_GATE = 7.0  # min infinite-dilution gamma for a gap to be possible
 _LLE_CACHE_MAX = 200_000  # bound on the per-instance (T, z) -> split memo
 _LLE_MISS = object()      # sentinel: cache miss (None is a valid cached result)
+_LLE_RECENT_MAX = 64      # warm-start ring of recently converged splits (~per stage)
 
 
 def _has_offdiagonal(matrix) -> bool:
@@ -208,8 +209,15 @@ class ActivityPackage(FlasherPackage):
             )
         self.model = model
         self._lle_cache: dict = {}
+        self._lle_recent: list[list[float]] = []
+        self._lle_seeds: list[int] = []
         flasher, hf, gf = _build_flasher(tuple(components), model)
         self._init(components, flasher, hf, gf)
+
+    def _remember_split(self, xII: list[float]) -> None:
+        """Keep a small ring of recently converged minority-phase compositions to
+        warm-start the next stability test (see :meth:`_lle_split_compute`)."""
+        self._lle_recent = ([list(xII)] + self._lle_recent)[:_LLE_RECENT_MAX]
 
     def _lle_potential(self) -> bool:
         """Does this component set have ANY liquid-liquid miscibility gap to look
@@ -234,6 +242,12 @@ class ActivityPackage(FlasherPackage):
                 probe[i] = 1e-6
                 gmax = max(gmax, self._gammas(350.0, probe)[i])
             result = gmax >= _LLE_GAMMA_INF_GATE
+            # Cold-seed every component near-pure: the near-pure phase of a gap
+            # can be EITHER member of the immiscible pair (water forms a ~pure
+            # aqueous layer even though its gamma_inf is lower than the organic's
+            # in it), so selecting seeds by gamma_inf alone misses splits. The
+            # warm start is what makes this affordable inside a column solve.
+            self._lle_seeds = list(range(n)) if result else []
         self._lle_pot = result
         return result
 
@@ -371,30 +385,67 @@ class ActivityPackage(FlasherPackage):
         return out
 
     def _lle_split_compute(self, T: float, z: list[float]):
-        """Split a liquid of composition ``z`` into two liquid phases at ``T``
-        if a miscibility gap exists. Tries seeds enriched in each component (to
-        break the trivial symmetry) and keeps the converged split that most
-        lowers the Gibbs energy. Returns ``(psi, xI, xII)`` (psi = fraction in
-        phase II) or None for a single stable liquid."""
+        """Split a liquid of composition ``z`` into two liquid phases at ``T`` if a
+        miscibility gap exists. Returns ``(psi, xI, xII)`` (psi = fraction in
+        phase II) or None for a single stable liquid.
+
+        Two performance levers make this affordable inside a MESH solve, where it
+        is the dominant cost (the successive-substitution flash from a cold seed
+        runs ~70 iterations, two gamma evaluations each):
+
+          * **Seed selection** — only components that can actually form a separate
+            phase (large infinite-dilution activity coefficient, computed once in
+            :meth:`_lle_potential`) are seeded near-pure. A fully miscible
+            component (e.g. ethanol in ethanol/water/cyclohexane) is never the
+            minority phase, so seeding it just burns a full SS chain converging to
+            nothing.
+          * **Warm start** — a tray's composition barely moves between Newton
+            steps, so the previous converged split is an excellent seed that
+            converges in a handful of SS steps. We try recent splits FIRST and, if
+            one yields a valid gap (a single miscibility gap has one tie-line, so
+            any non-trivial G-lowering split is THE split), accept it without
+            running the cold seeds. The cold-seed search is the robust fallback
+            when there is no usable history (e.g. a fresh decanter flash)."""
         n = len(z)
         if n < 2 or self._ge_model() is None or not self._lle_potential():
             return None
         g_single = self._g_mix(T, z)
         gI0 = self._gammas(T, z)
-        best = None
-        best_g = g_single - _LLE_G_TOL
-        for k in range(n):                     # seed phase II near-pure in comp k
-            xII0 = [(0.02 / (n - 1)) for _ in range(n)]
-            xII0[k] = 0.98
+
+        def evaluate(xII0: list[float]):
             gII0 = self._gammas(T, xII0)
             K0 = [gI0[i] / gII0[i] for i in range(n)]
             out = self._lle_one(T, z, K0)
             if out is None:
-                continue
+                return None
             psi, xI, xII = out
             g_two = (1.0 - psi) * self._g_mix(T, xI) + psi * self._g_mix(T, xII)
-            if g_two < best_g:
-                best_g, best = g_two, (psi, xI, xII)
+            return (g_two, (psi, xI, xII)) if g_two < g_single - _LLE_G_TOL else None
+
+        # Warm start from recently converged splits, CLOSEST first: in a column
+        # solve the ring holds one recent split per stage, and the same stage's
+        # previous split (nearest in composition) re-converges in a few SS steps.
+        if self._lle_recent:
+            ordered = sorted(self._lle_recent,
+                             key=lambda s: sum(abs(a - b) for a, b in zip(s, z)))
+            for xII0 in ordered:
+                hit = evaluate(xII0)
+                if hit is not None:
+                    self._remember_split(hit[1][2])
+                    return hit[1]
+
+        # Cold search over the separating components; keep the deepest (global)
+        # split — a shallow seed can converge to a metastable tie-line.
+        best = None
+        best_g = g_single - _LLE_G_TOL
+        for k in self._lle_seeds:
+            xII0 = [(0.02 / (n - 1)) for _ in range(n)]
+            xII0[k] = 0.98
+            hit = evaluate(xII0)
+            if hit is not None and hit[0] < best_g:
+                best_g, best = hit[0], hit[1]
+        if best is not None:
+            self._remember_split(best[2])
         return best
 
     # -- VLLE-aware stage flash (two-liquid trays) --------------------------
