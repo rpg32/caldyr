@@ -12,6 +12,8 @@ ethanol (the bottoms ethanol fraction rises as the distillate rate rises).
 Book-scale >99.95% EtOH needs the 50-62 stages of the reference (a 30-stage
 column caps ~90% here); the point validated is the converged closed train.
 """
+import math
+
 import pytest
 
 from caldyr.core import Component, Flowsheet
@@ -92,3 +94,49 @@ def test_entrainer_plant_closes_and_concentrates_ethanol():
     rec = fs.streams["REC"]
     assert rec.molar_flow * rec.z["cyclohexane"] > 0.5
     assert etoh.z["ethanol"] > 0.78        # ~0.79 at D100=10 (trending anhydrous)
+
+
+@pytest.mark.slow
+def test_decant_column_techno_economics():
+    """The integrated-decant column is costed end-to-end by the TEA pipeline —
+    Caldyr's wedge (example 35). The decant condenser exposes its hot/cold ends
+    (overhead dew point -> condenser_T) to the sizer, so a converged column sizes
+    to tower + trays + condenser + reboiler, and the levelized cost of product
+    (LCOP) is positive and finite. This guards the economics path for the §9.5.6
+    plant."""
+    from caldyr.economics import TEAConfig, analyze
+
+    fs = Flowsheet(components=[Component(c) for c in COMPS],
+                   property_package="thermo:UNIFAC")
+    fs.add(RigorousColumn("T100", {
+        "n_stages": 20, "feeds": [{"stage": 2}, {"stage": 12}],
+        "reflux_ratio": 3.0, "distillate_rate": 4.0,
+        "method": "naphtali_sandholm", "reboiled": True,
+        "decant_condenser": True, "condenser_T": 313.15,
+        "reflux_layer": "organic", "max_iter": 140,
+    }))
+    fs.feed("SOLV", "T100:in1", T=298.15, P=P_ATM, molar_flow=8.0,
+            z={"cyclohexane": 1.0})
+    fs.feed("FEED", "T100:in2", T=343.0, P=P_ATM, molar_flow=27.8, z=Z_FRESH)
+    fs.connect("ETOH", "T100:bottoms", None)
+    fs.connect("DIST", "T100:distillate", None)
+    fs.connect("QC", "T100:condenser_duty", None)
+    fs.connect("QR", "T100:reboiler_duty", None)
+    report = fs.solve()
+
+    cfg = TEAConfig(product_component="ethanol", product_min_fraction=0.6,
+                    prices_per_kg={"ethanol": 0.60, "cyclohexane": 1.20,
+                                   "water": 0.0})
+    res = analyze(fs, report, cfg)
+
+    # the decant column sizes to four cost items (tower, trays, condenser,
+    # reboiler) -- before the T_top_dew fix the condenser sizing KeyError'd.
+    assert {s.unit_id for s in res.sizes} == {
+        "T100", "T100.trays", "T100.condenser", "T100.reboiler"}
+    # capital -> opex -> LCOP all positive and finite
+    assert res.capital.tci > res.capital.isbl > 0
+    assert res.opex.total > res.opex.utilities > 0
+    assert res.profitability.lcop > 0 and math.isfinite(res.profitability.lcop)
+    # the reboiler draws a heating utility (the steam that dominates the opex)
+    reb = next(s for s in res.sizes if s.unit_id == "T100.reboiler")
+    assert reb.utility is not None and reb.utility_duty_W > 0

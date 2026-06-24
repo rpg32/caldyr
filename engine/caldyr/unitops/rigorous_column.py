@@ -1610,7 +1610,13 @@ class RigorousColumn(UnitOp):
 
         self.design = {
             "N": float(N - 1), "P": P_j[0], "x_D": dict(x_d), "x_B": dict(x_b),
-            "T_top": T[0], "T_bottom": T[N - 1], "condenser_T": condenser_T,
+            # The integrated decant condenser cools the overhead from its dew
+            # point (~the top-tray temperature T[0]) down to ``condenser_T``,
+            # where the two liquids settle; expose those as the condenser hot/cold
+            # ends so the economics sizer + pinch analysis can cost it (T_top =
+            # condensate/distillate temperature, T_top_dew = overhead dew point).
+            "T_top": condenser_T, "T_top_dew": T[0],
+            "T_bottom": T[N - 1], "condenser_T": condenser_T,
             "V_top": V0, "Q_condenser": q_cond, "Q_reboiler": q_reb,
             "D": D_aq, "B": B_eff,
             "R": (org / D_aq if D_aq > 0.0 else 0.0), "q": q,

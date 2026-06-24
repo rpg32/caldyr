@@ -21,7 +21,21 @@ DEFAULTS = dict(
     discount_rate=(0.08, 0.14),
     capacity_factor=(0.85, 0.98),
 )
-_FEEDS = ("hydrogen", "nitrogen")
+
+
+def _feed_components(fs) -> set[str]:
+    """Components appearing in the flowsheet's boundary feed streams (no upstream
+    unit) — the raw materials whose price the feed-price sensitivity perturbs.
+    Derived from the flowsheet (not hard-coded), so the sweep is meaningful for
+    any plant; for a separation/dehydration plant the product component is itself
+    a feed, so its raw-material cost is (correctly) perturbed for the LCOP."""
+    comps: set[str] = set()
+    for conn in fs.connections:
+        if conn.from_unit is None and conn.to_unit is not None:
+            s = fs.streams.get(conn.stream_id)
+            if s is not None and s.molar_flow:
+                comps.update(s.normalized_z().keys())
+    return comps
 
 
 @dataclass
@@ -54,6 +68,7 @@ def monte_carlo(fs, sizes, cfg: TEAConfig, *, n: int = 2000, seed: int = 0,
     p = {**DEFAULTS, **overrides}
     rng = np.random.default_rng(seed)
     base_prices = {**data.PRICES_PER_KG, **(cfg.prices_per_kg or {})}
+    feeds = _feed_components(fs)
 
     lcops = np.empty(n)
     npvs = np.empty(n)
@@ -66,7 +81,7 @@ def monte_carlo(fs, sizes, cfg: TEAConfig, *, n: int = 2000, seed: int = 0,
 
         prices = dict(base_prices)
         prices[cfg.product_component] = base_prices[cfg.product_component] * prod_mult
-        for feed in _FEEDS:
+        for feed in feeds:
             if feed in prices:
                 prices[feed] = base_prices[feed] * feed_mult
 
@@ -99,11 +114,12 @@ def tornado(fs, sizes, cfg: TEAConfig, **overrides) -> list[TornadoBar]:
     base_hours = cfg.operating_hours
     base_rate = cfg.discount_rate
     prod = cfg.product_component
+    feeds = _feed_components(fs)
 
     def lcop(*, capex_mult=1.0, prod_mult=1.0, feed_mult=1.0, hours=base_hours, rate=base_rate):
         prices = dict(base_prices)
         prices[prod] = base_prices[prod] * prod_mult
-        for feed in _FEEDS:
+        for feed in feeds:
             if feed in prices:
                 prices[feed] = base_prices[feed] * feed_mult
         return _eval_lcop_npv(fs, sizes, cfg, capex_mult=capex_mult, prices=prices,
