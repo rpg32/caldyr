@@ -253,3 +253,105 @@ def test_decant_condenser_reaches_anhydrous_regime():
     assert bot.z["ethanol"] > 0.98
     assert bot.z["water"] < 0.015
     assert bot.z["cyclohexane"] < 0.015
+
+
+def test_warm_start_from_interpolates_profile():
+    """Stage-count continuation: ``warm_start_from`` interpolates a coarse
+    converged decant profile onto a finer stage count (no solve needed). This is
+    the seed that makes the otherwise-intractable cold 62-stage solve tractable."""
+    active = ["ethanol", "water", "cyclohexane"]
+    src = RigorousColumn("S", {"n_stages": 4})
+    src._warm = {
+        "n_stages": 4, "method": "decant", "active": active,
+        "z": {"ethanol": 0.8, "water": 0.1, "cyclohexane": 0.1},
+        "x": [{"ethanol": 0.2, "water": 0.1, "cyclohexane": 0.7},
+              {"ethanol": 0.4, "water": 0.1, "cyclohexane": 0.5},
+              {"ethanol": 0.6, "water": 0.1, "cyclohexane": 0.3},
+              {"ethanol": 0.9, "water": 0.05, "cyclohexane": 0.05}],
+        "T": [340.0, 345.0, 350.0, 355.0],
+        "L": [10.0, 12.0, 14.0, 16.0],
+        "V": [20.0, 19.0, 18.0, 17.0],
+    }
+    tgt = RigorousColumn("T", {"n_stages": 8})
+    tgt.warm_start_from(src)
+    w = tgt._warm
+    assert w["n_stages"] == 8 and w["method"] == "decant"
+    assert len(w["x"]) == 8 and len(w["T"]) == 8 and len(w["V"]) == 8
+    # linear interpolation preserves the endpoints exactly ...
+    assert w["T"][0] == pytest.approx(340.0)
+    assert w["T"][-1] == pytest.approx(355.0)
+    assert w["x"][0]["cyclohexane"] == pytest.approx(0.7)
+    assert w["x"][-1]["ethanol"] == pytest.approx(0.9)
+    # ... keeps every stage's composition normalized and T monotone, and carries
+    # the feed signature across so the warm-start acceptance check passes.
+    for row in w["x"]:
+        assert abs(sum(row.values()) - 1.0) < 1e-9
+    assert all(w["T"][i] <= w["T"][i + 1] + 1e-9 for i in range(7))
+    assert w["z"] == src._warm["z"]
+
+    # the source must be a CONVERGED decant column
+    from caldyr.unitops.rigorous_column import RigorousColumnError
+    with pytest.raises(RigorousColumnError, match="decant"):
+        RigorousColumn("X", {"n_stages": 8}).warm_start_from(
+            RigorousColumn("Y", {"n_stages": 4}))
+
+
+def _decant_fs(col: RigorousColumn, solv: float) -> Flowsheet:
+    fs = Flowsheet(
+        components=[Component("ethanol"), Component("water"),
+                    Component("cyclohexane")],
+        property_package="thermo:UNIFAC")
+    fs.add(col)
+    fs.feed("SOLV", "T100:in1", T=298.15, P=P_ATM, molar_flow=solv,
+            z={"cyclohexane": 1.0})
+    fs.feed("FEED", "T100:in2", T=343.0, P=P_ATM, molar_flow=27.8,
+            z={"ethanol": 0.87, "water": 0.13})
+    fs.connect("DIST", "T100:distillate", None)
+    fs.connect("BOT", "T100:bottoms", None)
+    fs.connect("QC", "T100:condenser_duty", None)
+    fs.connect("QR", "T100:reboiler_duty", None)
+    return fs
+
+
+@pytest.mark.slow
+def test_decant_column_book_scale_62_stages():
+    """Book-scale (62-stage) scale-up via STAGE-COUNT continuation (Hameed
+    §9.5.6 uses ~62 stages). A cold 62-stage decant solve is intractable, so a
+    cold 30-stage column is solved and ``warm_start_from`` interpolates it onto
+    62 stages; distillate-rate continuation then drives the bottoms to near-
+    anhydrous ethanol — water all but eliminated (the long stripping section +
+    large aqueous draw), which the 30-stage column cannot reach (it caps
+    ~99 % EtOH / ~1 % water — see the 30-stage regime test above)."""
+    col30 = RigorousColumn("T100", {
+        "n_stages": 30, "feeds": [{"stage": 2}, {"stage": 10}],
+        "reflux_ratio": 3.0, "distillate_rate": 4.2,
+        "method": "naphtali_sandholm", "reboiled": True,
+        "decant_condenser": True, "condenser_T": 305.0,
+        "reflux_layer": "organic", "max_iter": 120,
+    })
+    _decant_fs(col30, 8.0).solve()
+
+    col = RigorousColumn("T100", {
+        "n_stages": 62, "feeds": [{"stage": 2}, {"stage": 20}],
+        "reflux_ratio": 3.0, "distillate_rate": 4.2,
+        "method": "naphtali_sandholm", "reboiled": True,
+        "decant_condenser": True, "condenser_T": 305.0,
+        "reflux_layer": "organic", "max_iter": 150,
+    })
+    col.warm_start_from(col30)
+    bot = None
+    last_water = 1.0
+    for D, solv in [(4.2, 8.0), (8.0, 6.0), (12.0, 4.5), (16.0, 3.6), (18.0, 3.0)]:
+        col.params["distillate_rate"] = D
+        fs = _decant_fs(col, solv)
+        fs.solve()
+        bot = fs.streams["BOT"]
+        assert abs(col.design["energy_residual_rel"]) < 1e-6
+        assert bot.z["water"] < last_water + 1e-9
+        last_water = bot.z["water"]
+
+    # 62 stages reaches the near-anhydrous bottoms the 30-stage column cannot:
+    # the water is essentially gone (~1e-4) and the bottoms is ~99 % ethanol.
+    assert bot is not None
+    assert bot.z["ethanol"] > 0.985
+    assert bot.z["water"] < 1e-3

@@ -543,6 +543,69 @@ class RigorousColumn(UnitOp):
         self._cache_out: dict[str, PortStream] | None = None
         self._cache_design: dict[str, Any] | None = None
 
+    def warm_start_from(self, other: "RigorousColumn") -> None:
+        """**Stage-count continuation** for the decanting-condenser column: seed
+        this column's Naphtali-Sandholm warm start from another, *coarser*
+        converged decant column by interpolating its stage profile onto this
+        column's stage count.
+
+        A cold solve of a long (50-62-stage) heteroazeotropic entrainer column is
+        intractable — the entrainer-rich seed is too far from the basin and the
+        FD-Jacobian Newton grinds for many minutes. But a short (~30-stage) column
+        cold-solves in ~1 min, and its converged profile, linearly interpolated
+        onto more stages, lands the long column squarely in its basin (it then
+        re-solves in a handful of warm Newton iterations). This is the stage-count
+        analogue of the distillate-rate continuation the entrainer examples
+        already use; do ``col62.warm_start_from(col30)`` once, then drive the rest
+        with the usual distillate-rate / inventory continuation.
+
+        ``other`` must be a converged decant column (its ``_warm`` carries the
+        decant profile). The feed composition signature is copied across, so the
+        two columns must dehydrate the same mixture (the seed only needs to be in
+        the basin, not identical — feed *stage* locations may differ)."""
+        w = getattr(other, "_warm", None)
+        if not w or w.get("method") != "decant":
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: warm_start_from needs a CONVERGED "
+                f"decanting-condenser column to interpolate from (the source has "
+                f"no decant warm profile — solve it first)"
+            )
+        try:
+            n2 = int(self.params["n_stages"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: integer 'n_stages' is required "
+                f"to interpolate a warm start onto"
+            ) from exc
+        active = list(w["active"])
+
+        def _interp(src: list[float], j: int, n1: int) -> float:
+            p = j * (n1 - 1) / (n2 - 1) if n2 > 1 else 0.0
+            lo = int(p)
+            hi = min(lo + 1, n1 - 1)
+            fr = p - lo
+            return src[lo] * (1.0 - fr) + src[hi] * fr
+
+        n1 = int(w["n_stages"])
+        rows = w["x"]
+        x2: list[dict[str, float]] = []
+        for j in range(n2):
+            p = j * (n1 - 1) / (n2 - 1) if n2 > 1 else 0.0
+            lo = int(p)
+            hi = min(lo + 1, n1 - 1)
+            fr = p - lo
+            row = {c: rows[lo].get(c, 0.0) * (1.0 - fr) + rows[hi].get(c, 0.0) * fr
+                   for c in active}
+            tot = sum(row.values()) or 1.0
+            x2.append({c: v / tot for c, v in row.items()})
+        self._warm = {
+            "n_stages": n2, "method": "decant", "active": active,
+            "z": dict(w["z"]), "x": x2,
+            "T": [_interp(w["T"], j, n1) for j in range(n2)],
+            "L": [_interp(w["L"], j, n1) for j in range(n2)],
+            "V": [_interp(w["V"], j, n1) for j in range(n2)],
+        }
+
     def define_ports(self) -> list[Port]:
         feeds = self.params.get("feeds")
         draws = self.params.get("side_draws")
@@ -2708,66 +2771,66 @@ class RigorousColumn(UnitOp):
             org = float(o_arr.sum())
             return org, o_arr, V0 - org, float(hL_o), float(hL_a)
 
-        def residuals(lm, vm, Lq, Vq, Kq, hLq, hVq, qrb=0.0):
+        def residuals(lm, vm, Lq, Vq, Kq, hLq, hVq, qrb=0.0, decant_pre=None):
             R = np.empty(nv)
             # Decanting condenser: the stage-0 overhead is decanted ONCE per
             # residual evaluation (needed by the stage-0 M rows, the stage-0
-            # energy row and the appended distillate-rate row).
+            # energy row and the appended distillate-rate row). The decant
+            # depends ONLY on the stage-0 vapour ``vm[0]``, so the Jacobian build
+            # passes the base decant (``decant_pre``) for every perturbation that
+            # does not touch a stage-0 vapour variable — sparing ~N*(2C+1) full
+            # 3-phase flashes per Jacobian (the dominant cost at book scale).
             if decant:
-                Odec, o_arr, _Adec, hLo_dec, _hLa = decant_overhead(vm[0])
-            for j in range(N):
-                base = j * span
-                for i in range(C):
-                    out_l = lm[j, i] * (1.0 + U[j] / Lq[j])
-                    out_v = vm[j, i] * (1.0 + W[j] / Vq[j])
-                    in_l = lm[j - 1, i] if j > 0 else 0.0
-                    in_v = vm[j + 1, i] if j < N - 1 else 0.0
-                    R[base + i] = (out_l + out_v - in_l - in_v
-                                   - Fcomp[j, i]) / Ftot
-                    R[base + C + i] = (vm[j, i]
-                                       - Kq[j, i] * (Vq[j] / Lq[j]) * lm[j, i]
-                                       ) / Ftot
-                if j == 0 and total_condenser:
-                    # TOTAL CONDENSER: distillate is the liquid draw U[0]=D; the
-                    # vapour is pinned to zero (E rows overwritten); the reflux
-                    # is pinned L_0 = R*D (this 3rd row). T_0 is set by the
-                    # appended bubble-point row below.
-                    for i in range(C):
-                        R[base + C + i] = vm[0, i] / Ftot
-                    R[base + 2 * C] = (Lq[0] - reflux * D) / Ftot
-                elif j == 0 and decant:
-                    # DECANTING CONDENSER: stage 0 is an ordinary equilibrium
-                    # tray (M + E rows above are standard) except its liquid-
-                    # from-above is the COLD organic reflux ``o_arr`` returned at
-                    # ``condenser_T`` (the M rows added in_l=0; subtract it now),
-                    # and its energy row is the standard tray balance with that
-                    # cold organic reflux enthalpy flow.
-                    for i in range(C):
-                        R[base + i] -= o_arr[i] / Ftot
-                    in_l = Odec * hLo_dec
-                    in_v = Vq[1] * hVq[1] if N > 1 else 0.0
-                    out_l = (Lq[0] + U[0]) * hLq[0]
-                    out_v = (Vq[0] + W[0]) * hVq[0]
-                    R[base + 2 * C] = (out_l + out_v - in_l - in_v
-                                       - Fh[0] - Q[0]) / e_ref
-                elif j == 0:
-                    R[base + 2 * C] = (Vq[0] - D) / D
+                if decant_pre is not None:
+                    Odec, o_arr, _Adec, hLo_dec, _hLa = decant_pre
                 else:
-                    in_l = Lq[j - 1] * hLq[j - 1]
-                    in_v = Vq[j + 1] * hVq[j + 1] if j < N - 1 else 0.0
-                    out_l = (Lq[j] + U[j]) * hLq[j]
-                    out_v = (Vq[j] + W[j]) * hVq[j]
-                    # The reboiler (bottom stage) carries the global reboiler-
-                    # duty unknown ``qrb`` as a heat input (total-condenser AND
-                    # decanting-condenser columns are both reboiled).
-                    qj = Q[j] + (qrb if (glob and j == N - 1) else 0.0)
-                    R[base + 2 * C] = (out_l + out_v - in_l - in_v
-                                       - Fh[j] - qj) / e_ref
+                    Odec, o_arr, _Adec, hLo_dec, _hLa = decant_overhead(vm[0])
+            # -- M (component material) + E (equilibrium) rows, vectorized over
+            #    the (N, C) flow arrays (residuals couple only to neighbours).
+            Mr = (lm * (1.0 + (U / Lq)[:, None])
+                  + vm * (1.0 + (W / Vq)[:, None]) - Fcomp)
+            Mr[1:, :] -= lm[:-1, :]                       # in_l = l_{i,j-1}
+            Mr[:-1, :] -= vm[1:, :]                       # in_v = v_{i,j+1}
+            if decant:
+                # stage-0 liquid-from-above is the COLD organic reflux (internal)
+                Mr[0, :] -= o_arr
+            Mr /= Ftot
+            Er = (vm - (Kq * (Vq / Lq)[:, None]) * lm) / Ftot
+            # -- H (energy) rows, vectorized; stage 0 overwritten per condenser
+            #    type. The reboiler (bottom) stage carries the global reb-duty
+            #    unknown ``qrb`` (total-condenser AND decanting-condenser are
+            #    reboiled).
+            in_lH = np.empty(N)
+            in_lH[0] = 0.0
+            in_vH = np.empty(N)
+            in_vH[N - 1] = 0.0
+            if N > 1:
+                in_lH[1:] = (Lq * hLq)[:-1]
+                in_vH[:-1] = (Vq * hVq)[1:]
+            qcol = Q.copy()
+            if glob:
+                qcol[N - 1] += qrb
+            Hr = ((Lq + U) * hLq + (Vq + W) * hVq - in_lH - in_vH - Fh - qcol) / e_ref
+            if total_condenser:
+                # vapour pinned to zero (E rows), reflux pinned L_0 = R*D; T_0
+                # set by the appended bubble-point row.
+                Er[0, :] = vm[0, :] / Ftot
+                Hr[0] = (Lq[0] - reflux * D) / Ftot
+            elif decant:
+                # stage 0 is an ordinary tray fed the cold organic reflux.
+                Hr[0] = ((Lq[0] + U[0]) * hLq[0] + (Vq[0] + W[0]) * hVq[0]
+                         - Odec * hLo_dec - (Vq[1] * hVq[1] if N > 1 else 0.0)
+                         - Fh[0] - Q[0]) / e_ref
+            else:
+                Hr[0] = (Vq[0] - D) / D
+            R2 = R[:N * span].reshape(N, span)
+            R2[:, :C] = Mr
+            R2[:, C:2 * C] = Er
+            R2[:, 2 * C] = Hr
             if total_condenser:
                 # Appended global equation: the condenser liquid is at its
                 # bubble point, sum_i K_i,0 x_i,0 = 1 -> determines T_0.
-                R[qi_reb] = (sum(Kq[0, i] * lm[0, i] for i in range(C))
-                             / Lq[0] - 1.0)
+                R[qi_reb] = float((Kq[0] * lm[0]).sum() / Lq[0] - 1.0)
             elif decant:
                 # Appended global equation: the AQUEOUS distillate rate
                 # sum_i a_i = V_0 - sum_i o_i = D.
@@ -2776,10 +2839,14 @@ class RigorousColumn(UnitOp):
 
         def build_jac():
             jac = np.empty((nv, nv))
+            # The decant flash depends only on stage-0 vapour; precompute it once
+            # and reuse for every perturbation that leaves ``vmat[0]`` unchanged.
+            base_dec = decant_overhead(vmat[0]) if decant else None
             for j in range(N):
                 for kind in range(span):
                     col = j * span + kind
                     lm, vm, tj = lmat, vmat, Tv[j]
+                    touches_v0 = (j == 0 and C <= kind < 2 * C)
                     if kind < C:                       # perturb l_{i,j}
                         dk = max(_NS_DL_FRAC * lmat[j, kind], _NS_DL_MIN)
                         lm = lmat.copy()
@@ -2797,7 +2864,9 @@ class RigorousColumn(UnitOp):
                     Kc2, hLc2, hVc2 = Kc.copy(), hLc.copy(), hVc.copy()
                     Lc2[j], Vc2[j], Kc2[j] = Lj, Vj, Kj
                     hLc2[j], hVc2[j] = hLj, hVj
-                    R1 = residuals(lm, vm, Lc2, Vc2, Kc2, hLc2, hVc2, qreb)
+                    dec_pre = None if touches_v0 else base_dec
+                    R1 = residuals(lm, vm, Lc2, Vc2, Kc2, hLc2, hVc2, qreb,
+                                   decant_pre=dec_pre)
                     jac[:, col] = (R1 - R0) / dk
             if glob:
                 # Column for the reboiler-duty unknown. The variable is scaled by
@@ -2807,7 +2876,8 @@ class RigorousColumn(UnitOp):
                 # e_ref watts, giving an O(1) column. Perturbing the duty changes
                 # only the reboiler energy row (no property re-evaluation).
                 dk = _NS_DT
-                R1 = residuals(lmat, vmat, Lc, Vc, Kc, hLc, hVc, qreb + dk * e_ref)
+                R1 = residuals(lmat, vmat, Lc, Vc, Kc, hLc, hVc, qreb + dk * e_ref,
+                               decant_pre=base_dec)
                 jac[:, qi_reb] = (R1 - R0) / dk
             return jac
 
@@ -2976,7 +3046,7 @@ class RigorousColumn(UnitOp):
                 break
             rss = float(R0 @ R0)
             jac = (build_jac_analytic() if has_analytic else build_jac())
-            if getattr(self, "_ns_jac_check", False) and it <= 1:
+            if getattr(self, "_ns_jac_check", False) and it <= 1 and not glob:
                 jfd = build_jac()
                 ja = build_jac_analytic()
                 scale = np.maximum(np.abs(jfd), np.abs(ja)) + 1e-12
