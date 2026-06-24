@@ -216,6 +216,12 @@ _NS_LM_DOWN = 3.0        # ... shrink factor on an accepted step
 _NS_REFINE = 2           # iterative-refinement passes on the Newton linear
 #                          solve (recovers digits lost to the ill-conditioned
 #                          MESH Jacobian, so the endgame plunge is reproducible)
+_DECANT_BETA_MIN = 1e-4  # a layer thinner than this is treated as "no split" by
+#                          the decanting condenser (degenerate single-liquid
+#                          overhead) -> fall back to a fixed-fraction reflux
+_DECANT_FALLBACK_R = 2.0  # reflux ratio used while the decant has not yet formed
+#                          (early Newton iterates), so the solver stays in a sane
+#                          internal-traffic regime until the two-liquid split sets
 
 
 class _NoVLEError(ValueError):
@@ -748,8 +754,52 @@ class RigorousColumn(UnitOp):
             )
         partial = bool(self.params.get("partial_condenser", False))
         max_iter = int(self.params.get("max_iter", _MAX_ITER))
+
+        # Integrated decanting condenser (heteroazeotropic entrainer column).
+        decant = bool(self.params.get("decant_condenser", False))
+        condenser_T = 0.0
+        reflux_organic = True
+        if decant:
+            if method != "naphtali_sandholm" or not reboiled:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: 'decant_condenser' requires "
+                    f"method='naphtali_sandholm' and reboiled=True (the "
+                    f"integrated decant is formulated on the simultaneous-"
+                    f"correction reboiled column); got method={method!r}, "
+                    f"reboiled={reboiled}"
+                )
+            if partial:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: 'decant_condenser' and "
+                    f"'partial_condenser' are mutually exclusive (the decanting "
+                    f"condenser is a total condenser that settles two liquids)"
+                )
+            try:
+                condenser_T = float(self.params["condenser_T"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: 'decant_condenser' needs a "
+                    f"numeric 'condenser_T' (K) — the temperature the overhead "
+                    f"is condensed and decanted at (got "
+                    f"{self.params.get('condenser_T')!r})"
+                ) from exc
+            if not _BUBBLE_T_LO < condenser_T < _BUBBLE_T_HI:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: condenser_T={condenser_T} K is "
+                    f"out of range ({_BUBBLE_T_LO:.0f}-{_BUBBLE_T_HI:.0f} K)"
+                )
+            layer = str(self.params.get("reflux_layer", "organic")).lower()
+            if layer in ("organic", "light"):
+                reflux_organic = True
+            elif layer in ("aqueous", "heavy"):
+                reflux_organic = False
+            else:
+                raise RigorousColumnError(
+                    f"RigorousColumn {self.id!r}: reflux_layer={layer!r} must be "
+                    f"'organic'/'light' or 'aqueous'/'heavy'"
+                )
         return (n_stages, feed_stages, draws, R, D, P, dP, partial, max_iter,
-                method, reboiled, duties)
+                method, reboiled, duties, decant, condenser_T, reflux_organic)
 
     # -- solve -------------------------------------------------------------------
     def solve(self, inlets: dict[str, Stream], pp) -> dict[str, PortStream]:
@@ -775,7 +825,8 @@ class RigorousColumn(UnitOp):
              for c in comps}                              # combined feed
         P_in = feed_streams[0].require_state()[1]
         (n_stages, feed_stages, draws, R, D, P, dP, partial, max_iter,
-         method, reboiled, duties) = self._read_params(F, P_in)
+         method, reboiled, duties, decant, condenser_T,
+         reflux_organic) = self._read_params(F, P_in)
         reactions, holdup = self._read_reactions(n_stages, reboiled, method)
 
         # Exact-repeat cache (see __init__): same params + same inlet states
@@ -849,10 +900,16 @@ class RigorousColumn(UnitOp):
 
         if method == "naphtali_sandholm":
             feed_h = sum(Fi * Hi for Fi, Hi in zip(F_k, H_k))
-            out = self._solve_reboiled_ns(
-                pp, comps, active, N, P_j, F, f, z, fz_stage, fh_stage,
-                feed_info, feed_flashes, u, w, draws, R, D, B, q, max_iter,
-                feed_h)
+            if decant:
+                out = self._solve_decant_ns(
+                    pp, comps, active, N, P_j, F, f, z, fz_stage, fh_stage,
+                    feed_info, u, w, draws, R, D, B, q, condenser_T,
+                    reflux_organic, max_iter, feed_h)
+            else:
+                out = self._solve_reboiled_ns(
+                    pp, comps, active, N, P_j, F, f, z, fz_stage, fh_stage,
+                    feed_info, feed_flashes, u, w, draws, R, D, B, q, max_iter,
+                    feed_h)
             self._store_cache(key, out)
             return out
 
@@ -1294,6 +1351,232 @@ class RigorousColumn(UnitOp):
             "iterations": it, "energy_residual_rel": energy_residual,
             "prop_evals": n_prop,
         }
+        out: dict[str, PortStream] = {
+            "distillate": distillate, "bottoms": bottoms,
+            "condenser_duty": EnergyStream(
+                id=f"{self.id}.condenser_duty", duty=q_cond),
+            "reboiler_duty": EnergyStream(
+                id=f"{self.id}.reboiler_duty", duty=q_reb),
+        }
+        for i, s in enumerate(side_streams):
+            out[f"side{i + 1}"] = s
+        return out
+
+    # -- integrated decanting condenser on Naphtali-Sandholm ---------------------
+    def _solve_decant_ns(self, pp, comps: list[str], active: list[str],
+                         N: int, P_j: list[float], F: float,
+                         f: dict[str, float], z: dict[str, float],
+                         fz_stage: list[dict[str, float]],
+                         fh_stage: list[float],
+                         feed_info: list[tuple[int, float, float]],
+                         u: list[float], w: list[float],
+                         draws: list[tuple[int, str, float]],
+                         R: float, D: float, B: float, q: float,
+                         condenser_T: float, reflux_organic: bool,
+                         max_iter: int, feed_h: float,
+                         ) -> dict[str, PortStream]:
+        """Reboiled column with an INTEGRATED DECANTING CONDENSER on Naphtali-
+        Sandholm — the fix for the heteroazeotropic entrainer column (Hameed
+        §9.5.6 anhydrous-ethanol dehydration with a cyclohexane entrainer).
+
+        An EXTERNAL decanter would feed the entrainer to the column, so the
+        overhead must carry it all out → a large distillate the NS cannot
+        converge. An INTERNAL decant keeps the entrainer circulating inside the
+        column, so the net (aqueous) distillate stays small. Stage 0 is an
+        ordinary equilibrium tray; its overhead vapour is condensed at
+        ``condenser_T`` and settled into an organic layer (refluxed in full) and
+        an aqueous layer (the distillate, spec ``D``). The reflux ratio
+        ``R = organic/aqueous`` is an OUTPUT; both duties are recovered. See
+        :meth:`_solve_ns` (``decant=True``).
+        """
+        # -- seed -------------------------------------------------------------
+        # A Fenske seed built from the (tiny) entrainer makeup feed has ~no
+        # entrainer anywhere, so the overhead does not decant and the internal
+        # organic circulation cannot bootstrap (NS stalls). Instead seed an
+        # ENTRAINER-RICH rectifying section so the overhead splits from the very
+        # first residual and the organic reflux is present in the seed. The
+        # entrainer is the smallest feed (the makeup); the bottoms product is the
+        # largest feed; the remaining ("water-like") species leave overhead.
+        warm = self._warm
+        warm_ok = (warm is not None and warm.get("method") == "decant"
+                   and warm.get("n_stages") == N and warm.get("active") == active
+                   and max(abs(warm["z"].get(c, 0.0) - z.get(c, 0.0))
+                           for c in active) < _WARM_Z_TOL)
+        if warm_ok:
+            assert warm is not None
+            x = [dict(row) for row in warm["x"]]
+            T = list(warm["T"])
+            L, V = list(warm["L"]), list(warm["V"])
+        else:
+            ent = min(active, key=lambda c: f.get(c, 0.0))
+            prod = max(active, key=lambda c: f.get(c, 0.0))
+            mids = [c for c in active if c not in (ent, prod)]
+            fmid = sum(f.get(c, 0.0) for c in mids) or 1.0
+            # Concentrate the entrainer in the RECTIFYING section (above the main
+            # feed) and drive it to ~0 in the stripping section, so the overhead
+            # is entrainer-rich (decants from the first residual) while the
+            # bottoms is the pure product. Grading over the whole column instead
+            # spills entrainer into the stripping section and is a poor seed for
+            # a long column (the cold solve then misses the basin).
+            fmain = feed_info[max(range(len(feed_info)),
+                                  key=lambda k: feed_info[k][1])][0]
+            x = []
+            for j in range(N):
+                if j <= fmain:                 # rectifying: entrainer-rich
+                    g = j / max(fmain, 1)
+                    x_ent = 0.45 * (1.0 - g) + 0.05
+                    x_mid = 0.20 * (1.0 - g) + 0.03
+                else:                          # stripping: entrainer -> 0
+                    g = (j - fmain) / max(N - 1 - fmain, 1)
+                    x_ent = 0.05 * (1.0 - g) + 1e-4
+                    x_mid = 0.06 * (1.0 - g) + 1e-3
+                row = {ent: x_ent}
+                for c in mids:
+                    row[c] = x_mid * (f.get(c, 0.0) / fmid)
+                row[prod] = max(1.0 - x_ent - x_mid, 1e-3)
+                tot = sum(row.values())
+                x.append({c: max(row.get(c, 0.0), _X_FLOOR) / tot
+                          for c in active})
+            L, V = self._initial_traffic(N, feed_info, R, D, F, True,
+                                         [B] * N, w)
+            T = None  # bubble-pointed below
+        V[0] = D * (1.0 + R)
+        T0, K, _hL, _hV, _nf = self._stage_bubble_points(pp, P_j, x, active, 0)
+        if T is None:
+            T = T0
+        y = [{c: max(K[j][c] * x[j].get(c, 0.0), _X_FLOOR) for c in active}
+             for j in range(N)]
+        for j in range(N):
+            tot = sum(y[j].values())
+            y[j] = {c: v / tot for c, v in y[j].items()}
+        t_bounds = (max(min(min(T), condenser_T) - 120.0, _BUBBLE_T_LO),
+                    min(max(T) + 300.0, _BUBBLE_T_HI))
+
+        (T, x, y, K, L, V, hL, hV, it, dF, n_prop, converged) = \
+            self._solve_ns(
+                pp, N, P_j, active, fz_stage, fh_stage, u, w, [0.0] * N, D,
+                partial=False, T=T, x=x, y=y, L=L, V=V, t_bounds=t_bounds,
+                max_iter=max_iter, total_condenser=False, reflux=R,
+                tol=_NS_TOL_REBOILED, decant=True, condenser_T=condenser_T,
+                reflux_organic=reflux_organic)
+        if not converged:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: decanting-condenser "
+                f"naphtali_sandholm did not converge in {it} iterations (scaled "
+                f"residual {dF:.3g} vs {_NS_TOL_REBOILED}). Check the specs "
+                f"(D={D:.4g} mol/s, reflux_ratio={R:.4g}, n_stages={N}, "
+                f"condenser_T={condenser_T:.4g} K) or raise 'max_iter'"
+            )
+
+        # -- decant the converged overhead -> organic reflux + aqueous distillate
+        V0, y0 = V[0], y[0]
+        r3 = pp.flash_pt_3p(condenser_T, P_j[0], dict(y0))
+        bl, bh = r3.beta_light, r3.beta_heavy
+        bliq = bl + bh
+        if (bl <= _DECANT_BETA_MIN or bh <= _DECANT_BETA_MIN or bliq <= 0.0
+                or r3.x_light is None or r3.x_heavy is None):
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: the converged overhead does not "
+                f"decant into two liquids at condenser_T={condenser_T:.4g} K "
+                f"(beta_light={bl:.3g}, beta_heavy={bh:.3g}) — the column has no "
+                f"heteroazeotrope to split; lower condenser_T or check the feed"
+            )
+        if reflux_organic:
+            xo, hL_o, frac_o, hL_a = r3.x_light, r3.H_light, bl / bliq, r3.H_heavy
+        else:
+            xo, hL_o, frac_o, hL_a = r3.x_heavy, r3.H_heavy, bh / bliq, r3.H_light
+        org = V0 * frac_o
+        o_flows = {c: min(org * xo.get(c, 0.0), V0 * y0.get(c, 0.0))
+                   for c in active}
+        org = sum(o_flows.values())
+        a_flows = {c: V0 * y0.get(c, 0.0) - o_flows[c] for c in active}
+        D_aq = sum(a_flows.values())
+
+        # Bottoms by difference (the organic reflux is internal — only the
+        # aqueous layer and the bottoms leave the column).
+        b_flows = {c: f[c] - a_flows[c] for c in active}
+        neg = min(b_flows.values())
+        if neg < -1e-7 * F:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: the converged aqueous distillate "
+                f"carries more of a component than the feed supplies (bottoms "
+                f"{neg:.3g} mol/s) — check D, reflux_ratio and condenser_T"
+            )
+        for c in active:
+            b_flows[c] = max(b_flows[c], 0.0)
+        B_eff = sum(b_flows.values())
+        x_d = {c: (a_flows[c] / D_aq if D_aq > 0.0 else 0.0) for c in active}
+        x_b = {c: (b_flows[c] / B_eff if B_eff > 0.0 else 0.0) for c in active}
+        z_dist = {c: x_d.get(c, 0.0) for c in comps}
+        z_bot = {c: x_b.get(c, 0.0) for c in comps}
+
+        side_streams: list[Stream] = []
+        side_h = 0.0
+        for i, (stage, phase, rate) in enumerate(draws):
+            j = stage - 1
+            comp = x[j] if phase == "liquid" else y[j]
+            h_draw = hL[j] if phase == "liquid" else hV[j]
+            side_h += rate * h_draw
+            side_streams.append(Stream(
+                id=f"{self.id}.side{i + 1}", components=comps,
+                T=T[j], P=P_j[j], molar_flow=rate,
+                z={c: comp.get(c, 0.0) for c in comps},
+                H=h_draw, phase=phase,
+                vapor_fraction=0.0 if phase == "liquid" else 1.0))
+
+        # Duties. Reboiler from the bottom-stage balance; condenser from the
+        # overall balance (formation-inclusive enthalpies). The aqueous
+        # distillate leaves at condenser_T with the heavy-layer enthalpy.
+        h_dist, h_bot = float(hL_a), hL[N - 1]
+        q_reb = B_eff * h_bot + V[N - 1] * hV[N - 1] - L[N - 2] * hL[N - 2]
+        q_cond = D_aq * h_dist + B_eff * h_bot + side_h - feed_h - q_reb
+        # Independent condenser balance (heat removed condensing V_0 into the two
+        # cold layers, as a duty): organic returns internally, aqueous leaves.
+        q_cond_stage = org * float(hL_o) + D_aq * h_dist - V0 * hV[0]
+        energy_residual = abs(q_cond - q_cond_stage) / max(
+            abs(q_cond), abs(q_reb), 1.0)
+
+        distillate = Stream(
+            id=f"{self.id}.distillate", components=comps,
+            T=condenser_T, P=P_j[0], molar_flow=D_aq, z=z_dist, H=h_dist,
+            phase="liquid", vapor_fraction=0.0)
+        bottoms = Stream(
+            id=f"{self.id}.bottoms", components=comps,
+            T=T[N - 1], P=P_j[-1], molar_flow=B_eff, z=z_bot, H=h_bot,
+            phase="liquid", vapor_fraction=0.0)
+
+        self.design = {
+            "N": float(N - 1), "P": P_j[0], "x_D": dict(x_d), "x_B": dict(x_b),
+            "T_top": T[0], "T_bottom": T[N - 1], "condenser_T": condenser_T,
+            "V_top": V0, "Q_condenser": q_cond, "Q_reboiler": q_reb,
+            "D": D_aq, "B": B_eff,
+            "R": (org / D_aq if D_aq > 0.0 else 0.0), "q": q,
+            "reflux_ratio_organic": (org / D_aq if D_aq > 0.0 else 0.0),
+            "organic_reflux": org, "organic_flows": dict(o_flows),
+            "x_organic": {c: (o_flows[c] / org if org > 0.0 else 0.0)
+                          for c in active},
+            "feed_stage": feed_info[0][0] + 1,
+            "partial_condenser": False, "method": "naphtali_sandholm",
+            "reboiled": True, "decant_condenser": True,
+            "feeds": [{"stage": j + 1, "F": Fi, "q": qi}
+                      for j, Fi, qi in feed_info],
+            "side_draws": [{"stage": stage, "phase": phase, "rate": rate}
+                           for stage, phase, rate in draws],
+            "distillate_flows": dict(a_flows), "bottoms_flows": dict(b_flows),
+            "side_draw_flows": [],
+            "n_stages": N, "T_profile": list(T), "P_profile": list(P_j),
+            "L_profile": list(L), "V_profile": list(V),
+            "x_profile": [{c: row.get(c, 0.0) for c in comps} for row in x],
+            "y_profile": [{c: row.get(c, 0.0) for c in comps} for row in y],
+            "iterations": it, "energy_residual_rel": energy_residual,
+            "prop_evals": n_prop,
+        }
+        # Warm start for recycle re-solves (a closed entrainer loop re-calls this
+        # column with near-identical feeds many times): reuse the converged
+        # entrainer-rich profile + traffic instead of rebuilding the seed.
+        self._warm = {"n_stages": N, "method": "decant", "active": list(active),
+                      "z": dict(z), "x": [dict(row) for row in x],
+                      "T": list(T), "L": list(L), "V": list(V)}
         out: dict[str, PortStream] = {
             "distillate": distillate, "bottoms": bottoms,
             "condenser_duty": EnergyStream(
@@ -2275,7 +2558,9 @@ class RigorousColumn(UnitOp):
                   y: list[dict[str, float]], L: list[float], V: list[float],
                   t_bounds: tuple[float, float], max_iter: int,
                   force_fd: bool = False, total_condenser: bool = False,
-                  reflux: float = 1.0, tol: float = _NS_TOL):
+                  reflux: float = 1.0, tol: float = _NS_TOL,
+                  decant: bool = False, condenser_T: float = 0.0,
+                  reflux_organic: bool = True):
         """Naphtali & Sandholm (1971) simultaneous-correction method for the
         non-reboiled, partial-condenser steam-stripped main fractionator —
         Seader, Henley & Roper 3e sec. 10.4. ALL the MESH equations are solved
@@ -2315,7 +2600,16 @@ class RigorousColumn(UnitOp):
         # uniform per-stage layout is preserved and only the system is extended
         # by one. The extra variable lives at index N*span; the extra residual
         # at the same index.
-        nv = N * span + (1 if total_condenser else 0)
+        # An INTEGRATED DECANTING CONDENSER (decant=True) is also a reboiled
+        # column with one extra global unknown (the reboiler duty) and one extra
+        # equation, but the extra equation is the AQUEOUS-DISTILLATE-RATE spec
+        # (sum_i a_i = D) rather than the total-condenser bubble point, and stage
+        # 0 stays an ORDINARY equilibrium tray whose overhead vapour is decanted
+        # at ``condenser_T`` into an organic layer (refluxed in full, the
+        # liquid-from-above on stage 0) and an aqueous layer (the net
+        # distillate). Both modes share the +1 layout below.
+        glob = total_condenser or decant
+        nv = N * span + (1 if glob else 0)
         qi_reb = N * span                                # index of the reb-duty var
         P = np.array(P_j, dtype=float)
         Fcomp = np.zeros((N, C))
@@ -2367,13 +2661,60 @@ class RigorousColumn(UnitOp):
         refresh_all()
         e_ref = max(float(np.abs(hLc).max()), float(np.abs(hVc).max()),
                     1.0) * Ftot
-        # Reboiler-duty unknown (total condenser only): seed from the bottom-
-        # stage energy balance of the initial profile.
+        # Reboiler-duty unknown (total condenser / decanting condenser): seed
+        # from the bottom-stage energy balance of the initial profile.
         qreb = (Lc[N - 1] * hLc[N - 1] + Vc[N - 1] * hVc[N - 1]
-                - Lc[N - 2] * hLc[N - 2]) if total_condenser else 0.0
+                - Lc[N - 2] * hLc[N - 2]) if glob else 0.0
+
+        P0 = float(P[0])
+
+        def decant_overhead(vm0):
+            """Decant the stage-0 overhead vapour ``vm0`` (a per-component flow
+            array, total ``V_0``) at ``condenser_T``: a total condenser whose
+            condensate settles into an organic and an aqueous liquid layer. The
+            organic layer is refluxed in full (the cold liquid-from-above on
+            stage 0); the aqueous layer is the net distillate. Returns
+            ``(O, o_arr, A, hL_o, hL_a)`` -- the organic total flow, its
+            per-component flows, the aqueous total flow, and the two layer molar
+            enthalpies at ``condenser_T``. Component mass is conserved exactly
+            (``o_arr + a = vm0``) by construction, so the column mass balance
+            closes regardless of the flash's residual-vapour bookkeeping."""
+            nonlocal n_prop
+            V0 = float(vm0.sum())
+            y0 = {active[i]: max(float(vm0[i]), _NS_FLOOR) / V0 for i in range(C)}
+            r3 = pp.flash_pt_3p(condenser_T, P0, y0)
+            n_prop += 1
+            bl, bh = r3.beta_light, r3.beta_heavy
+            bliq = bl + bh
+            if (bl <= _DECANT_BETA_MIN or bh <= _DECANT_BETA_MIN
+                    or bliq <= 0.0 or r3.x_light is None or r3.x_heavy is None):
+                # No clean two-liquid split yet (early Newton iterate, or a
+                # momentarily single-phase overhead): reflux a fixed fraction so
+                # the internal traffic stays sane until the decant forms.
+                frac_o = _DECANT_FALLBACK_R / (_DECANT_FALLBACK_R + 1.0)
+                o_arr = frac_o * vm0
+                org = float(o_arr.sum())
+                hbulk = pp.enthalpy_liquid(condenser_T, P0, y0)
+                return org, o_arr, V0 - org, hbulk, hbulk
+            if reflux_organic:                 # organic = light (less dense)
+                xo, hL_o, frac_o = r3.x_light, r3.H_light, bl / bliq
+                hL_a = r3.H_heavy
+            else:                              # reflux the heavy (aqueous) layer
+                xo, hL_o, frac_o = r3.x_heavy, r3.H_heavy, bh / bliq
+                hL_a = r3.H_light
+            org = V0 * frac_o
+            o_arr = np.minimum(
+                np.array([org * xo.get(active[i], 0.0) for i in range(C)]), vm0)
+            org = float(o_arr.sum())
+            return org, o_arr, V0 - org, float(hL_o), float(hL_a)
 
         def residuals(lm, vm, Lq, Vq, Kq, hLq, hVq, qrb=0.0):
             R = np.empty(nv)
+            # Decanting condenser: the stage-0 overhead is decanted ONCE per
+            # residual evaluation (needed by the stage-0 M rows, the stage-0
+            # energy row and the appended distillate-rate row).
+            if decant:
+                Odec, o_arr, _Adec, hLo_dec, _hLa = decant_overhead(vm[0])
             for j in range(N):
                 base = j * span
                 for i in range(C):
@@ -2394,6 +2735,21 @@ class RigorousColumn(UnitOp):
                     for i in range(C):
                         R[base + C + i] = vm[0, i] / Ftot
                     R[base + 2 * C] = (Lq[0] - reflux * D) / Ftot
+                elif j == 0 and decant:
+                    # DECANTING CONDENSER: stage 0 is an ordinary equilibrium
+                    # tray (M + E rows above are standard) except its liquid-
+                    # from-above is the COLD organic reflux ``o_arr`` returned at
+                    # ``condenser_T`` (the M rows added in_l=0; subtract it now),
+                    # and its energy row is the standard tray balance with that
+                    # cold organic reflux enthalpy flow.
+                    for i in range(C):
+                        R[base + i] -= o_arr[i] / Ftot
+                    in_l = Odec * hLo_dec
+                    in_v = Vq[1] * hVq[1] if N > 1 else 0.0
+                    out_l = (Lq[0] + U[0]) * hLq[0]
+                    out_v = (Vq[0] + W[0]) * hVq[0]
+                    R[base + 2 * C] = (out_l + out_v - in_l - in_v
+                                       - Fh[0] - Q[0]) / e_ref
                 elif j == 0:
                     R[base + 2 * C] = (Vq[0] - D) / D
                 else:
@@ -2401,9 +2757,10 @@ class RigorousColumn(UnitOp):
                     in_v = Vq[j + 1] * hVq[j + 1] if j < N - 1 else 0.0
                     out_l = (Lq[j] + U[j]) * hLq[j]
                     out_v = (Vq[j] + W[j]) * hVq[j]
-                    # The reboiler (bottom stage, total-condenser mode) carries
-                    # the global reboiler-duty unknown ``qrb`` as a heat input.
-                    qj = Q[j] + (qrb if (total_condenser and j == N - 1) else 0.0)
+                    # The reboiler (bottom stage) carries the global reboiler-
+                    # duty unknown ``qrb`` as a heat input (total-condenser AND
+                    # decanting-condenser columns are both reboiled).
+                    qj = Q[j] + (qrb if (glob and j == N - 1) else 0.0)
                     R[base + 2 * C] = (out_l + out_v - in_l - in_v
                                        - Fh[j] - qj) / e_ref
             if total_condenser:
@@ -2411,6 +2768,10 @@ class RigorousColumn(UnitOp):
                 # bubble point, sum_i K_i,0 x_i,0 = 1 -> determines T_0.
                 R[qi_reb] = (sum(Kq[0, i] * lm[0, i] for i in range(C))
                              / Lq[0] - 1.0)
+            elif decant:
+                # Appended global equation: the AQUEOUS distillate rate
+                # sum_i a_i = V_0 - sum_i o_i = D.
+                R[qi_reb] = (Vq[0] - Odec - D) / D
             return R
 
         def build_jac():
@@ -2438,7 +2799,7 @@ class RigorousColumn(UnitOp):
                     hLc2[j], hVc2[j] = hLj, hVj
                     R1 = residuals(lm, vm, Lc2, Vc2, Kc2, hLc2, hVc2, qreb)
                     jac[:, col] = (R1 - R0) / dk
-            if total_condenser:
+            if glob:
                 # Column for the reboiler-duty unknown. The variable is scaled by
                 # e_ref (the duty is ~e_ref in magnitude while the energy residual
                 # is divided by e_ref, so the raw column would be ~1/e_ref^2 and
@@ -2454,11 +2815,12 @@ class RigorousColumn(UnitOp):
         pp_comps = list(getattr(pp, "components", active))
         act_idx = np.array([pp_comps.index(c) for c in active])
         # The analytic Jacobian hardcodes the partial-condenser distillate-rate
-        # spec and has no reboiler-duty column; the total-condenser/reboiler form
-        # uses the finite-difference Jacobian (it differences whatever the
-        # residual set, including the appended global equation).
+        # spec and has no reboiler-duty column; the total-condenser/reboiler and
+        # decanting-condenser forms use the finite-difference Jacobian (it
+        # differences whatever the residual set, including the appended global
+        # equation and the per-residual VLLE decant flash).
         has_analytic = (hasattr(pp, "stage_derivs") and not force_fd
-                        and not total_condenser)
+                        and not glob)
 
         def build_jac_analytic():
             # Per-stage analytic K-value / enthalpy derivatives (Naphtali-
@@ -2585,7 +2947,7 @@ class RigorousColumn(UnitOp):
                     j, lm[j], vm[j], tt[j])
             # The reboiler-duty step is in the e_ref-scaled variable (see
             # build_jac): a unit Newton step is e_ref watts.
-            qrb = qreb + d[qi_reb] * e_ref if total_condenser else 0.0
+            qrb = qreb + d[qi_reb] * e_ref if glob else 0.0
             Rt = residuals(lm, vm, Lt, Vt, Kt, hLt, hVt, qrb)
             return float(Rt @ Rt), (lm, vm, tt, Lt, Vt, Kt, hLt, hVt, Rt, qrb)
 
