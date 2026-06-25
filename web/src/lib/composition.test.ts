@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { componentOrder, compositionRows, fmtFrac } from "./composition";
+import { componentOrder, compositionRows, fmtFrac, streamMassFlow } from "./composition";
 
 describe("compositionRows", () => {
   it("normalizes, sorts descending, and derives per-component flow", () => {
@@ -19,6 +19,32 @@ describe("compositionRows", () => {
     expect(compositionRows(undefined, 1)).toEqual([]);
     expect(compositionRows({}, 1)).toEqual([]);
     expect(compositionRows({ a: 0 }, 1)).toEqual([]);
+  });
+});
+
+describe("mass basis", () => {
+  const MW = { propane: 0.044096, "n-butane": 0.058122 }; // kg/mol
+
+  it("computes mass fraction + mass flow when molar masses are present", () => {
+    const rows = compositionRows({ propane: 0.6177, "n-butane": 0.3823 }, 55.06, MW);
+    const mixM = 0.6177 * MW.propane + 0.3823 * MW["n-butane"]; // kg/mol
+    const c3 = rows.find((r) => r.comp === "propane")!;
+    expect(c3.massFrac).toBeCloseTo((0.6177 * MW.propane) / mixM, 6);
+    expect(c3.massFlow).toBeCloseTo(55.06 * 0.6177 * MW.propane, 5);
+    // mass fractions sum to 1
+    expect(rows.reduce((a, r) => a + (r.massFrac ?? 0), 0)).toBeCloseTo(1, 9);
+  });
+
+  it("leaves mass fields null when any molar mass is missing", () => {
+    const rows = compositionRows({ propane: 0.5, mystery: 0.5 }, 10, MW);
+    expect(rows.every((r) => r.massFrac === null && r.massFlow === null)).toBe(true);
+  });
+
+  it("streamMassFlow = molar_flow · Σ x·M", () => {
+    const m = streamMassFlow({ propane: 0.5, "n-butane": 0.5 }, 100, MW);
+    expect(m).toBeCloseTo(100 * (0.5 * MW.propane + 0.5 * MW["n-butane"]), 6);
+    expect(streamMassFlow({ propane: 0.5, mystery: 0.5 }, 100, MW)).toBeNull();
+    expect(streamMassFlow({ propane: 1 }, null, MW)).toBeNull();
   });
 });
 

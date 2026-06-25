@@ -2,9 +2,9 @@ import { Download, Scale } from "lucide-react";
 import {
   CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
-import { componentOrder, fmtFrac } from "../lib/composition";
+import { componentOrder, fmtFrac, streamMassFlow } from "../lib/composition";
 import { downloadCsv } from "../lib/csv";
-import { convert, fmtQty, unitOf, UNIT_SETS, type UnitSet } from "../lib/units";
+import { defaultUnit, fmtDim, toDisplay, UNIT_SETS, type UnitSet } from "../lib/units";
 import { useState } from "react";
 import { useStore } from "../store";
 import { Badge, Button, Hint, PanelTitle, StaleNotice } from "./ui";
@@ -66,20 +66,29 @@ export function StreamTable() {
   if (!res) return <Hint>Press Solve to compute the stream table.</Hint>;
   const streams = Object.values(res.streams).filter((s) => s.molar_flow != null);
   const comps = componentOrder(streams);
+  const mw = res.molar_mass;
+  const Tu = defaultUnit("temperature", unitSet);
+  const Pu = defaultUnit("pressure", unitSet);
+  const nu = defaultUnit("molar_flow", unitSet);
+  const mu = defaultUnit("mass_flow", unitSet);
 
   const exportCsv = () => downloadCsv(
     [
-      ["stream", `T (${unitOf("T", unitSet)})`, `P (${unitOf("P", unitSet)})`,
-       `n (${unitOf("flow", unitSet)})`, "phase", "vapor_fraction",
+      ["stream", `T (${Tu})`, `P (${Pu})`, `n (${nu})`, `m (${mu})`,
+       "phase", "vapor_fraction",
        ...Object.keys(streams[0]?.z ?? {}).map((c) => `z_${c}`)],
-      ...streams.map((s) => [
-        s.id,
-        s.T != null ? convert("T", s.T, unitSet) : null,
-        s.P != null ? convert("P", s.P, unitSet) : null,
-        s.molar_flow != null ? convert("flow", s.molar_flow, unitSet) : null,
-        s.phase, s.vapor_fraction,
-        ...Object.values(s.z ?? {}),
-      ]),
+      ...streams.map((s) => {
+        const m = streamMassFlow(s.z, s.molar_flow, mw);
+        return [
+          s.id,
+          s.T != null ? toDisplay("temperature", s.T, unitSet) : null,
+          s.P != null ? toDisplay("pressure", s.P, unitSet) : null,
+          s.molar_flow != null ? toDisplay("molar_flow", s.molar_flow, unitSet) : null,
+          m != null ? toDisplay("mass_flow", m, unitSet) : null,
+          s.phase, s.vapor_fraction,
+          ...Object.values(s.z ?? {}),
+        ];
+      }),
     ],
     "streams.csv",
   );
@@ -112,9 +121,10 @@ export function StreamTable() {
           <thead>
             <tr>
               <th>stream</th>
-              <th>T / {unitOf("T", unitSet)}</th>
-              <th>P / {unitOf("P", unitSet)}</th>
-              <th>n / {unitOf("flow", unitSet)}</th>
+              <th>T / {Tu}</th>
+              <th>P / {Pu}</th>
+              <th>n / {nu}</th>
+              <th title="mass flow">m / {mu}</th>
               <th>phase</th>
               {showComp && comps.map((c) => (
                 <th key={c} title={`${c} mole fraction`}>{c}</th>
@@ -124,12 +134,14 @@ export function StreamTable() {
           <tbody>
             {streams.map((s) => {
               const total = Object.values(s.z ?? {}).reduce((a, v) => a + v, 0);
+              const m = streamMassFlow(s.z, s.molar_flow, mw);
               return (
                 <tr key={s.id}>
                   <td>{s.id}</td>
-                  <td>{fmtQty("T", s.T, unitSet)}</td>
-                  <td>{fmtQty("P", s.P, unitSet)}</td>
-                  <td>{fmtQty("flow", s.molar_flow, unitSet, 3)}</td>
+                  <td>{fmtDim("temperature", s.T, unitSet, 2)}</td>
+                  <td>{fmtDim("pressure", s.P, unitSet, 3)}</td>
+                  <td>{fmtDim("molar_flow", s.molar_flow, unitSet, 3)}</td>
+                  <td>{fmtDim("mass_flow", m, unitSet, 3)}</td>
                   <td>{s.phase ?? "—"}</td>
                   {showComp && comps.map((c) => {
                     const v = s.z?.[c];
@@ -147,10 +159,10 @@ export function StreamTable() {
       </div>
       {Object.keys(res.report.duties).length > 0 && (
         <table className="data-table mt-3">
-          <thead><tr><th>duty</th><th>{unitOf("power", unitSet)}</th></tr></thead>
+          <thead><tr><th>duty</th><th>{defaultUnit("power", unitSet)}</th></tr></thead>
           <tbody>
             {Object.entries(res.report.duties).map(([k, v]) => (
-              <tr key={k}><td>{k}</td><td>{fmtQty("power", v, unitSet)}</td></tr>
+              <tr key={k}><td>{k}</td><td>{fmtDim("power", v, unitSet, 3)}</td></tr>
             ))}
           </tbody>
         </table>
@@ -170,6 +182,7 @@ function BalanceSection() {
   const balance = useStore((s) => s.balance);
   const busy = useStore((s) => s.balanceBusy);
   const runBalance = useStore((s) => s.runBalance);
+  const unitSet = useStore((s) => s.unitSet);
   const fmtRel = (x: number) => (x < 1e-12 ? "0" : x.toExponential(1));
   return (
     <div className="mt-3">
@@ -182,7 +195,8 @@ function BalanceSection() {
         <>
           <table className="data-table">
             <thead>
-              <tr><th>unit</th><th>mass rel</th><th>energy rel</th><th>duty kW</th></tr>
+              <tr><th>unit</th><th>mass rel</th><th>energy rel</th>
+                <th>duty {defaultUnit("power", unitSet)}</th></tr>
             </thead>
             <tbody>
               {balance.units.map((u) => (
@@ -190,14 +204,14 @@ function BalanceSection() {
                   <td>{u.unit_id}</td>
                   <td>{fmtRel(u.mass_rel)}</td>
                   <td>{fmtRel(u.energy_rel)}</td>
-                  <td>{(u.duty_W / 1000).toFixed(1)}</td>
+                  <td>{fmtDim("power", u.duty_W, unitSet, 2)}</td>
                 </tr>
               ))}
               <tr className="font-semibold">
                 <td>overall</td>
                 <td>{fmtRel(balance.overall.mass_rel)}</td>
                 <td>{fmtRel(balance.overall.energy_rel)}</td>
-                <td>{(balance.overall.duty_W / 1000).toFixed(1)}</td>
+                <td>{fmtDim("power", balance.overall.duty_W, unitSet, 2)}</td>
               </tr>
             </tbody>
           </table>

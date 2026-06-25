@@ -6,7 +6,8 @@ import {
 } from "@xyflow/react";
 import { X } from "lucide-react";
 import { useState } from "react";
-import { compositionRows, fmtFrac } from "../lib/composition";
+import { compositionRows, fmtFrac, streamMassFlow } from "../lib/composition";
+import { defaultUnit, fmtDim } from "../lib/units";
 import { useStore, type ColorMode } from "../store";
 import type { StreamState } from "../types";
 
@@ -46,11 +47,11 @@ function edgeColor(data: StreamEdgeData | undefined, selected: boolean | undefin
   return selected ? "var(--accent)" : "var(--edge)";
 }
 
-const fmt = (x: number | null | undefined, d = 1) =>
-  x == null ? "—" : x.toLocaleString(undefined, { maximumFractionDigits: d });
-
 function Callout({ id, state, pinned }: { id: string; state: StreamState; pinned: boolean }) {
   const togglePin = useStore((s) => s.togglePin);
+  const unitSet = useStore((s) => s.unitSet);
+  const mw = useStore((s) => s.solveRes?.molar_mass);
+  const massFlow = streamMassFlow(state.z, state.molar_flow, mw);
   return (
     <div className="edge-callout nodrag nopan">
       <div className="edge-callout-head">
@@ -61,11 +62,16 @@ function Callout({ id, state, pinned }: { id: string; state: StreamState; pinned
           </button>
         )}
       </div>
-      <div>{fmt(state.T, 1)} K · {fmt(state.P != null ? state.P / 1000 : null, 0)} kPa</div>
-      <div>{fmt(state.molar_flow, 2)} mol/s · {state.phase ?? "?"}
+      <div>{fmtDim("temperature", state.T, unitSet, 1)} {defaultUnit("temperature", unitSet)}
+        {" · "}{fmtDim("pressure", state.P, unitSet, 1)} {defaultUnit("pressure", unitSet)}</div>
+      <div>{fmtDim("molar_flow", state.molar_flow, unitSet, 2)} {defaultUnit("molar_flow", unitSet)}
+        {" · "}{state.phase ?? "?"}
         {state.vapor_fraction != null && state.phase === "VLE"
           ? ` (VF ${state.vapor_fraction.toFixed(2)})` : ""}
       </div>
+      {massFlow != null && (
+        <div>{fmtDim("mass_flow", massFlow, unitSet, 2)} {defaultUnit("mass_flow", unitSet)}</div>
+      )}
       <CompositionLines state={state} />
     </div>
   );

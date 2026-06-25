@@ -7,10 +7,12 @@ import {
 } from "recharts";
 import { api } from "../api";
 import { downloadCsv } from "../lib/csv";
+import { dimFor } from "../lib/params";
+import { defaultUnit, fmtDim, toDisplay } from "../lib/units";
 import { useStore } from "../store";
 import type { FlowDoc, MetricSpec, SolveResponse } from "../types";
 import { MetricEditor, metricLabel, metricValid } from "./MetricEditor";
-import { Button, Hint, NumberInput, PanelTitle } from "./ui";
+import { Button, DimField, Hint, PanelTitle } from "./ui";
 
 const sel = "rounded-md border border-line bg-panel2 px-1.5 py-1 text-text min-w-0";
 const num = "w-[76px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text";
@@ -41,6 +43,7 @@ export function StudyPanel() {
   const toFlowDoc = useStore((s) => s.toFlowDoc);
   const backend = useStore((s) => s.backend);
   const toast = useStore((s) => s.toast);
+  const unitSet = useStore((s) => s.unitSet);
 
   const [unit, setUnit] = useState("");
   const [param, setParam] = useState("");
@@ -64,6 +67,12 @@ export function StudyPanel() {
     && Number.isFinite(from) && Number.isFinite(to) && from !== to
     && steps >= 2 && steps <= 50;
 
+  // The swept param is stored/solved in SI; convert only for display.
+  const dim = dimFor(param);
+  const xUnit = dim ? ` ${defaultUnit(dim, unitSet)}` : "";
+  const fmtX = (x: number, digits = 4) =>
+    (dim ? fmtDim(dim, x, unitSet, digits) : x.toPrecision(digits)) + xUnit;
+
   const run = async () => {
     setRunning(true);
     setPoints([]);
@@ -74,7 +83,7 @@ export function StudyPanel() {
     for (let i = 0; i < steps; i++) {
       if (abortRef.current) break;
       const x = from + ((to - from) * i) / (steps - 1);
-      setProgress(`${i + 1} / ${steps}  (${param} = ${x.toPrecision(4)})`);
+      setProgress(`${i + 1} / ${steps}  (${param} = ${fmtX(x)})`);
       try {
         const res = await api.solve(withParam(base, unit, param, x), backend);
         out.push({ x, y: res.report.converged ? evalMetric(res, metric) : null });
@@ -91,7 +100,8 @@ export function StudyPanel() {
   };
 
   const exportCsv = () => downloadCsv(
-    [[`${unit}.${param}`, metricLabel(metric)], ...points.map((p) => [p.x, p.y])],
+    [[`${unit}.${param}${dim ? ` (${defaultUnit(dim, unitSet)})` : ""}`, metricLabel(metric)],
+     ...points.map((p) => [dim ? toDisplay(dim, p.x, unitSet) : p.x, p.y])],
     "case_study.csv",
   );
 
@@ -109,9 +119,9 @@ export function StudyPanel() {
           <option value="">— param —</option>
           {paramsOf(unit).map((p) => <option key={p} value={p}>{p}</option>)}
         </select>
-        <NumberInput className={num} value={from} aria-label="From" onChange={setFrom} />
+        <DimField dim={dim} set={unitSet} className={num} value={from} aria-label="From" onChange={setFrom} />
         <span className="text-muted">→</span>
-        <NumberInput className={num} value={to} aria-label="To" onChange={setTo} />
+        <DimField dim={dim} set={unitSet} className={num} value={to} aria-label="To" onChange={setTo} />
         <label className="flex items-center gap-1 text-[11px] text-muted">
           steps
           <input className="w-[52px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text"
@@ -146,10 +156,11 @@ export function StudyPanel() {
 
       {points.length > 1 && (
         <>
-          <PanelTitle>{metricLabel(metric)} vs {unit}.{param}</PanelTitle>
+          <PanelTitle>{metricLabel(metric)} vs {unit}.{param}{dim ? ` / ${defaultUnit(dim, unitSet)}` : ""}</PanelTitle>
           <div style={{ height: 180 }}>
             <ResponsiveContainer>
-              <LineChart data={points} margin={{ top: 6, right: 10, left: 0, bottom: 0 }}>
+              <LineChart data={points.map((p) => ({ x: dim ? toDisplay(dim, p.x, unitSet) : p.x, y: p.y }))}
+                margin={{ top: 6, right: 10, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke="var(--line)" strokeDasharray="3 3" />
                 <XAxis dataKey="x" type="number" domain={["auto", "auto"]}
                   tick={{ fill: "var(--muted)", fontSize: 10 }} stroke="var(--line)"
@@ -162,7 +173,7 @@ export function StudyPanel() {
                     background: "var(--panel)", border: "1px solid var(--line)",
                     borderRadius: 6, fontSize: 11,
                   }}
-                  labelFormatter={(v) => `${param} = ${Number(v).toPrecision(5)}`}
+                  labelFormatter={(v) => `${param} = ${Number(v).toPrecision(5)}${xUnit}`}
                 />
                 <Line type="monotone" dataKey="y" stroke="var(--accent)" strokeWidth={1.6}
                   dot={{ r: 2.5 }} connectNulls={false} isAnimationActive={false} />

@@ -677,6 +677,7 @@ export const useStore = create<State>((set, get) => {
             report?: SolveResponse["report"];
             streams?: SolveResponse["streams"];
             designs?: SolveResponse["designs"];
+            molar_mass?: SolveResponse["molar_mass"];
           }
           const final = await requestOverWs<SolveEvent>(
             "/ws/solve",
@@ -689,7 +690,8 @@ export const useStore = create<State>((set, get) => {
             (e) => e.type === "result" || e.type === "error",
           );
           if (final.type === "error") throw new Error(final.detail ?? "solve failed");
-          res = { report: final.report!, streams: final.streams!, designs: final.designs };
+          res = { report: final.report!, streams: final.streams!, designs: final.designs,
+                  molar_mass: final.molar_mass };
         } catch (wsErr) {
           if ((wsErr as Error).message.includes("WebSocket")) {
             res = await api.solve(get().toFlowDoc(), get().backend);  // fallback

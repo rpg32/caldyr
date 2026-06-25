@@ -88,6 +88,9 @@ class SolveResponse(BaseModel):
     streams: dict[str, StreamState]
     # per-unit design results (column profiles, FUG numbers, fuel duty, ...)
     designs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # per-component molar mass (kg/mol) so the web can render mass flow / mass
+    # fractions from molar data; keyed by the flowsheet's component ids.
+    molar_mass: dict[str, float] = Field(default_factory=dict)
 
 
 class CostConfig(BaseModel):

@@ -3,23 +3,27 @@
 import { Check, Play, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
+import { dimFor, dimForMetric } from "../lib/params";
+import { defaultUnit, fmtDim, type UnitSet } from "../lib/units";
 import { useStore } from "../store";
 import type { ConstraintSpec, DesignVarSpec, MetricSpec, OptimizeResponse } from "../types";
 import { MetricEditor, metricValid } from "./MetricEditor";
-import { Button, Hint, NumberInput, PanelTitle } from "./ui";
+import { Button, DimField, Hint, PanelTitle } from "./ui";
 
 const sel = "rounded-md border border-line bg-panel2 px-1.5 py-1 text-text min-w-0";
 const num = "w-[72px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text";
 
 const EMPTY_METRIC: MetricSpec = { type: "flow", stream: "" };
 
-function DesignVarRow({ dv, units, paramsOf, onChange, onRemove }: {
+function DesignVarRow({ dv, units, paramsOf, set, onChange, onRemove }: {
   dv: DesignVarSpec;
   units: string[];
   paramsOf: (unit: string) => string[];
+  set: UnitSet;
   onChange: (dv: DesignVarSpec) => void;
   onRemove: () => void;
 }) {
+  const dim = dimFor(dv.param);
   return (
     <div className="my-1 flex flex-wrap items-center gap-1.5">
       <select className={sel} value={dv.unit_id} aria-label="Unit"
@@ -32,13 +36,11 @@ function DesignVarRow({ dv, units, paramsOf, onChange, onRemove }: {
         <option value="">— param —</option>
         {paramsOf(dv.unit_id).map((p) => <option key={p} value={p}>{p}</option>)}
       </select>
-      <NumberInput className={num} value={dv.lower} placeholder="min"
-        aria-label="Lower bound"
-        onChange={(v) => onChange({ ...dv, lower: v })} />
+      <DimField dim={dim} set={set} className={num} value={dv.lower} placeholder="min"
+        aria-label="Lower bound" onChange={(v) => onChange({ ...dv, lower: v })} />
       <span className="text-muted">…</span>
-      <NumberInput className={num} value={dv.upper} placeholder="max"
-        aria-label="Upper bound"
-        onChange={(v) => onChange({ ...dv, upper: v })} />
+      <DimField dim={dim} set={set} className={num} value={dv.upper} placeholder="max"
+        aria-label="Upper bound" onChange={(v) => onChange({ ...dv, upper: v })} />
       <button className="cursor-pointer p-1 text-muted hover:text-bad" onClick={onRemove}
         aria-label="Remove design variable"><Trash2 size={12} /></button>
     </div>
@@ -51,6 +53,7 @@ export function OptimizePanel() {
   const backend = useStore((s) => s.backend);
   const setParam = useStore((s) => s.setParam);
   const toast = useStore((s) => s.toast);
+  const unitSet = useStore((s) => s.unitSet);
 
   const [sense, setSense] = useState<"min" | "max">("min");
   const [objective, setObjective] = useState<MetricSpec>(EMPTY_METRIC);
@@ -113,7 +116,7 @@ export function OptimizePanel() {
 
       <PanelTitle>Design variables</PanelTitle>
       {designVars.map((dv, i) => (
-        <DesignVarRow key={i} dv={dv} units={unitIds} paramsOf={paramsOf}
+        <DesignVarRow key={i} dv={dv} units={unitIds} paramsOf={paramsOf} set={unitSet}
           onChange={(next) => setDesignVars(designVars.map((d, j) => (j === i ? next : d)))}
           onRemove={() => setDesignVars(designVars.filter((_, j) => j !== i))} />
       ))}
@@ -133,7 +136,8 @@ export function OptimizePanel() {
             <option value=">=">≥</option>
             <option value="<=">≤</option>
           </select>
-          <NumberInput className={num} value={c.value} aria-label="Constraint value"
+          <DimField dim={dimForMetric(c.metric.type)} set={unitSet} className={num}
+            value={c.value} aria-label="Constraint value"
             onChange={(v) => setConstraints(constraints.map((x, j) =>
               (j === i ? { ...x, value: v } : x)))} />
           <button className="cursor-pointer p-1 text-muted hover:text-bad"
@@ -165,11 +169,19 @@ export function OptimizePanel() {
               <tr><td>success</td><td>{String(result.success)}</td></tr>
               {/* the API reports the minimization objective; un-negate for "max" */}
               <tr><td>objective</td>
-                <td>{(sense === "max" ? -result.objective : result.objective).toPrecision(6)}</td></tr>
+                <td>{(() => {
+                  const obj = sense === "max" ? -result.objective : result.objective;
+                  const d = dimForMetric(objective.type);
+                  return d ? `${fmtDim(d, obj, unitSet, 6)} ${defaultUnit(d, unitSet)}` : obj.toPrecision(6);
+                })()}</td></tr>
               <tr><td>engine solves</td><td>{result.n_solves}</td></tr>
-              {Object.entries(result.design).map(([k, v]) => (
-                <tr key={k}><td>{k}</td><td>{v.toPrecision(6)}</td></tr>
-              ))}
+              {Object.entries(result.design).map(([k, v]) => {
+                const d = dimFor(k.slice(k.indexOf(".") + 1));
+                return (
+                  <tr key={k}><td>{k}</td>
+                    <td>{d ? `${fmtDim(d, v, unitSet, 6)} ${defaultUnit(d, unitSet)}` : v.toPrecision(6)}</td></tr>
+                );
+              })}
             </tbody>
           </table>
           <Button icon={<Check size={13} />} onClick={apply}>
