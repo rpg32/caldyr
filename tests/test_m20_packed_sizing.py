@@ -12,8 +12,6 @@ Validation references (Perry's Chemical Engineers' Handbook, 8e, sec. 14):
     flood gives ~1.25 m, agreeing with the book and with the tray sizer
     (~1.4 m) to within ~15%.
 """
-import math
-
 import pytest
 
 from caldyr.core import Component, Flowsheet
