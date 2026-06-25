@@ -191,7 +191,7 @@ function schemaApplies(e: ParamSchema, params: Record<string, unknown>, schema: 
 }
 
 const ROW_INPUT = "w-[110px] rounded-md border bg-panel2 px-2 py-1 text-right text-text";
-const ROW_SEL = "w-[120px] rounded-md border border-line bg-panel2 px-2 py-1 text-text";
+const ROW_SEL = "rounded-md border border-line bg-panel2 px-2 py-1 text-text";
 
 /** One schema-described parameter: the right widget for its type, showing the
  *  engine default until the user sets it, with a reset-to-default control. */
@@ -217,7 +217,8 @@ function SchemaParamRow({ schema, value, set, unitOverride, onUnitChange, onSet,
   let widget;
   if (schema.complex || schema.type === "json") {
     widget = (
-      <code className="max-w-[150px] truncate text-[11px] text-text" title={isSet ? JSON.stringify(value) : undefined}>
+      <code className="truncate text-right text-[11px] text-text"
+        title={isSet ? JSON.stringify(value) : undefined}>
         {isSet ? JSON.stringify(value) : "— set via .flow / Copilot"}
       </code>
     );
@@ -227,13 +228,13 @@ function SchemaParamRow({ schema, value, set, unitOverride, onUnitChange, onSet,
   } else if (schema.type === "select") {
     const opts = schema.options ?? [];
     widget = (
-      <select className={ROW_SEL} value={String(eff ?? opts[0] ?? "")} aria-label={schema.label}
+      <select className={`${ROW_SEL} w-full`} value={String(eff ?? opts[0] ?? "")} aria-label={schema.label}
         onChange={(e) => onSet(e.target.value)}>
         {opts.map((o) => <option key={o} value={o}>{o}</option>)}
       </select>
     );
   } else if (schema.type === "string") {
-    widget = <input type="text" className={`${ROW_INPUT} text-left`} value={String(eff ?? "")}
+    widget = <input type="text" className={`${ROW_SEL} w-full text-left`} value={String(eff ?? "")}
       aria-label={schema.label} onChange={(e) => onSet(e.target.value)} />;
   } else if (dim) {
     widget = (
@@ -243,30 +244,30 @@ function SchemaParamRow({ schema, value, set, unitOverride, onUnitChange, onSet,
     );
   } else {
     widget = (
-      <span className="flex items-center gap-1.5">
+      <>
         <NumberInput className={`${ROW_INPUT} ${border}`} value={numEff} min={schema.min} max={schema.max}
           aria-label={schema.label} aria-invalid={missing || outOfBounds} onChange={onSet} />
-        {schema.unit && <span className="min-w-[2.5rem] text-[11px] text-muted">{schema.unit}</span>}
-      </span>
+        <span className="w-[58px] shrink-0 text-[11px] text-muted">{schema.unit ?? ""}</span>
+      </>
     );
   }
 
   return (
-    <label className="my-1.5 flex items-center justify-between gap-2">
-      <span className={`flex items-center gap-1 ${isSet ? "text-text" : "text-muted"}`}
+    <label className="my-1.5 flex items-center gap-2">
+      <span className={`min-w-0 flex-1 truncate ${isSet ? "text-text" : "text-muted"}`}
         title={schema.help ?? schema.label}>
         {schema.label}
-        {schema.required && <span className="text-bad" title="required">*</span>}
+        {schema.required && <span className="text-bad" title="required">&nbsp;*</span>}
       </span>
-      <span className="flex items-center gap-1">
+      <span className="flex w-[174px] shrink-0 items-center justify-end gap-1.5">
         {widget}
-        {isSet && !schema.required ? (
-          <button className="cursor-pointer p-0.5 text-muted hover:text-accent" title="Reset to default"
-            aria-label={`Reset ${schema.label}`} onClick={onReset}>
-            <X size={11} />
-          </button>
-        ) : <span className="w-[15px]" aria-hidden />}
       </span>
+      {isSet && !schema.required ? (
+        <button className="shrink-0 cursor-pointer p-0.5 text-muted hover:text-accent"
+          title="Reset to default" aria-label={`Reset ${schema.label}`} onClick={onReset}>
+          <X size={11} />
+        </button>
+      ) : <span className="w-[15px] shrink-0" aria-hidden />}
     </label>
   );
 }
