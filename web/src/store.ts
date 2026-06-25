@@ -21,7 +21,8 @@ import {
 } from "./lib/persist";
 import { UNIT_SETS, type UnitSet } from "./lib/units";
 import type {
-  BalanceResult, CostResponse, FlowDoc, PropertyPackage, SolveResponse, UnitType,
+  BalanceResult, CostConfigOverrides, CostResponse, FlowDoc, PropertyPackage,
+  SolveResponse, UnitType,
 } from "./types";
 
 export type Tab = "params" | "streams" | "economics" | "optimize" | "study" | "calc" | "tools";
@@ -97,6 +98,9 @@ interface State {
   // per-field display-unit overrides, keyed by `${nodeId}:${param}` (a display
   // preference; the stored value stays SI). Falls back to the unitSet default.
   unitOverrides: Record<string, string>;
+  // per-flowsheet techno-economic assumption overrides (prices, factors, sizing,
+  // rates) sent to /cost; rides in meta.ui. Empty = engine defaults.
+  costConfig: CostConfigOverrides;
   inspectorWidth: number;
   viewMode: ViewMode;
   groups: Group[];
@@ -164,6 +168,7 @@ interface State {
   runAutoLayout: () => Promise<void>;
   setUnitSet: (u: UnitSet) => void;
   setUnitOverride: (key: string, unit: string | null) => void;
+  setCostConfig: (c: CostConfigOverrides) => void;
   setInspectorWidth: (w: number) => void;
   setViewMode: (m: ViewMode) => void;
   groupSelection: () => void;
@@ -251,6 +256,7 @@ export const useStore = create<State>((set, get) => {
     unitSet: (UNIT_SETS as string[]).includes(loadPref("units") ?? "")
       ? (loadPref("units") as UnitSet) : "SI",
     unitOverrides: {},  // per-flowsheet; restored from meta.ui on load
+    costConfig: {},     // per-flowsheet; restored from meta.ui on load
     inspectorWidth: Math.min(640, Math.max(300, Number(loadPref("panelw")) || 360)),
     viewMode: "pfd",
     groups: [],
@@ -612,7 +618,7 @@ export const useStore = create<State>((set, get) => {
       set({
         nodes: [], edges: [], components: [], product: "",
         solveRes: null, costRes: null, resultsStale: false,
-        selected: null, tab: "params", unitOverrides: {},
+        selected: null, tab: "params", unitOverrides: {}, costConfig: {},
         status: "New flowsheet — add components in the panel, then units from the palette",
       });
     },
@@ -637,6 +643,7 @@ export const useStore = create<State>((set, get) => {
           pinnedStreams: c.ui.pinned_streams ?? [],
           viewMode: (c.ui.view_mode as ViewMode) ?? "pfd",
           unitOverrides: c.ui.unit_overrides ?? {},
+          costConfig: (c.ui.cost_config as CostConfigOverrides) ?? {},
           calcs: c.ui.calcs ?? [],
           groups: (c.ui.groups as Group[]) ?? [],
           logical: c.extras.logical ?? [],
@@ -660,6 +667,7 @@ export const useStore = create<State>((set, get) => {
         pinned_streams: s.pinnedStreams,
         view_mode: s.viewMode,
         unit_overrides: s.unitOverrides,
+        cost_config: s.costConfig as Record<string, unknown>,
         calcs: s.calcs,
         groups: s.groups,
       }, { logical: s.logical, solver_hints: s.solverHints });
@@ -750,7 +758,8 @@ export const useStore = create<State>((set, get) => {
       }
       set({ busy: "cost", status: monteCarlo ? `Costing + ${monteCarlo} MC samples...` : "Costing..." });
       try {
-        const res = await api.cost(get().toFlowDoc(), get().product, monteCarlo);
+        const res = await api.cost(get().toFlowDoc(), get().product, monteCarlo,
+                                   get().costConfig);
         set({
           costRes: res,
           resultsStale: false,
@@ -792,6 +801,8 @@ export const useStore = create<State>((set, get) => {
       else next[key] = unit;
       set({ unitOverrides: next }); // persisted via meta.ui on autosave
     },
+
+    setCostConfig: (c) => set({ costConfig: c }), // persisted via meta.ui on autosave
 
     setInspectorWidth: (w) => {
       const clamped = Math.min(640, Math.max(300, Math.round(w)));
