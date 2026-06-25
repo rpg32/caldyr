@@ -1,6 +1,7 @@
 // Small presentational primitives shared across the app.
 import { Loader2 } from "lucide-react";
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from "react";
+import { commitNumericDraft, isNumericDraft } from "../lib/number";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: "default" | "primary" | "ghost";
@@ -24,6 +25,35 @@ export function Button({ variant = "default", busy, icon, children, className = 
       {busy ? <Loader2 size={14} className="animate-spin" aria-hidden /> : icon}
       {children}
     </button>
+  );
+}
+
+interface NumberInputProps
+  extends Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange" | "type"> {
+  value: number;
+  onChange: (v: number) => void;
+}
+
+/** Numeric text field that accepts leading-dot / trailing-dot / exponent input
+ *  mid-typing and commits only finite parses. Drop-in for `type="number"`. */
+export function NumberInput({ value, onChange, onBlur, ...rest }: NumberInputProps) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const display = draft ?? (Number.isFinite(value) ? String(value) : "");
+  return (
+    <input
+      {...rest}
+      type="text"
+      inputMode="decimal"
+      value={display}
+      onChange={(e) => {
+        const t = e.target.value;
+        if (!isNumericDraft(t)) return; // reject non-numeric keystrokes
+        setDraft(t);
+        const n = commitNumericDraft(t);
+        if (n !== null) onChange(n);
+      }}
+      onBlur={(e) => { setDraft(null); onBlur?.(e); }}
+    />
   );
 }
 

@@ -10,7 +10,7 @@ import { downloadCsv } from "../lib/csv";
 import { useStore } from "../store";
 import type { FlowDoc, MetricSpec, SolveResponse } from "../types";
 import { MetricEditor, metricLabel, metricValid } from "./MetricEditor";
-import { Button, Hint, PanelTitle } from "./ui";
+import { Button, Hint, NumberInput, PanelTitle } from "./ui";
 
 const sel = "rounded-md border border-line bg-panel2 px-1.5 py-1 text-text min-w-0";
 const num = "w-[76px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text";
@@ -109,11 +109,9 @@ export function StudyPanel() {
           <option value="">— param —</option>
           {paramsOf(unit).map((p) => <option key={p} value={p}>{p}</option>)}
         </select>
-        <input className={num} type="number" step="any" value={from} aria-label="From"
-          onChange={(e) => setFrom(parseFloat(e.target.value))} />
+        <NumberInput className={num} value={from} aria-label="From" onChange={setFrom} />
         <span className="text-muted">→</span>
-        <input className={num} type="number" step="any" value={to} aria-label="To"
-          onChange={(e) => setTo(parseFloat(e.target.value))} />
+        <NumberInput className={num} value={to} aria-label="To" onChange={setTo} />
         <label className="flex items-center gap-1 text-[11px] text-muted">
           steps
           <input className="w-[52px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text"

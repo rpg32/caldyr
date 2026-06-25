@@ -9,7 +9,7 @@ import {
 import { api } from "../api";
 import { useStore } from "../store";
 import type { FlowDoc, PinchResponse, PropertyTableResponse, ReliefResponse } from "../types";
-import { Badge, Button, Hint, PanelTitle } from "./ui";
+import { Badge, Button, Hint, NumberInput, PanelTitle } from "./ui";
 
 const num =
   "w-[80px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text";
@@ -88,11 +88,9 @@ function PropertyTableTool() {
       </div>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted">
         T/K
-        <input className={num} type="number" step="any" value={tMin} aria-label="T min"
-          onChange={(e) => setTMin(parseFloat(e.target.value))} />
+        <NumberInput className={num} value={tMin} aria-label="T min" onChange={setTMin} />
         →
-        <input className={num} type="number" step="any" value={tMax} aria-label="T max"
-          onChange={(e) => setTMax(parseFloat(e.target.value))} />
+        <NumberInput className={num} value={tMax} aria-label="T max" onChange={setTMax} />
         ×
         <input className="w-[48px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text"
           type="number" min={1} max={40} value={tN} aria-label="T steps"
@@ -184,8 +182,7 @@ function PinchTool() {
       <PanelTitle><Activity size={11} className="mr-1 inline" /> Heat integration (pinch)</PanelTitle>
       <div className="flex items-center gap-2 text-[11px] text-muted">
         ΔT min / K
-        <input className={num} type="number" step="any" min={0.1} value={dtMin} aria-label="dt_min"
-          onChange={(e) => setDtMin(parseFloat(e.target.value))} />
+        <NumberInput className={num} min={0.1} value={dtMin} aria-label="dt_min" onChange={setDtMin} />
         <Button variant="primary" icon={<Play size={13} />} busy={busy}
           onClick={() => void run()}>Target</Button>
       </div>
@@ -273,8 +270,7 @@ function ReliefTool() {
     <label className="flex items-center justify-between gap-2 text-[11px] text-muted">
       <span>{label}</span>
       <span className="flex items-center gap-1">
-        <input className={num} type="number" step="any" value={v} aria-label={label}
-          onChange={(e) => set(parseFloat(e.target.value))} />
+        <NumberInput className={num} value={v} aria-label={label} onChange={set} />
         <span className="w-10">{unit}</span>
       </span>
     </label>
