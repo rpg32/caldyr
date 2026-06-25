@@ -42,6 +42,16 @@ there's a Streams `units: Field/SI` toggle but **inputs ignore it** → inconsis
   next to every value, round-trip correctly (convert only at the I/O edge).
 - **Where:** `web/` inputs (`params.ts`/Inspector/Feed form) + result tables
   (Streams/Econ). Engine already SI-internal; the Streams toggle is the seed.
+- **STATUS (2026-06-25, merged `f6e7822`):** (a) ✅ + (c) ✅ done — `web/src/lib/
+  units.ts` is now a HYSYS-matched dimension registry (T/P/molar+mass flow/power/
+  UA); a global unit picker (Toolbar) drives every physical input (params, feed,
+  Study/Optimize/Logical bounds via `QuantityInput`/`DimField` + `dimFor`/
+  `dimForMetric`) and output (stream table+CSV, side panel, product node, callout,
+  duties/balance, pinch, T-profile). Mass flow + mass fractions added (API `/solve`
+  returns a per-component `molar_mass` map). **(b) per-field override dropdowns +
+  magnitude variants still TODO** — `toDisplay`/`toSI` already accept a `unit` arg,
+  so it's a per-field `<select>` step. Deferred-as-SI: ΔT_min (interval), relief
+  tool, property-table value outputs.
 
 ## 4. (UX) Guided parameter editor for ALL units — #47
 Only the column units got a typed param schema; everything else is
