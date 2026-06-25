@@ -2,6 +2,7 @@ import {
   Bot, Boxes, Calculator, CircleHelp, FilePlus2, FolderKanban, FolderOpen, Moon,
   Network, Play, Redo2, Save, Sun, Undo2,
 } from "lucide-react";
+import { UNIT_SETS, type UnitSet } from "../lib/units";
 import { useStore, type ColorMode, type ViewMode } from "../store";
 import { relaunchTour } from "./Tour";
 import { Button } from "./ui";
@@ -75,6 +76,17 @@ export function Toolbar() {
           <option value="none">none</option>
           <option value="phase">phase</option>
           <option value="temperature">temperature</option>
+        </select>
+      </label>
+      <label className="flex items-center gap-1.5 text-muted">
+        <span className="text-[11px]">units</span>
+        <select
+          className="rounded-md border border-line bg-panel2 px-2 py-1.5 text-text"
+          value={s.unitSet}
+          onChange={(e) => s.setUnitSet(e.target.value as UnitSet)}
+          title="Unit system for all inputs and outputs (engine stays SI internally)"
+        >
+          {UNIT_SETS.map((u) => <option key={u} value={u}>{u}</option>)}
         </select>
       </label>
       <div className="flex overflow-hidden rounded-md border border-line" role="radiogroup"

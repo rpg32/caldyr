@@ -2,8 +2,9 @@
 //   Set    {type:"set", target:[unit,param], source:[unit,param], multiplier, offset}
 //   Adjust {type:"adjust", vary:[unit,param], bounds:[lo,hi], spec:{...}, value, tolerance}
 import { Link2, Plus, Target, Trash2 } from "lucide-react";
+import { dimFor, dimForMetric } from "../lib/params";
 import { useStore } from "../store";
-import { NumberInput, PanelTitle } from "./ui";
+import { DimField, NumberInput, PanelTitle } from "./ui";
 
 const sel = "rounded-md border border-line bg-panel2 px-1.5 py-1 text-text min-w-0";
 const num = "w-[70px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text";
@@ -39,8 +40,11 @@ function UnitParamPicker({ value, onChange, label }: {
 }
 
 function SetEditor({ op, onChange }: { op: Op; onChange: (op: Op) => void }) {
+  const unitSet = useStore((s) => s.unitSet);
   const target = (op.target as [string, string]) ?? ["", ""];
   const source = (op.source as [string, string]) ?? ["", ""];
+  // offset shares the target param's dimension; the multiplier is dimensionless.
+  const offsetDim = dimFor(target[1]);
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <UnitParamPicker label="target" value={target}
@@ -53,7 +57,7 @@ function SetEditor({ op, onChange }: { op: Op; onChange: (op: Op) => void }) {
       <UnitParamPicker label="source" value={source}
         onChange={(v) => onChange({ ...op, source: v })} />
       <span className="text-muted">+</span>
-      <NumberInput className={num} aria-label="Offset"
+      <DimField dim={offsetDim} set={unitSet} className={num} aria-label="Offset"
         value={Number(op.offset ?? 0)}
         onChange={(v) => onChange({ ...op, offset: v })} />
     </div>
@@ -64,9 +68,12 @@ function AdjustEditor({ op, onChange }: { op: Op; onChange: (op: Op) => void }) 
   const edges = useStore((s) => s.edges);
   const components = useStore((s) => s.components);
   const solveRes = useStore((s) => s.solveRes);
+  const unitSet = useStore((s) => s.unitSet);
   const vary = (op.vary as [string, string]) ?? ["", ""];
   const bounds = (op.bounds as [number, number]) ?? [0, 1];
   const spec = (op.spec as Record<string, unknown>) ?? { type: "T", stream: "" };
+  const varyDim = dimFor(vary[1]);            // bounds share the varied param's dim
+  const specDim = dimForMetric(spec.type as string); // spec target value dim
   const dutyKeys = Object.keys(solveRes?.report.duties ?? {});
   const setSpec = (patch: Record<string, unknown>) =>
     onChange({ ...op, spec: { ...spec, ...patch } });
@@ -75,11 +82,11 @@ function AdjustEditor({ op, onChange }: { op: Op; onChange: (op: Op) => void }) 
       <span className="text-[11px] text-muted">vary</span>
       <UnitParamPicker label="vary" value={vary}
         onChange={(v) => onChange({ ...op, vary: v })} />
-      <NumberInput className={num} aria-label="Lower bound"
+      <DimField dim={varyDim} set={unitSet} className={num} aria-label="Lower bound"
         value={bounds[0]}
         onChange={(v) => onChange({ ...op, bounds: [v, bounds[1]] })} />
       <span className="text-muted">…</span>
-      <NumberInput className={num} aria-label="Upper bound"
+      <DimField dim={varyDim} set={unitSet} className={num} aria-label="Upper bound"
         value={bounds[1]}
         onChange={(v) => onChange({ ...op, bounds: [bounds[0], v] })} />
       <span className="basis-full" />
@@ -109,7 +116,7 @@ function AdjustEditor({ op, onChange }: { op: Op; onChange: (op: Op) => void }) 
         </select>
       )}
       <span className="text-muted">=</span>
-      <NumberInput className={num} aria-label="Spec value"
+      <DimField dim={specDim} set={unitSet} className={num} aria-label="Spec value"
         value={Number(op.value ?? 0)}
         onChange={(v) => onChange({ ...op, value: v })} />
     </div>

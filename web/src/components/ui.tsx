@@ -2,6 +2,7 @@
 import { Loader2 } from "lucide-react";
 import { useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from "react";
 import { commitNumericDraft, isNumericDraft } from "../lib/number";
+import { defaultUnit, toDisplay, toSI, type Dim, type UnitSet } from "../lib/units";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: "default" | "primary" | "ghost";
@@ -55,6 +56,44 @@ export function NumberInput({ value, onChange, onBlur, ...rest }: NumberInputPro
       onBlur={(e) => { setDraft(null); onBlur?.(e); }}
     />
   );
+}
+
+interface QuantityInputProps
+  extends Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange" | "type"> {
+  dim: Dim;
+  set: UnitSet;
+  unit?: string;              // display-unit override; defaults to the set default
+  value: number;              // SI base value
+  onChange: (si: number) => void; // receives the SI base value
+}
+
+/** A numeric field for a physical quantity: edits in the chosen display unit
+ *  (set default unless overridden), converts to/from the engine's SI base, and
+ *  shows the unit label. `value`/`onChange` are always SI. */
+export function QuantityInput({ dim, set, unit, value, onChange, ...rest }: QuantityInputProps) {
+  const u = unit ?? defaultUnit(dim, set);
+  // toPrecision(12) tames float noise from non-exact factors (e.g. psia) so the
+  // field doesn't show 14.696000001 after a round-trip; user edits override it.
+  const disp = Number.isFinite(value) ? Number(toDisplay(dim, value, set, u).toPrecision(12)) : NaN;
+  return (
+    <span className="flex items-center gap-1.5">
+      <NumberInput {...rest} value={disp}
+        onChange={(d) => onChange(toSI(dim, d, set, u))} />
+      <span className="min-w-[2.5rem] whitespace-nowrap text-[11px] text-muted">{u}</span>
+    </span>
+  );
+}
+
+/** A numeric field that converts to/from the unit system when `dim` is known
+ *  (e.g. a swept temperature param) and falls back to a plain SI number field
+ *  for dimensionless / unknown quantities. `value`/`onChange` are always SI. */
+export function DimField(
+  { dim, set, unit, ...rest }: { dim?: Dim; set: UnitSet; unit?: string }
+    & Omit<NumberInputProps, never>,
+) {
+  return dim
+    ? <QuantityInput dim={dim} set={set} unit={unit} {...rest} />
+    : <NumberInput {...rest} />;
 }
 
 export function PanelTitle({ children }: { children: ReactNode }) {

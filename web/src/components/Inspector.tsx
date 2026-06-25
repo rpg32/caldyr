@@ -5,8 +5,9 @@ import {
   XAxis, YAxis,
 } from "recharts";
 import { api } from "../api";
-import { compositionRows, fmtFrac } from "../lib/composition";
+import { compositionRows, fmtFrac, streamMassFlow } from "../lib/composition";
 import { PARAM_META, compositionSum, metaFor, paramApplies, validateParam } from "../lib/params";
+import { defaultUnit, fmtDim } from "../lib/units";
 import { useStore, type Tab } from "../store";
 import type { EnvelopeResponse, StreamState } from "../types";
 import { AnalysisPanel } from "./AnalysisPanel";
@@ -17,7 +18,7 @@ import { LogicalEditor } from "./LogicalEditor";
 import { OptimizePanel } from "./OptimizePanel";
 import { StreamTable } from "./StreamTable";
 import { StudyPanel } from "./StudyPanel";
-import { Button, Hint, NumberInput, PanelTitle } from "./ui";
+import { Button, Hint, NumberInput, PanelTitle, QuantityInput } from "./ui";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "params", label: "Params" },
@@ -73,30 +74,37 @@ function ParamsTab() {
   return <FlowsheetPanel />;
 }
 
-/** Numeric input with unit suffix and bounds validation. */
+/** Numeric input with unit (display-unit-aware) and bounds validation.
+ *  Dimensioned params (T/P/flow/duty/UA) edit in the active unit system; values
+ *  are always stored/validated in SI. */
 function NumField({
   paramKey, value, onChange,
 }: { paramKey: string; value: number; onChange: (v: number) => void }) {
   const meta = metaFor(paramKey);
-  const error = validateParam(paramKey, value);
+  const unitSet = useStore((s) => s.unitSet);
+  const error = validateParam(paramKey, value); // value + bounds are SI
+  const inputClass = `w-[110px] rounded-md border bg-panel2 px-2 py-1 text-right text-text ${
+    error ? "border-bad" : "border-line"
+  }`;
   return (
     <label className="my-1.5 flex items-center justify-between gap-2">
       <span className="text-muted" title={meta.label}>{meta.label}</span>
-      <span className="flex items-center gap-1.5">
-        <NumberInput
-          className={`w-[110px] rounded-md border bg-panel2 px-2 py-1 text-right text-text ${
-            error ? "border-bad" : "border-line"
-          }`}
-          value={value}
-          min={meta.min}
-          max={meta.max}
-          title={error ?? `${meta.label}${meta.unit !== "–" && meta.unit ? ` in ${meta.unit}` : ""}`}
-          aria-label={meta.label}
-          aria-invalid={!!error}
+      {meta.dim ? (
+        <QuantityInput
+          dim={meta.dim} set={unitSet} className={inputClass} value={value}
+          title={error ?? meta.label} aria-label={meta.label} aria-invalid={!!error}
           onChange={onChange}
         />
-        <span className="w-10 text-[11px] text-muted">{meta.unit}</span>
-      </span>
+      ) : (
+        <span className="flex items-center gap-1.5">
+          <NumberInput
+            className={inputClass} value={value} min={meta.min} max={meta.max}
+            title={error ?? `${meta.label}${meta.unit !== "–" && meta.unit ? ` in ${meta.unit}` : ""}`}
+            aria-label={meta.label} aria-invalid={!!error} onChange={onChange}
+          />
+          <span className="w-10 text-[11px] text-muted">{meta.unit}</span>
+        </span>
+      )}
     </label>
   );
 }
@@ -346,15 +354,20 @@ function EnvelopeChart({ env }: { env: EnvelopeResponse }) {
   );
 }
 
-/** Solved state (T/P/flow/phase/VF) + composition for one stream. */
+/** Solved state (T/P/flow/phase/VF) + composition for one stream, in the active
+ *  unit system. Mass flow / mass fractions use the /solve molar-mass map. */
 function StreamReadout({ state }: { state: StreamState }) {
+  const unitSet = useStore((s) => s.unitSet);
+  const mw = useStore((s) => s.solveRes?.molar_mass);
+  const massFlow = streamMassFlow(state.z, state.molar_flow, mw);
   return (
     <>
       <table className="data-table">
         <tbody>
-          <tr><td>T</td><td>{state.T?.toFixed(2) ?? "—"} K</td></tr>
-          <tr><td>P</td><td>{state.P != null ? (state.P / 1000).toFixed(1) : "—"} kPa</td></tr>
-          <tr><td>flow</td><td>{state.molar_flow?.toFixed(3) ?? "—"} mol/s</td></tr>
+          <tr><td>T</td><td>{fmtDim("temperature", state.T, unitSet, 2)} {defaultUnit("temperature", unitSet)}</td></tr>
+          <tr><td>P</td><td>{fmtDim("pressure", state.P, unitSet, 3)} {defaultUnit("pressure", unitSet)}</td></tr>
+          <tr><td>molar flow</td><td>{fmtDim("molar_flow", state.molar_flow, unitSet, 4)} {defaultUnit("molar_flow", unitSet)}</td></tr>
+          <tr><td>mass flow</td><td>{fmtDim("mass_flow", massFlow, unitSet, 4)} {defaultUnit("mass_flow", unitSet)}</td></tr>
           <tr><td>phase</td><td>{state.phase ?? "—"}</td></tr>
           <tr><td>vapor frac</td><td>{state.vapor_fraction?.toFixed(3) ?? "—"}</td></tr>
         </tbody>
@@ -364,22 +377,32 @@ function StreamReadout({ state }: { state: StreamState }) {
   );
 }
 
-function CompositionTable({ state }: { state: { z?: Record<string, number>; molar_flow: number | null } }) {
-  const rows = compositionRows(state.z, state.molar_flow);
+function CompositionTable({ state }: { state: StreamState }) {
+  const unitSet = useStore((s) => s.unitSet);
+  const mw = useStore((s) => s.solveRes?.molar_mass);
+  const rows = compositionRows(state.z, state.molar_flow, mw);
   if (!rows.length) return null;
+  const flowUnit = defaultUnit("molar_flow", unitSet);
+  const haveMass = rows.some((r) => r.massFrac != null);
   return (
     <div className="mt-2">
-      <PanelTitle>Composition (mole)</PanelTitle>
+      <PanelTitle>Composition</PanelTitle>
       <table className="data-table">
         <thead>
-          <tr><th>component</th><th>mole frac</th><th>mol/s</th></tr>
+          <tr>
+            <th>component</th>
+            <th title="mole fraction">mole frac</th>
+            {haveMass && <th title="mass fraction">mass frac</th>}
+            <th title={`molar flow (${flowUnit})`}>{flowUnit}</th>
+          </tr>
         </thead>
         <tbody>
           {rows.map((r) => (
             <tr key={r.comp}>
               <td>{r.comp}</td>
               <td>{fmtFrac(r.frac)}</td>
-              <td>{r.flow != null ? r.flow.toLocaleString(undefined, { maximumFractionDigits: 3 }) : "—"}</td>
+              {haveMass && <td>{r.massFrac != null ? fmtFrac(r.massFrac) : "—"}</td>}
+              <td>{fmtDim("molar_flow", r.flow, unitSet, 4)}</td>
             </tr>
           ))}
         </tbody>

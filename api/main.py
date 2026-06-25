@@ -60,6 +60,22 @@ def _stream_dict(s) -> dict:
     }
 
 
+def _molar_mass_map(fs) -> dict:
+    """Per-component molar mass (kg/mol) for the flowsheet's components, so the
+    web client can render mass flow / mass fractions from molar data. Covers
+    every species in the flowsheet (not just the curated catalog); skips any id
+    the chemicals db can't resolve rather than failing the solve."""
+    from caldyr.core.components_db import UnknownComponentError, molar_mass
+
+    out: dict = {}
+    for cid in fs.component_ids:
+        try:
+            out[cid] = molar_mass(cid)
+        except UnknownComponentError:
+            continue
+    return out
+
+
 def _designs_dict(fs) -> dict:
     """JSON-safe per-unit design results (column profiles, FUG numbers, ...)."""
     import json as _json
@@ -179,6 +195,7 @@ def solve(req: SolveRequest) -> SolveResponse:
         "report": _report_dict(report),
         "streams": {sid: _stream_dict(s) for sid, s in fs.streams.items()},
         "designs": _designs_dict(fs),
+        "molar_mass": _molar_mass_map(fs),
     })
 
 
@@ -527,7 +544,8 @@ async def ws_solve(ws: WebSocket) -> None:
                         "report": _report_dict(report),
                         "streams": {sid: _stream_dict(s)
                                     for sid, s in fs.streams.items()},
-                        "designs": _designs_dict(fs)}
+                        "designs": _designs_dict(fs),
+                        "molar_mass": _molar_mass_map(fs)}
 
             task = loop.run_in_executor(None, job)
             while True:

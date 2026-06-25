@@ -5,6 +5,7 @@ import {
   CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip,
   XAxis, YAxis,
 } from "recharts";
+import { defaultUnit, toDisplay } from "../lib/units";
 import { useStore } from "../store";
 import { PanelTitle } from "./ui";
 
@@ -58,6 +59,7 @@ function StageChart({ data, lines, yLabel }: {
 export function DesignPanel({ unitId }: { unitId: string }) {
   const design = useStore((s) => s.solveRes?.designs?.[unitId]);
   const components = useStore((s) => s.components);
+  const unitSet = useStore((s) => s.unitSet);
 
   const { scalars, tProfile, xProfile } = useMemo(() => {
     const scalars: [string, number][] = [];
@@ -69,7 +71,7 @@ export function DesignPanel({ unitId }: { unitId: string }) {
       }
       const T = design.T_profile ?? design.T;
       if (isNumArray(T)) {
-        tProfile = T.map((t, i) => ({ stage: i + 1, T: t }));
+        tProfile = T.map((t, i) => ({ stage: i + 1, T: toDisplay("temperature", t, unitSet) }));
       }
       const x = design.x_profile ?? design.x;
       if (isDictRows(x)) {
@@ -93,7 +95,7 @@ export function DesignPanel({ unitId }: { unitId: string }) {
       }
     }
     return { scalars, tProfile, xProfile };
-  }, [design, components]);
+  }, [design, components, unitSet]);
 
   if (!design) return null;
 
@@ -117,7 +119,7 @@ export function DesignPanel({ unitId }: { unitId: string }) {
         <>
           <PanelTitle>Temperature profile</PanelTitle>
           <StageChart data={tProfile} lines={[{ key: "T", color: "var(--accent)" }]}
-            yLabel="T / K" />
+            yLabel={`T / ${defaultUnit("temperature", unitSet)}`} />
         </>
       )}
       {xProfile && (

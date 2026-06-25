@@ -2,12 +2,15 @@
 // Keys match the names the engine reads from `unit.params` (see engine/caldyr/unitops).
 // Unknown keys still render as generic numeric fields.
 
+import type { Dim } from "./units";
+
 // Widget kind for a param. Defaults to "number" when omitted.
 export type ParamType = "number" | "boolean" | "select";
 
 export interface ParamMeta {
   label: string;
-  unit: string;       // shown as a suffix; engine is SI throughout
+  unit: string;       // SI unit label; shown as a suffix for dimensionless params
+  dim?: Dim;          // physical dimension → unit-system conversion applies
   min?: number;
   max?: number;
   hint?: string;
@@ -19,26 +22,26 @@ export interface ParamMeta {
 }
 
 export const PARAM_META: Record<string, ParamMeta> = {
-  T: { label: "Temperature", unit: "K", min: 1 },
-  T_out: { label: "Outlet temperature", unit: "K", min: 1 },
-  T_hot_out: { label: "Hot outlet T", unit: "K", min: 1 },
-  T_cold_out: { label: "Cold outlet T", unit: "K", min: 1 },
-  P: { label: "Pressure", unit: "Pa", min: 0 },
-  P_out: { label: "Outlet pressure", unit: "Pa", min: 0 },
-  dP: { label: "Pressure drop", unit: "Pa", min: 0 },
-  dP_hot: { label: "Hot-side ΔP", unit: "Pa", min: 0 },
-  dP_cold: { label: "Cold-side ΔP", unit: "Pa", min: 0 },
-  Q: { label: "Duty", unit: "W" },
-  duty: { label: "Duty", unit: "W" },
-  UA: { label: "UA", unit: "W/K", min: 0 },
+  T: { label: "Temperature", unit: "K", dim: "temperature", min: 1 },
+  T_out: { label: "Outlet temperature", unit: "K", dim: "temperature", min: 1 },
+  T_hot_out: { label: "Hot outlet T", unit: "K", dim: "temperature", min: 1 },
+  T_cold_out: { label: "Cold outlet T", unit: "K", dim: "temperature", min: 1 },
+  P: { label: "Pressure", unit: "Pa", dim: "pressure", min: 0 },
+  P_out: { label: "Outlet pressure", unit: "Pa", dim: "pressure", min: 0 },
+  dP: { label: "Pressure drop", unit: "Pa", dim: "pressure", min: 0 },
+  dP_hot: { label: "Hot-side ΔP", unit: "Pa", dim: "pressure", min: 0 },
+  dP_cold: { label: "Cold-side ΔP", unit: "Pa", dim: "pressure", min: 0 },
+  Q: { label: "Duty", unit: "W", dim: "power" },
+  duty: { label: "Duty", unit: "W", dim: "power" },
+  UA: { label: "UA", unit: "W/K", dim: "UA", min: 0 },
   eta: { label: "Isentropic efficiency", unit: "–", min: 0, max: 1 },
   split: { label: "Split fraction → out1", unit: "–", min: 0, max: 1 },
   conversion: { label: "Conversion", unit: "–", min: 0, max: 1 },
-  molar_flow: { label: "Molar flow", unit: "mol/s", min: 0 },
+  molar_flow: { label: "Molar flow", unit: "mol/s", dim: "molar_flow", min: 0 },
   // -- distillation column --------------------------------------------------
   n_stages: { label: "Stages", unit: "–", min: 3 },
   reflux_ratio: { label: "Reflux ratio", unit: "–", min: 0 },
-  distillate_rate: { label: "Distillate rate", unit: "mol/s", min: 0 },
+  distillate_rate: { label: "Distillate rate", unit: "mol/s", dim: "molar_flow", min: 0 },
   method: {
     label: "Solver method", unit: "", type: "select",
     options: ["bubble_point", "sum_rates", "inside_out", "naphtali_sandholm"],
@@ -51,7 +54,7 @@ export const PARAM_META: Record<string, ParamMeta> = {
     hint: "Integrated decanting condenser: the overhead settles into an organic + aqueous layer; the organic layer is refluxed in full and the aqueous layer is the distillate (anhydrous-ethanol entrainer columns).",
   },
   condenser_T: {
-    label: "Condenser T", unit: "K", min: 150, max: 1500,
+    label: "Condenser T", unit: "K", dim: "temperature", min: 150, max: 1500,
     requires: { decant_condenser: true },
     hint: "Temperature the overhead is condensed + decanted at. Required when the decant condenser is on.",
   },
@@ -64,6 +67,22 @@ export const PARAM_META: Record<string, ParamMeta> = {
 
 export const metaFor = (key: string): ParamMeta =>
   PARAM_META[key] ?? { label: key, unit: "" };
+
+/** Physical dimension of a unit-op param (for unit conversion), or undefined
+ *  for dimensionless/unknown params. */
+export const dimFor = (key: string): Dim | undefined => PARAM_META[key]?.dim;
+
+/** Dimension of a metric/spec target value (Optimize objective + constraints,
+ *  Adjust spec). Covers both the MetricSpec types and the logical-op spec types. */
+export function dimForMetric(type: string | undefined): Dim | undefined {
+  switch (type) {
+    case "T": return "temperature";
+    case "P": return "pressure";
+    case "flow": case "molar_flow": case "component_rate": return "molar_flow";
+    case "duty": return "power";
+    default: return undefined;
+  }
+}
 
 /** Whether a param applies given the current params (its `requires` predicate). */
 export function paramApplies(

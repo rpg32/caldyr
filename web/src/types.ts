@@ -56,6 +56,8 @@ export interface SolveResponse {
   streams: Record<string, StreamState>;
   // per-unit design results (column profiles, FUG numbers, fuel duty, ...)
   designs?: Record<string, Record<string, unknown>>;
+  // per-component molar mass (kg/mol) for mass-flow / mass-fraction display
+  molar_mass?: Record<string, number>;
 }
 
 export interface CostResponse {

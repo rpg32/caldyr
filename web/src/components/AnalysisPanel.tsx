@@ -7,6 +7,7 @@ import {
   CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { api } from "../api";
+import { defaultUnit, fmtDim } from "../lib/units";
 import { useStore } from "../store";
 import type { FlowDoc, PinchResponse, PropertyTableResponse, ReliefResponse } from "../types";
 import { Badge, Button, Hint, NumberInput, PanelTitle } from "./ui";
@@ -159,6 +160,7 @@ function PinchTool() {
   const toFlowDoc = useStore((s) => s.toFlowDoc);
   const backend = useStore((s) => s.backend);
   const toast = useStore((s) => s.toast);
+  const unitSet = useStore((s) => s.unitSet);
   const [dtMin, setDtMin] = useState(10);
   const [res, setRes] = useState<PinchResponse | null>(null);
   const [busy, setBusy] = useState(false);
@@ -194,11 +196,13 @@ function PinchTool() {
         <>
           <table className="data-table mt-2">
             <tbody>
-              <tr><td>min hot utility</td><td>{(res.qh_min / 1e6).toFixed(3)} MW</td></tr>
-              <tr><td>min cold utility</td><td>{(res.qc_min / 1e6).toFixed(3)} MW</td></tr>
-              <tr><td>recovery potential</td><td>{(res.heat_recovery_potential / 1e6).toFixed(3)} MW</td></tr>
+              <tr><td>min hot utility</td><td>{fmtDim("power", res.qh_min, unitSet, 3)} {defaultUnit("power", unitSet)}</td></tr>
+              <tr><td>min cold utility</td><td>{fmtDim("power", res.qc_min, unitSet, 3)} {defaultUnit("power", unitSet)}</td></tr>
+              <tr><td>recovery potential</td><td>{fmtDim("power", res.heat_recovery_potential, unitSet, 3)} {defaultUnit("power", unitSet)}</td></tr>
               <tr><td>pinch T (hot / cold)</td><td>
-                {res.pinch_T_hot != null ? `${res.pinch_T_hot.toFixed(1)} / ${res.pinch_T_cold?.toFixed(1)} K` : "— (threshold)"}
+                {res.pinch_T_hot != null
+                  ? `${fmtDim("temperature", res.pinch_T_hot, unitSet, 1)} / ${fmtDim("temperature", res.pinch_T_cold, unitSet, 1)} ${defaultUnit("temperature", unitSet)}`
+                  : "— (threshold)"}
               </td></tr>
             </tbody>
           </table>
