@@ -5,6 +5,7 @@ import {
   XAxis, YAxis,
 } from "recharts";
 import { api } from "../api";
+import { compositionRows, fmtFrac } from "../lib/composition";
 import { PARAM_META, compositionSum, metaFor, paramApplies, validateParam } from "../lib/params";
 import { useStore, type Tab } from "../store";
 import type { EnvelopeResponse } from "../types";
@@ -331,6 +332,30 @@ function EnvelopeChart({ env }: { env: EnvelopeResponse }) {
   );
 }
 
+function CompositionTable({ state }: { state: { z?: Record<string, number>; molar_flow: number | null } }) {
+  const rows = compositionRows(state.z, state.molar_flow);
+  if (!rows.length) return null;
+  return (
+    <div className="mt-2">
+      <PanelTitle>Composition (mole)</PanelTitle>
+      <table className="data-table">
+        <thead>
+          <tr><th>component</th><th>mole frac</th><th>mol/s</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.comp}>
+              <td>{r.comp}</td>
+              <td>{fmtFrac(r.frac)}</td>
+              <td>{r.flow != null ? r.flow.toLocaleString(undefined, { maximumFractionDigits: 3 }) : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function StreamPanel({ edgeId }: { edgeId: string }) {
   const renameEdge = useStore((s) => s.renameEdge);
   const solveRes = useStore((s) => s.solveRes);
@@ -380,6 +405,7 @@ function StreamPanel({ edgeId }: { edgeId: string }) {
               <tr><td>vapor frac</td><td>{state.vapor_fraction?.toFixed(3) ?? "—"}</td></tr>
             </tbody>
           </table>
+          <CompositionTable state={state} />
           {env && env.stream === edgeId ? (
             <EnvelopeChart env={env} />
           ) : (

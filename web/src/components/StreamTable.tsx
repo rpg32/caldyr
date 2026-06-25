@@ -2,8 +2,10 @@ import { Download, Scale } from "lucide-react";
 import {
   CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
+import { componentOrder, fmtFrac } from "../lib/composition";
 import { downloadCsv } from "../lib/csv";
 import { convert, fmtQty, unitOf, UNIT_SETS, type UnitSet } from "../lib/units";
+import { useState } from "react";
 import { useStore } from "../store";
 import { Badge, Button, Hint, PanelTitle, StaleNotice } from "./ui";
 
@@ -60,8 +62,10 @@ export function StreamTable() {
   const res = useStore((s) => s.solveRes);
   const stale = useStore((s) => s.resultsStale);
   const unitSet = useStore((s) => s.unitSet);
+  const [showComp, setShowComp] = useState(true);
   if (!res) return <Hint>Press Solve to compute the stream table.</Hint>;
   const streams = Object.values(res.streams).filter((s) => s.molar_flow != null);
+  const comps = componentOrder(streams);
 
   const exportCsv = () => downloadCsv(
     [
@@ -89,6 +93,13 @@ export function StreamTable() {
           {res.report.iterations ? ` · ${res.report.iterations} iters` : ""}
         </Badge>
         <UnitSetPicker />
+        {comps.length > 0 && (
+          <label className="flex items-center gap-1 text-[11px] text-muted">
+            <input type="checkbox" checked={showComp}
+              onChange={(e) => setShowComp(e.target.checked)} />
+            composition
+          </label>
+        )}
         <button
           className="cursor-pointer rounded-md border border-line bg-panel2 p-1 text-muted hover:border-accent"
           onClick={exportCsv} title="Export stream table as CSV" aria-label="Export CSV"
@@ -96,28 +107,44 @@ export function StreamTable() {
           <Download size={12} />
         </button>
       </div>
-      <table className="data-table">
-        <thead>
-          <tr>
-            <th>stream</th>
-            <th>T / {unitOf("T", unitSet)}</th>
-            <th>P / {unitOf("P", unitSet)}</th>
-            <th>n / {unitOf("flow", unitSet)}</th>
-            <th>phase</th>
-          </tr>
-        </thead>
-        <tbody>
-          {streams.map((s) => (
-            <tr key={s.id}>
-              <td>{s.id}</td>
-              <td>{fmtQty("T", s.T, unitSet)}</td>
-              <td>{fmtQty("P", s.P, unitSet)}</td>
-              <td>{fmtQty("flow", s.molar_flow, unitSet, 3)}</td>
-              <td>{s.phase ?? "—"}</td>
+      <div className="overflow-x-auto">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>stream</th>
+              <th>T / {unitOf("T", unitSet)}</th>
+              <th>P / {unitOf("P", unitSet)}</th>
+              <th>n / {unitOf("flow", unitSet)}</th>
+              <th>phase</th>
+              {showComp && comps.map((c) => (
+                <th key={c} title={`${c} mole fraction`}>{c}</th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {streams.map((s) => {
+              const total = Object.values(s.z ?? {}).reduce((a, v) => a + v, 0);
+              return (
+                <tr key={s.id}>
+                  <td>{s.id}</td>
+                  <td>{fmtQty("T", s.T, unitSet)}</td>
+                  <td>{fmtQty("P", s.P, unitSet)}</td>
+                  <td>{fmtQty("flow", s.molar_flow, unitSet, 3)}</td>
+                  <td>{s.phase ?? "—"}</td>
+                  {showComp && comps.map((c) => {
+                    const v = s.z?.[c];
+                    return (
+                      <td key={c}>
+                        {v != null && total > 0 ? fmtFrac(v / total) : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
       {Object.keys(res.report.duties).length > 0 && (
         <table className="data-table mt-3">
           <thead><tr><th>duty</th><th>{unitOf("power", unitSet)}</th></tr></thead>
