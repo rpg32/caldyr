@@ -48,10 +48,14 @@ there's a Streams `units: Field/SI` toggle but **inputs ignore it** → inconsis
   Study/Optimize/Logical bounds via `QuantityInput`/`DimField` + `dimFor`/
   `dimForMetric`) and output (stream table+CSV, side panel, product node, callout,
   duties/balance, pinch, T-profile). Mass flow + mass fractions added (API `/solve`
-  returns a per-component `molar_mass` map). **(b) per-field override dropdowns +
-  magnitude variants still TODO** — `toDisplay`/`toSI` already accept a `unit` arg,
-  so it's a per-field `<select>` step. Deferred-as-SI: ΔT_min (interval), relief
-  tool, property-table value outputs.
+  returns a per-component `molar_mass` map). **(b) ✅ done (merged `a4c615b`)** —
+  per-field unit-override dropdowns on every dimensioned input (params + feed) via
+  `QuantityInput`'s optional unit `<select>`; overrides keyed `${nodeId}:${param}`
+  ride in `meta.ui` (scoped per-flowsheet, autosaved, travel with the .flow);
+  picking the system-default unit clears the override. **#49 fully done.**
+  Deferred-as-SI: ΔT_min (interval), relief tool, property-table value outputs.
+  Future nicety (not requested): per-column unit override on OUTPUT tables +
+  mass-flow ENTRY for feeds.
 
 ## 4. (UX) Guided parameter editor for ALL units — #47
 Only the column units got a typed param schema; everything else is
