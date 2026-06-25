@@ -147,6 +147,35 @@ def test_analyze_ammonia_loop_end_to_end():
     assert bars[0].variable.startswith("feed price")
 
 
+def test_cost_factor_overrides_change_the_result():
+    """TEAConfig factor/utility/sizing overrides flow through; defaults reproduce
+    the validated baseline (so existing parity tests stay green)."""
+    from caldyr.economics.data import CostFactors
+
+    fs = ammonia_loop()
+    report = fs.solve(tol=1e-7, max_iter=400)
+    base = analyze(fs, report, TEAConfig())
+
+    # explicit default factors == implicit default (no behaviour change)
+    same = analyze(fs, report, TEAConfig(factors=CostFactors()))
+    assert same.profitability.lcop == pytest.approx(base.profitability.lcop, rel=1e-12)
+
+    # doubling the contingency+fee raises capital -> LCOP up
+    pricier = analyze(fs, report, TEAConfig(
+        factors=CostFactors(contingency_and_fee=2.36)))
+    assert pricier.capital.grassroots > base.capital.grassroots
+    assert pricier.profitability.lcop > base.profitability.lcop
+
+    # a higher operator salary raises fixed opex
+    labor = analyze(fs, report, TEAConfig(
+        factors=CostFactors(operator_salary=132_000.0)))
+    assert labor.opex.fixed > base.opex.fixed
+
+    # a utility price override raises utility opex
+    util = analyze(fs, report, TEAConfig(utility_prices={"fired_heat": 100.0}))
+    assert util.opex.utilities > base.opex.utilities
+
+
 def test_monte_carlo_bands_are_ordered_and_reproducible():
     fs = ammonia_loop()
     report = fs.solve(tol=1e-7, max_iter=400)

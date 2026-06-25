@@ -99,7 +99,11 @@ class CostConfig(BaseModel):
     discount_rate: float = 0.10
     project_years: int = 20
     product_component: str = "ammonia"
-    prices_per_kg: dict[str, float] | None = None
+    product_min_fraction: float = 0.5
+    prices_per_kg: dict[str, float] | None = None       # raw-material/product $/kg
+    utility_prices: dict[str, float] | None = None      # {utility: $/GJ}
+    sizing: dict[str, float] | None = None              # SizingOptions field overrides
+    factors: dict[str, float] | None = None             # CostFactors field overrides
 
 
 class CostRequest(BaseModel):

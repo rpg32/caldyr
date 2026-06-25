@@ -19,8 +19,7 @@ from .capital import CapitalEstimate
 from .sizing import EquipmentSize
 
 SECONDS_PER_HOUR = 3600.0
-SHIFTS_PER_OPERATOR = 4.5          # Turton: positions hired per shift slot
-OPERATOR_SALARY = 66_000.0         # $/yr, Turton 4e order of magnitude
+# Default COM/labor factors live in data.CostFactors (overridable per flowsheet).
 # Unit types that count as process steps in the labor correlation (Turton: no
 # pumps or vessels).
 _LABOR_UNITS = {"Heater", "FiredHeater", "AirCooler", "HeatExchanger", "Compressor",
@@ -51,8 +50,11 @@ def _feed_streams(fs):
 
 def estimate_opex(fs, sizes: list[EquipmentSize], capital: CapitalEstimate, *,
                   operating_hours: float = 8000.0,
-                  prices_per_kg: dict | None = None) -> OperatingCosts:
+                  prices_per_kg: dict | None = None,
+                  utility_prices: dict | None = None,
+                  factors: data.CostFactors | None = None) -> OperatingCosts:
     prices = {**data.PRICES_PER_KG, **(prices_per_kg or {})}
+    f = factors or data.CostFactors()
     seconds = operating_hours * SECONDS_PER_HOUR
 
     # Raw materials: each boundary feed, by component mass flow x price.
@@ -72,20 +74,22 @@ def estimate_opex(fs, sizes: list[EquipmentSize], capital: CapitalEstimate, *,
     # Utilities: each sized item's duty x price per GJ.
     ut = 0.0
     ut_detail: dict[str, float] = {}
+    up = utility_prices or {}
     for size in sizes:
         if not size.utility:
             continue
-        price_per_gj = data.UTILITIES[size.utility].price_per_GJ
+        price_per_gj = up.get(size.utility, data.UTILITIES[size.utility].price_per_GJ)
         cost = size.utility_duty_W / 1e9 * price_per_gj * seconds
         ut += cost
         ut_detail[size.utility] = ut_detail.get(size.utility, 0.0) + cost
 
-    # Fixed costs (Turton COM_d decomposition).
+    # Fixed costs (Turton COM_d decomposition; factors overridable via CostFactors).
     n_np = sum(1 for u in fs.units.values() if type(u).__name__ in _LABOR_UNITS)
-    n_ol = math.sqrt(6.29 + 0.23 * n_np)          # operators per shift
-    labor = n_ol * SHIFTS_PER_OPERATOR * OPERATOR_SALARY
+    n_ol = math.sqrt(f.labor_a + f.labor_b * n_np)          # operators per shift
+    labor = n_ol * f.shifts_per_operator * f.operator_salary
     fci = capital.grassroots
-    com_d = 0.180 * fci + 2.73 * labor + 1.23 * (ut + rm)
+    com_d = f.com_fci_factor * fci + f.com_labor_factor * labor \
+        + f.com_variable_factor * (ut + rm)
     fixed = com_d - (ut + rm)
 
     return OperatingCosts(

@@ -88,6 +88,27 @@ class Utility:
     U: float = 0.0            # W/m^2/K for sizing a heater/cooler as an exchanger
 
 
+@dataclass(frozen=True)
+class CostFactors:
+    """Capital roll-up + manufacturing-cost (COM) factors, all from Turton 4e.
+    Defaults reproduce the validated TEA; override per flowsheet for sensitivity.
+    """
+    # capital (Turton 4e Ch. 7)
+    contingency_and_fee: float = 1.18       # C_TM = 1.18·ISBL (15% cont. + 3% fee)
+    offsite_factor: float = 0.50            # C_GR adds 0.50·ΣCbm(base) (OSBL)
+    working_capital_fraction: float = 0.15  # working capital as frac of grassroots
+    # manufacturing cost COM_d (Turton 4e Ch. 8):
+    #   COM_d = com_fci·FCI + com_labor·C_OL + com_variable·(C_UT + C_RM)
+    com_fci_factor: float = 0.180
+    com_labor_factor: float = 2.73
+    com_variable_factor: float = 1.23
+    # operating-labor correlation N_OL = sqrt(labor_a + labor_b·N_np) per shift
+    labor_a: float = 6.29
+    labor_b: float = 0.23
+    shifts_per_operator: float = 4.5        # positions hired per shift slot
+    operator_salary: float = 66_000.0       # $/yr per operator
+
+
 # -- Purchased-cost correlations (Turton 4e Table A.1) ----------------------
 PURCHASED: dict[str, Purchased] = {
     "heat_exchanger": Purchased(
