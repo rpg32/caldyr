@@ -28,8 +28,10 @@ class TEAConfig:
     project_years: int = 20
     product_component: str = "ammonia"
     product_min_fraction: float = 0.5      # a "product-grade" boundary stream
-    prices_per_kg: dict | None = None
+    prices_per_kg: dict | None = None      # raw-material/product $/kg overrides
+    utility_prices: dict | None = None     # {utility: $/GJ} overrides
     sizing: SizingOptions | None = None
+    factors: data.CostFactors | None = None  # COM + capital factor overrides
 
 
 @dataclass
@@ -78,8 +80,10 @@ def evaluate_economics(fs, sizes, cfg: TEAConfig, *, capex_multiplier: float = 1
                          bare_module=c.bare_module * capex_multiplier,
                          bare_module_base=c.bare_module_base * capex_multiplier)
                  for c in costs]
-    capital = estimate_capital(costs, cfg.year)
-    opex = estimate_opex(fs, sizes, capital, operating_hours=hours, prices_per_kg=prices)
+    factors = cfg.factors or data.CostFactors()
+    capital = estimate_capital(costs, cfg.year, factors)
+    opex = estimate_opex(fs, sizes, capital, operating_hours=hours, prices_per_kg=prices,
+                         utility_prices=cfg.utility_prices, factors=factors)
 
     production = annual_production_kg(fs, cfg.product_component, cfg.product_min_fraction, hours)
     if production <= 0:

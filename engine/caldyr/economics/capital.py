@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import data
 from .costing import CostResult
 
 CONTINGENCY_AND_FEE = 1.18      # Turton 4e Eq. 7.5 (0.15 contingency + 0.03 fee)
@@ -30,13 +31,15 @@ class CapitalEstimate:
     items: list[CostResult] = field(default_factory=list)
 
 
-def estimate_capital(items: list[CostResult], year: int = 2023) -> CapitalEstimate:
+def estimate_capital(items: list[CostResult], year: int = 2023,
+                     factors: data.CostFactors | None = None) -> CapitalEstimate:
+    f = factors or data.CostFactors()
     isbl = sum(c.bare_module for c in items)
     cbm_base = sum(c.bare_module_base for c in items)
-    total_module = CONTINGENCY_AND_FEE * isbl
-    osbl = OFFSITE_FACTOR * cbm_base
+    total_module = f.contingency_and_fee * isbl
+    osbl = f.offsite_factor * cbm_base
     grassroots = total_module + osbl
-    working_capital = WORKING_CAPITAL_FRACTION * grassroots
+    working_capital = f.working_capital_fraction * grassroots
     return CapitalEstimate(
         isbl=isbl,
         total_module=total_module,

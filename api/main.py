@@ -20,8 +20,13 @@ import asyncio
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from dataclasses import asdict, fields as dc_fields, replace as dc_replace
+
 from caldyr.core import Flowsheet
 from caldyr.economics import TEAConfig, analyze, monte_carlo, tornado
+from caldyr.economics import data as econ_data
+from caldyr.economics.data import CostFactors
+from caldyr.economics.sizing import SizingOptions
 from caldyr.io import from_dict, to_dict
 from caldyr.solver import DesignVar, optimize
 from caldyr.unitops import REGISTRY
@@ -199,6 +204,48 @@ def solve(req: SolveRequest) -> SolveResponse:
     })
 
 
+def _apply_overrides(defaults, overrides: dict | None):
+    """Return a copy of a dataclass instance with only its known fields overridden."""
+    if not overrides:
+        return defaults
+    valid = {k: v for k, v in overrides.items()
+             if k in {f.name for f in dc_fields(defaults)}}
+    return dc_replace(defaults, **valid) if valid else defaults
+
+
+def _assumptions(cfg: TEAConfig, fs, res) -> dict:
+    """The numbers + correlations that drove this cost result, with citations."""
+    eff_prices = {**econ_data.PRICES_PER_KG, **(cfg.prices_per_kg or {})}
+    eff_util = {n: u.price_per_GJ for n, u in econ_data.UTILITIES.items()}
+    eff_util.update(cfg.utility_prices or {})
+    comps = list(fs.component_ids)
+    return {
+        "config": {
+            "year": cfg.year, "operating_hours": cfg.operating_hours,
+            "discount_rate": cfg.discount_rate, "project_years": cfg.project_years,
+            "product_component": cfg.product_component,
+            "product_min_fraction": cfg.product_min_fraction,
+        },
+        # prices that can apply to this flowsheet's components (raw materials/product)
+        "prices_per_kg": {c: eff_prices[c] for c in comps if c in eff_prices},
+        # utility prices for the utilities actually selected during sizing
+        "utility_prices": {s.utility: eff_util.get(s.utility)
+                           for s in res.sizes if s.utility},
+        "sizing": asdict(cfg.sizing or SizingOptions()),
+        "factors": asdict(cfg.factors or CostFactors()),
+        "citations": [
+            {"topic": "Plant cost index (CEPCI escalation)", "source": econ_data.CEPCI_SOURCE},
+            {"topic": "Raw-material / product prices", "source": econ_data.PRICES_SOURCE},
+            {"topic": "Manufacturing cost COM_d + capital roll-up factors",
+             "source": "Turton et al., Analysis Synthesis & Design of Chemical Processes 4e, Ch. 7-8"},
+            {"topic": "Equipment purchased-cost correlations + bare-module factors",
+             "source": "Turton et al. 4e, Appendix A / Ch. 7"},
+            {"topic": "Sizing heuristics (U-values, residence, flooding, capacity)",
+             "source": "Turton 4e; Seader, Separation Process Principles 3e; GPSA Engineering Data Book 13e"},
+        ],
+    }
+
+
 @app.post("/cost")
 def cost(req: CostRequest) -> dict:
     fs, report = _solve(req.flow, req.backend,
@@ -207,7 +254,11 @@ def cost(req: CostRequest) -> dict:
         year=req.config.year, operating_hours=req.config.operating_hours,
         discount_rate=req.config.discount_rate, project_years=req.config.project_years,
         product_component=req.config.product_component,
+        product_min_fraction=req.config.product_min_fraction,
         prices_per_kg=req.config.prices_per_kg,
+        utility_prices=req.config.utility_prices,
+        sizing=_apply_overrides(SizingOptions(), req.config.sizing),
+        factors=_apply_overrides(CostFactors(), req.config.factors),
     )
     try:
         res = analyze(fs, report, cfg)
@@ -237,6 +288,7 @@ def cost(req: CostRequest) -> dict:
              "utility": s.utility}
             for s, c in zip(res.sizes, res.costs)
         ],
+        "assumptions": _assumptions(cfg, fs, res),
     }
     if req.tornado:
         out["tornado"] = [

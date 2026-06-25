@@ -96,6 +96,32 @@ export interface CostResponse {
     npv: { p10: number; p50: number; p90: number; mean: number; std: number };
     lcop_samples: number[];
   };
+  assumptions?: CostAssumptions;
+}
+
+// The numbers + correlations that drove a cost result (from /cost).
+export interface CostAssumptions {
+  config: {
+    year: number; operating_hours: number; discount_rate: number;
+    project_years: number; product_component: string; product_min_fraction: number;
+  };
+  prices_per_kg: Record<string, number>;
+  utility_prices: Record<string, number>;
+  sizing: Record<string, number | string>;
+  factors: Record<string, number>;
+  citations: { topic: string; source: string }[];
+}
+
+// Editable cost-config overrides sent to /cost (all optional; engine SI/defaults).
+export interface CostConfigOverrides {
+  prices_per_kg?: Record<string, number>;
+  utility_prices?: Record<string, number>;
+  sizing?: Record<string, number>;
+  factors?: Record<string, number>;
+  discount_rate?: number;
+  operating_hours?: number;
+  project_years?: number;
+  product_component?: string;
 }
 
 // ---- optimization (mirrors api/models.py) ----

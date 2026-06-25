@@ -1,8 +1,8 @@
 // Thin client over the engine API. All physics lives server-side.
 import type {
-  BalanceResult, CostResponse, EnvelopeResponse, FlowDoc, OptimizeRequest,
-  OptimizeResponse, PinchResponse, Port, PropertyPackage, PropertyTableResponse,
-  ReliefResponse, SolveResponse, UnitType,
+  BalanceResult, CostConfigOverrides, CostResponse, EnvelopeResponse, FlowDoc,
+  OptimizeRequest, OptimizeResponse, PinchResponse, Port, PropertyPackage,
+  PropertyTableResponse, ReliefResponse, SolveResponse, UnitType,
 } from "./types";
 
 const BASE = "/api";
@@ -35,9 +35,10 @@ export const api = {
     post<Port[]>("/ports", { type, params }),
   solve: (flow: FlowDoc, backend: string) =>
     post<SolveResponse>("/solve", { flow, backend }),
-  cost: (flow: FlowDoc, product_component: string, monteCarlo = 0) =>
+  cost: (flow: FlowDoc, product_component: string, monteCarlo = 0,
+         overrides?: CostConfigOverrides) =>
     post<CostResponse>("/cost", {
-      flow, config: { product_component }, monte_carlo: monteCarlo,
+      flow, config: { product_component, ...(overrides ?? {}) }, monte_carlo: monteCarlo,
     }),
   optimize: (req: OptimizeRequest) => post<OptimizeResponse>("/optimize", req),
   envelope: (flow: FlowDoc, stream: string, n = 30) =>
