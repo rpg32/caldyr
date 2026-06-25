@@ -86,6 +86,16 @@ Costing uses heuristics and a price catalog the user can't see/edit fully.
   with the `data.py` citation.
 - **Where:** engine centralizes these in `economics/data.py` + `TEAConfig`
   (already takes `prices_per_kg`); needs API exposure + a web "Assumptions" panel.
+- **STATUS (2026-06-25, merged `07b74f0`): ✅ DONE.** Engine: the COM + capital
+  factors that were hard-coded in opex.py/capital.py are now `data.CostFactors`
+  on `TEAConfig` (+ `utility_prices`); SizingOptions was already on the config;
+  defaults reproduce the validated TEA exactly. API: `CostConfig` accepts
+  `prices_per_kg` / `utility_prices` / `sizing{}` / `factors{}` overrides and
+  `/cost` returns an `assumptions` block (effective config + the prices/utilities
+  that applied + sizing + factors + source citations). Web: a collapsible
+  **"Assumptions in this solve"** panel in the Econ tab shows + edits every value
+  in place (overrides persist per-flowsheet in `meta.ui`), with Re-cost / reset
+  and the data.py citations.
 
 ## 6. (UX) Jargon glossary + inline term explanations — #52
 Lots of acronyms (LCOP, TCI, ISBL/OSBL, CBM, COM, duty, reflux ratio, Murphree,
