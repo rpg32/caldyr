@@ -94,6 +94,9 @@ interface State {
   helperLines: HelperLines;
   fitNonce: number;
   unitSet: UnitSet;
+  // per-field display-unit overrides, keyed by `${nodeId}:${param}` (a display
+  // preference; the stored value stays SI). Falls back to the unitSet default.
+  unitOverrides: Record<string, string>;
   inspectorWidth: number;
   viewMode: ViewMode;
   groups: Group[];
@@ -159,6 +162,7 @@ interface State {
   selectAll: () => void;
   runAutoLayout: () => Promise<void>;
   setUnitSet: (u: UnitSet) => void;
+  setUnitOverride: (key: string, unit: string | null) => void;
   setInspectorWidth: (w: number) => void;
   setViewMode: (m: ViewMode) => void;
   groupSelection: () => void;
@@ -245,6 +249,7 @@ export const useStore = create<State>((set, get) => {
     fitNonce: 0,
     unitSet: (UNIT_SETS as string[]).includes(loadPref("units") ?? "")
       ? (loadPref("units") as UnitSet) : "SI",
+    unitOverrides: {},  // per-flowsheet; restored from meta.ui on load
     inspectorWidth: Math.min(640, Math.max(300, Number(loadPref("panelw")) || 360)),
     viewMode: "pfd",
     groups: [],
@@ -592,7 +597,7 @@ export const useStore = create<State>((set, get) => {
       set({
         nodes: [], edges: [], components: [], product: "",
         solveRes: null, costRes: null, resultsStale: false,
-        selected: null, tab: "params",
+        selected: null, tab: "params", unitOverrides: {},
         status: "New flowsheet — add components in the panel, then units from the palette",
       });
     },
@@ -616,6 +621,7 @@ export const useStore = create<State>((set, get) => {
           colorMode: (c.ui.color_mode as ColorMode) ?? get().colorMode,
           pinnedStreams: c.ui.pinned_streams ?? [],
           viewMode: (c.ui.view_mode as ViewMode) ?? "pfd",
+          unitOverrides: c.ui.unit_overrides ?? {},
           calcs: c.ui.calcs ?? [],
           groups: (c.ui.groups as Group[]) ?? [],
           logical: c.extras.logical ?? [],
@@ -638,6 +644,7 @@ export const useStore = create<State>((set, get) => {
         color_mode: s.colorMode,
         pinned_streams: s.pinnedStreams,
         view_mode: s.viewMode,
+        unit_overrides: s.unitOverrides,
         calcs: s.calcs,
         groups: s.groups,
       }, { logical: s.logical, solver_hints: s.solverHints });
@@ -762,6 +769,13 @@ export const useStore = create<State>((set, get) => {
     setUnitSet: (u) => {
       savePref("units", u);
       set({ unitSet: u });
+    },
+
+    setUnitOverride: (key, unit) => {
+      const next = { ...get().unitOverrides };
+      if (unit == null) delete next[key];
+      else next[key] = unit;
+      set({ unitOverrides: next }); // persisted via meta.ui on autosave
     },
 
     setInspectorWidth: (w) => {

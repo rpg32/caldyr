@@ -14,6 +14,7 @@ export interface UiMeta {
   color_mode?: string;
   pinned_streams?: string[];
   view_mode?: string;
+  unit_overrides?: Record<string, string>;
   calcs?: { name: string; expr: string }[];
   groups?: {
     id: string; label: string; members: string[];

@@ -7,7 +7,7 @@ import {
 import { api } from "../api";
 import { compositionRows, fmtFrac, streamMassFlow } from "../lib/composition";
 import { PARAM_META, compositionSum, metaFor, paramApplies, validateParam } from "../lib/params";
-import { defaultUnit, fmtDim } from "../lib/units";
+import { defaultUnit, fmtDim, unitsForDim } from "../lib/units";
 import { useStore, type Tab } from "../store";
 import type { EnvelopeResponse, StreamState } from "../types";
 import { AnalysisPanel } from "./AnalysisPanel";
@@ -78,10 +78,12 @@ function ParamsTab() {
  *  Dimensioned params (T/P/flow/duty/UA) edit in the active unit system; values
  *  are always stored/validated in SI. */
 function NumField({
-  paramKey, value, onChange,
-}: { paramKey: string; value: number; onChange: (v: number) => void }) {
+  paramKey, value, onChange, unitKey,
+}: { paramKey: string; value: number; onChange: (v: number) => void; unitKey?: string }) {
   const meta = metaFor(paramKey);
   const unitSet = useStore((s) => s.unitSet);
+  const overrides = useStore((s) => s.unitOverrides);
+  const setUnitOverride = useStore((s) => s.setUnitOverride);
   const error = validateParam(paramKey, value); // value + bounds are SI
   const inputClass = `w-[110px] rounded-md border bg-panel2 px-2 py-1 text-right text-text ${
     error ? "border-bad" : "border-line"
@@ -92,6 +94,9 @@ function NumField({
       {meta.dim ? (
         <QuantityInput
           dim={meta.dim} set={unitSet} className={inputClass} value={value}
+          unit={unitKey ? overrides[unitKey] : undefined}
+          units={unitKey ? unitsForDim(meta.dim) : undefined}
+          onUnitChange={unitKey ? (u) => setUnitOverride(unitKey, u) : undefined}
           title={error ?? meta.label} aria-label={meta.label} aria-invalid={!!error}
           onChange={onChange}
         />
@@ -151,15 +156,15 @@ function SelectField({
 
 /** Render a single unit param with the right widget for its type. */
 function ParamField({
-  paramKey, value, onChange,
-}: { paramKey: string; value: unknown; onChange: (v: unknown) => void }) {
+  paramKey, value, onChange, unitKey,
+}: { paramKey: string; value: unknown; onChange: (v: unknown) => void; unitKey?: string }) {
   const meta = metaFor(paramKey);
   if (meta.type === "boolean" || typeof value === "boolean")
     return <BoolField paramKey={paramKey} value={!!value} onChange={onChange} />;
   if (meta.type === "select")
     return <SelectField paramKey={paramKey} value={String(value ?? "")} onChange={onChange} />;
   if (typeof value === "number")
-    return <NumField paramKey={paramKey} value={value} onChange={onChange} />;
+    return <NumField paramKey={paramKey} value={value} onChange={onChange} unitKey={unitKey} />;
   // unknown non-scalar (feeds, reactions, z, ...): read-only JSON.
   return (
     <div className="my-1.5 flex items-center justify-between gap-2 text-muted">
@@ -201,6 +206,7 @@ function NodePanel({ nodeId }: { nodeId: string }) {
         <>
           {(["T", "P", "molar_flow"] as const).map((k) => (
             <NumField key={k} paramKey={k} value={Number(p[k] ?? 0)}
+              unitKey={`${node.id}:${k}`}
               onChange={(v) => setParam(node.id, k, v)} />
           ))}
           <CompositionEditor nodeId={node.id} z={(p.z as Record<string, number>) ?? {}}
@@ -215,7 +221,7 @@ function NodePanel({ nodeId }: { nodeId: string }) {
           {Object.entries(p)
             .filter(([k]) => paramApplies(k, p))
             .map(([k, v]) => (
-              <ParamField key={k} paramKey={k} value={v}
+              <ParamField key={k} paramKey={k} value={v} unitKey={`${node.id}:${k}`}
                 onChange={(nv) => setParam(node.id, k, nv)} />
             ))}
           {/* Conditionally-revealed params not yet set (e.g. enabling the decant
@@ -223,7 +229,7 @@ function NodePanel({ nodeId }: { nodeId: string }) {
           {Object.keys(PARAM_META)
             .filter((k) => !(k in p) && PARAM_META[k].requires && paramApplies(k, p))
             .map((k) => (
-              <ParamField key={k} paramKey={k} value={revealValue(k)}
+              <ParamField key={k} paramKey={k} value={revealValue(k)} unitKey={`${node.id}:${k}`}
                 onChange={(nv) => setParam(node.id, k, nv)} />
             ))}
           {Object.keys(p).length === 0 && (

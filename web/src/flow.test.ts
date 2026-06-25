@@ -129,6 +129,15 @@ describe("canvasToFlow ∘ flowToCanvas round-trip", () => {
       .toEqual(meta.boundary_xy.MAKEUP);
   });
 
+  it("round-trips per-field unit overrides through meta.ui", () => {
+    const withUnits = canvasToFlow(c.nodes, c.edges, c.components, c.propertyPackage,
+      { unit_overrides: { "PREHEAT:T_out": "°F", "MAKEUP:P": "bar" } });
+    const meta = (withUnits.meta as { ui: { unit_overrides?: Record<string, string> } }).ui;
+    expect(meta.unit_overrides).toEqual({ "PREHEAT:T_out": "°F", "MAKEUP:P": "bar" });
+    const back = flowToCanvas(withUnits, UNIT_TYPES);
+    expect(back.ui.unit_overrides).toEqual({ "PREHEAT:T_out": "°F", "MAKEUP:P": "bar" });
+  });
+
   it("is a fixed point: a second round-trip yields the identical document", () => {
     const c2 = flowToCanvas(doc, UNIT_TYPES);
     const doc2 = canvasToFlow(c2.nodes, c2.edges, c2.components, c2.propertyPackage);
