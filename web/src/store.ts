@@ -138,6 +138,7 @@ interface State {
   removeComponent: (id: string) => void;
   addUnit: (kind: "unit" | "feed" | "product", unitType?: UnitType) => void;
   setParam: (nodeId: string, key: string, value: unknown) => void;
+  unsetParam: (nodeId: string, key: string) => void;
   refreshPorts: (nodeId: string) => void;
   renameNode: (id: string, next: string) => boolean;
   renameEdge: (id: string, next: string) => boolean;
@@ -438,6 +439,20 @@ export const useStore = create<State>((set, get) => {
           n.id === nodeId
             ? { ...n, data: { ...n.data, params: { ...n.data.params, [key]: value } } }
             : n),
+      });
+      get().refreshPorts(nodeId);
+    },
+
+    unsetParam: (nodeId, key) => {
+      commit(`unset:${nodeId}:${key}`);
+      markStale();
+      set({
+        nodes: get().nodes.map((n) => {
+          if (n.id !== nodeId) return n;
+          const params = { ...n.data.params };
+          delete params[key];
+          return { ...n, data: { ...n.data, params } };
+        }),
       });
       get().refreshPorts(nodeId);
     },

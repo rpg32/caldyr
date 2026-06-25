@@ -6,10 +6,10 @@ import {
 } from "recharts";
 import { api } from "../api";
 import { compositionRows, fmtFrac, streamMassFlow } from "../lib/composition";
-import { PARAM_META, compositionSum, metaFor, paramApplies, validateParam } from "../lib/params";
-import { defaultUnit, fmtDim, unitsForDim } from "../lib/units";
+import { compositionSum, metaFor, paramApplies, validateParam } from "../lib/params";
+import { defaultUnit, fmtDim, unitsForDim, type Dim, type UnitSet } from "../lib/units";
 import { useStore, type Tab } from "../store";
-import type { EnvelopeResponse, StreamState } from "../types";
+import type { EnvelopeResponse, ParamSchema, StreamState } from "../types";
 import { AnalysisPanel } from "./AnalysisPanel";
 import { CalcPanel } from "./CalcPanel";
 import { DesignPanel } from "./DesignPanel";
@@ -176,12 +176,171 @@ function ParamField({
   );
 }
 
-/** Starting value for a conditionally-revealed param not yet in the unit. */
-function revealValue(paramKey: string): unknown {
-  const meta = metaFor(paramKey);
-  if (meta.type === "select") return meta.options?.[0] ?? "";
-  if (meta.type === "boolean") return false;
-  return NaN; // empty number field — prompts the user to fill it
+// -- guided unit-parameter editor (schema-driven, from /unit-types) -----------
+
+/** Effective value of a schema param: explicit value if set, else its default. */
+function effective(name: string, params: Record<string, unknown>, schema: ParamSchema[]): unknown {
+  if (name in params) return params[name];
+  return schema.find((s) => s.name === name)?.default;
+}
+
+/** Whether a schema param applies given the current params (its `requires`). */
+function schemaApplies(e: ParamSchema, params: Record<string, unknown>, schema: ParamSchema[]): boolean {
+  if (!e.requires) return true;
+  return Object.entries(e.requires).every(([k, v]) => effective(k, params, schema) === v);
+}
+
+const ROW_INPUT = "w-[110px] rounded-md border bg-panel2 px-2 py-1 text-right text-text";
+const ROW_SEL = "w-[120px] rounded-md border border-line bg-panel2 px-2 py-1 text-text";
+
+/** One schema-described parameter: the right widget for its type, showing the
+ *  engine default until the user sets it, with a reset-to-default control. */
+function SchemaParamRow({ schema, value, set, unitOverride, onUnitChange, onSet, onReset }: {
+  schema: ParamSchema;
+  value: unknown;                       // explicit value, or undefined (= default)
+  set: UnitSet;
+  unitOverride?: string;
+  onUnitChange: (u: string | null) => void;
+  onSet: (v: unknown) => void;
+  onReset: () => void;
+}) {
+  const isSet = value !== undefined;
+  const eff = isSet ? value : schema.default;
+  const missing = !!schema.required && !isSet && schema.default === undefined;
+  const numEff = typeof eff === "number" ? eff : NaN;
+  const outOfBounds = typeof eff === "number"
+    && ((schema.min !== undefined && eff < schema.min)
+      || (schema.max !== undefined && eff > schema.max));
+  const border = missing || outOfBounds ? "border-bad" : "border-line";
+  const dim = schema.dim as Dim | undefined;
+
+  let widget;
+  if (schema.complex || schema.type === "json") {
+    widget = (
+      <code className="max-w-[150px] truncate text-[11px] text-text" title={isSet ? JSON.stringify(value) : undefined}>
+        {isSet ? JSON.stringify(value) : "— set via .flow / Copilot"}
+      </code>
+    );
+  } else if (schema.type === "boolean") {
+    widget = <input type="checkbox" className="h-4 w-4 accent-accent" checked={!!eff}
+      aria-label={schema.label} onChange={(e) => onSet(e.target.checked)} />;
+  } else if (schema.type === "select") {
+    const opts = schema.options ?? [];
+    widget = (
+      <select className={ROW_SEL} value={String(eff ?? opts[0] ?? "")} aria-label={schema.label}
+        onChange={(e) => onSet(e.target.value)}>
+        {opts.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    );
+  } else if (schema.type === "string") {
+    widget = <input type="text" className={`${ROW_INPUT} text-left`} value={String(eff ?? "")}
+      aria-label={schema.label} onChange={(e) => onSet(e.target.value)} />;
+  } else if (dim) {
+    widget = (
+      <QuantityInput dim={dim} set={set} className={`${ROW_INPUT} ${border}`} value={numEff}
+        unit={unitOverride} units={unitsForDim(dim)} onUnitChange={onUnitChange}
+        aria-label={schema.label} aria-invalid={missing || outOfBounds} onChange={onSet} />
+    );
+  } else {
+    widget = (
+      <span className="flex items-center gap-1.5">
+        <NumberInput className={`${ROW_INPUT} ${border}`} value={numEff} min={schema.min} max={schema.max}
+          aria-label={schema.label} aria-invalid={missing || outOfBounds} onChange={onSet} />
+        {schema.unit && <span className="min-w-[2.5rem] text-[11px] text-muted">{schema.unit}</span>}
+      </span>
+    );
+  }
+
+  return (
+    <label className="my-1.5 flex items-center justify-between gap-2">
+      <span className={`flex items-center gap-1 ${isSet ? "text-text" : "text-muted"}`}
+        title={schema.help ?? schema.label}>
+        {schema.label}
+        {schema.required && <span className="text-bad" title="required">*</span>}
+      </span>
+      <span className="flex items-center gap-1">
+        {widget}
+        {isSet && !schema.required ? (
+          <button className="cursor-pointer p-0.5 text-muted hover:text-accent" title="Reset to default"
+            aria-label={`Reset ${schema.label}`} onClick={onReset}>
+            <X size={11} />
+          </button>
+        ) : <span className="w-[15px]" aria-hidden />}
+      </span>
+    </label>
+  );
+}
+
+/** Schema-driven parameter form for a unit op: shows every available parameter
+ *  (with its default, units and help), validates, and lets you reset overrides
+ *  and remove unknown extras. Falls back to the free-text editor if a unit has
+ *  no schema. */
+function UnitParamsEditor({ nodeId, unitType, params }: {
+  nodeId: string; unitType: string; params: Record<string, unknown>;
+}) {
+  const schema = useStore((s) => s.unitTypes.find((t) => t.type === unitType)?.params ?? []);
+  const setParam = useStore((s) => s.setParam);
+  const unsetParam = useStore((s) => s.unsetParam);
+  const unitSet = useStore((s) => s.unitSet);
+  const overrides = useStore((s) => s.unitOverrides);
+  const setUnitOverride = useStore((s) => s.setUnitOverride);
+
+  if (schema.length === 0) return <LegacyParams nodeId={nodeId} params={params} />;
+
+  const schemaNames = new Set(schema.map((s) => s.name));
+  const visible = schema.filter((e) => schemaApplies(e, params, schema));
+  const extras = Object.keys(params).filter((k) => !schemaNames.has(k));
+
+  return (
+    <>
+      {visible.map((e) => (
+        <SchemaParamRow key={e.name} schema={e}
+          value={e.name in params ? params[e.name] : undefined}
+          set={unitSet} unitOverride={overrides[`${nodeId}:${e.name}`]}
+          onUnitChange={(u) => setUnitOverride(`${nodeId}:${e.name}`, u)}
+          onSet={(v) => setParam(nodeId, e.name, v)}
+          onReset={() => unsetParam(nodeId, e.name)} />
+      ))}
+      {extras.length > 0 && (
+        <>
+          <PanelTitle>Extra parameters</PanelTitle>
+          {extras.map((k) => (
+            <div key={k}
+              className="my-1 flex items-center gap-2 rounded-md border border-warn/40 bg-warn/5 px-2 py-1">
+              <span className="text-[12px] text-warn" title="Not a known parameter for this unit type">{k}</span>
+              <code className="ml-auto max-w-[130px] truncate text-[11px] text-text">{JSON.stringify(params[k])}</code>
+              <button className="cursor-pointer p-0.5 text-muted hover:text-bad"
+                onClick={() => unsetParam(nodeId, k)} aria-label={`Remove ${k}`}>
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </>
+      )}
+    </>
+  );
+}
+
+/** Legacy free-text editor — only for unit types without a published schema. */
+function LegacyParams({ nodeId, params }: { nodeId: string; params: Record<string, unknown> }) {
+  const setParam = useStore((s) => s.setParam);
+  const unsetParam = useStore((s) => s.unsetParam);
+  return (
+    <>
+      {Object.entries(params).filter(([k]) => paramApplies(k, params)).map(([k, v]) => (
+        <div key={k} className="flex items-center gap-1">
+          <div className="flex-1"><ParamField paramKey={k} value={v} unitKey={`${nodeId}:${k}`}
+            onChange={(nv) => setParam(nodeId, k, nv)} /></div>
+          <button className="cursor-pointer p-0.5 text-muted hover:text-bad"
+            onClick={() => unsetParam(nodeId, k)} aria-label={`Remove ${k}`}><X size={12} /></button>
+        </div>
+      ))}
+      {Object.keys(params).length === 0 && (
+        <Hint>No parameters set — this unit will use engine defaults.</Hint>
+      )}
+      <AddParam nodeId={nodeId} existing={Object.keys(params)} />
+    </>
+  );
 }
 
 function NodePanel({ nodeId }: { nodeId: string }) {
@@ -216,26 +375,7 @@ function NodePanel({ nodeId }: { nodeId: string }) {
 
       {node.data.kind === "unit" && (
         <>
-          {/* Params currently set, minus any whose `requires` predicate isn't met
-              (e.g. condenser_T is hidden unless decant_condenser is on). */}
-          {Object.entries(p)
-            .filter(([k]) => paramApplies(k, p))
-            .map(([k, v]) => (
-              <ParamField key={k} paramKey={k} value={v} unitKey={`${node.id}:${k}`}
-                onChange={(nv) => setParam(node.id, k, nv)} />
-            ))}
-          {/* Conditionally-revealed params not yet set (e.g. enabling the decant
-              condenser surfaces condenser_T + reflux_layer to fill in). */}
-          {Object.keys(PARAM_META)
-            .filter((k) => !(k in p) && PARAM_META[k].requires && paramApplies(k, p))
-            .map((k) => (
-              <ParamField key={k} paramKey={k} value={revealValue(k)} unitKey={`${node.id}:${k}`}
-                onChange={(nv) => setParam(node.id, k, nv)} />
-            ))}
-          {Object.keys(p).length === 0 && (
-            <Hint>No parameters set — this unit will use engine defaults.</Hint>
-          )}
-          <AddParam nodeId={node.id} existing={Object.keys(p)} />
+          <UnitParamsEditor nodeId={node.id} unitType={node.data.unitType as string} params={p} />
           <DesignPanel unitId={node.id} />
         </>
       )}
