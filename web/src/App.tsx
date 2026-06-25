@@ -52,6 +52,7 @@ function useAutosave() {
         && state.groups === prev.groups
         && state.viewMode === prev.viewMode
         && state.calcs === prev.calcs
+        && state.unitOverrides === prev.unitOverrides
       ) return;
       window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => useStore.getState().autosaveNow(), 800);

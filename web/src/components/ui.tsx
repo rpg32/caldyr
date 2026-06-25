@@ -65,13 +65,20 @@ interface QuantityInputProps
   unit?: string;              // display-unit override; defaults to the set default
   value: number;              // SI base value
   onChange: (si: number) => void; // receives the SI base value
+  // When provided, the unit label becomes a picker of these units (per-field
+  // override). onUnitChange(null) means "follow the unit set's default".
+  units?: string[];
+  onUnitChange?: (unit: string | null) => void;
 }
 
 /** A numeric field for a physical quantity: edits in the chosen display unit
  *  (set default unless overridden), converts to/from the engine's SI base, and
- *  shows the unit label. `value`/`onChange` are always SI. */
-export function QuantityInput({ dim, set, unit, value, onChange, ...rest }: QuantityInputProps) {
-  const u = unit ?? defaultUnit(dim, set);
+ *  shows (or lets you pick) the unit. `value`/`onChange` are always SI. */
+export function QuantityInput(
+  { dim, set, unit, value, onChange, units, onUnitChange, ...rest }: QuantityInputProps,
+) {
+  const def = defaultUnit(dim, set);
+  const u = unit ?? def;
   // toPrecision(12) tames float noise from non-exact factors (e.g. psia) so the
   // field doesn't show 14.696000001 after a round-trip; user edits override it.
   const disp = Number.isFinite(value) ? Number(toDisplay(dim, value, set, u).toPrecision(12)) : NaN;
@@ -79,7 +86,19 @@ export function QuantityInput({ dim, set, unit, value, onChange, ...rest }: Quan
     <span className="flex items-center gap-1.5">
       <NumberInput {...rest} value={disp}
         onChange={(d) => onChange(toSI(dim, d, set, u))} />
-      <span className="min-w-[2.5rem] whitespace-nowrap text-[11px] text-muted">{u}</span>
+      {units && onUnitChange ? (
+        <select
+          className="min-w-[3rem] rounded-md border border-line bg-panel2 px-1 py-0.5 text-[11px] text-muted"
+          value={u} aria-label="Unit"
+          title="Display unit for this field (the value is stored in SI)"
+          // picking the unit-set default clears the override so the field follows the system
+          onChange={(e) => onUnitChange(e.target.value === def ? null : e.target.value)}
+        >
+          {units.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+        </select>
+      ) : (
+        <span className="min-w-[2.5rem] whitespace-nowrap text-[11px] text-muted">{u}</span>
+      )}
     </span>
   );
 }
