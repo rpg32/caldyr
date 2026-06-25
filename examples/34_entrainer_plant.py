@@ -74,7 +74,12 @@ def build() -> Flowsheet:
         "reflux_layer": "organic", "max_iter": 120,
     }))
     fs.add(RigorousColumn("T101", {
-        "n_stages": 24, "feed_stage": 12, "reflux_ratio": 1.5,
+        # A3: water column resolved to reject ethanol+cyclohexane overhead and
+        # concentrate water in the bottoms (feed near the top = long stripping
+        # section; high reflux). The 62-stage T-100 sends an anhydrous bottoms, so
+        # essentially ALL the feed water reports to the aqueous draw AQ and T-101
+        # concentrates it; its draw D101 is ramped up alongside D100 below.
+        "n_stages": 30, "feed_stage": 15, "reflux_ratio": 5.0,
         "distillate_rate": 2.0, "method": "naphtali_sandholm",
         "reboiled": True, "max_iter": 120,
     }))
@@ -148,7 +153,7 @@ def main() -> None:
           f"{'EtOH bottoms (x_EtOH / water / cyc)':<38}")
     # Keep PASS 1 modest — just establish the loop at a moderate draw; the high-D
     # push is left to the longer, more robust 62-stage column in PASS 2.
-    if not _continue(fs, [(4.0, 2.0, 8.0), (7.0, 4.0, 6.0), (10.0, 6.0, 5.0)]):
+    if not _continue(fs, [(4.0, 2.0, 8.0), (7.0, 5.0, 6.0), (10.0, 7.0, 5.0)]):
         return
 
     # -- grow T-100 to 62 stages in place (stage-count continuation) ------------
@@ -179,7 +184,12 @@ def main() -> None:
     # up gently (the high-D endgame is the marginal-NS regime — see PROGRESS P6
     # TASK B — so small steps keep the recycle in its basin; a step that drifts
     # out fails fast and the continuation falls back to the last converged draw).
-    good = _continue(fs, [(10.0, 6.0, 5.0), (12.0, 7.0, 4.5), (14.0, 9.0, 4.0)])
+    # D101 is ramped up alongside D100 (A3): with the 62-stage T-100 sending an
+    # anhydrous bottoms, essentially all the feed water reports to AQ, and the
+    # retuned T-101 concentrates it — the water product climbs as D101 rises until
+    # T-101's own high-draw fold (TASK B) caps it; the continuation then falls
+    # back to the last converged draw.
+    good = _continue(fs, [(10.0, 7.0, 5.0), (12.0, 9.0, 4.5), (14.0, 11.0, 4.0)])
     if good is None:
         return
 
@@ -194,19 +204,28 @@ def main() -> None:
     d100, d101, mk0 = good
     print(f"\nInventory control (A2) — step the make-up down at D100={d100:.0f} "
           f"(bottoms cyclohexane falls):", flush=True)
-    for mkt in [mk0, 0.8 * mk0, 0.6 * mk0, 0.45 * mk0]:
+    last_mk = mk0
+    for mkt in [mk0, 0.8 * mk0, 0.6 * mk0]:
         _set(fs, d100, d101, mkt)
         try:
             rep = fs.solve(method="direct", max_iter=30)
             if not rep.converged:
                 raise RuntimeError("recycle did not converge")
         except Exception as exc:
+            # The deep-cut make-up step drifted into the lean-solvent marginal-NS
+            # endgame (TASK B). Restore the last CONVERGED make-up and re-solve so
+            # the flowsheet is left clean; guard that fallback too (a re-solve from
+            # the perturbed state can itself struggle) so the run still reports.
             print(f"  {d100:5.1f} {d101:5.1f} {mkt:4.1f}  "
                   f"{'STOP':>8}  {str(exc)[:58]}", flush=True)
-            _set(fs, d100, d101, mk0)
-            fs.solve(method="direct", max_iter=30)
+            _set(fs, d100, d101, last_mk)
+            try:
+                fs.solve(method="direct", max_iter=30)
+            except Exception:
+                pass
             break
         _row(fs, d100, d101, mkt, rep)
+        last_mk = mkt
 
     etoh, water, rec = fs.streams["ETOH"], fs.streams["WATER"], fs.streams["REC"]
     print(f"\nethanol product (T-100 bottoms): {etoh.molar_flow:.2f} mol/s, "
@@ -217,8 +236,13 @@ def main() -> None:
     print(f"cyclohexane make-up: {fs.units['MK'].design['makeup_flow']:.3f} mol/s "
           f"(recycle returns {rec.molar_flow * rec.z['cyclohexane']:.2f} mol/s)")
     print("\nThe 62-stage T-100 (grown from the converged 30-stage loop) drives "
-          "the bottoms to near-\nanhydrous ethanol; water leaves T-101 as the "
-          "heavy product and the cyclohexane recirculates.")
+          "the bottoms toward\nanhydrous ethanol (~0.91 here) with the cyclohexane "
+          "recirculating; the retuned T-101\nconcentrates the water product (~0.53 "
+          "here, up from ~0.32). Full book parity (>0.999\nEtOH / >0.95 water) "
+          "needs the high-draw operating point that sits past the decant /\nwater-"
+          "column turning-point fold (PROGRESS P6 §K/§L) — the same wall the open-"
+          "loop\ncolumn (example 33) clears but the closed recycle does not in one "
+          "solve.")
 
 
 if __name__ == "__main__":
