@@ -6,10 +6,28 @@ export interface Port {
   kind: "material" | "energy";
 }
 
+// Per-unit parameter schema served by /unit-types (engine source of truth).
+export interface ParamSchema {
+  name: string;
+  label: string;
+  type: "number" | "int" | "boolean" | "select" | "string" | "json";
+  default?: unknown;
+  required?: boolean;
+  unit?: string;                       // SI unit suffix
+  dim?: string;                        // temperature|pressure|molar_flow|power|UA
+  min?: number;
+  max?: number;
+  options?: string[];
+  requires?: Record<string, unknown>;  // show only when these params match
+  complex?: boolean;                   // list/dict value — not a scalar widget
+  help?: string;
+}
+
 export interface UnitType {
   type: string;
   doc: string;
   ports: Port[];
+  params?: ParamSchema[];
 }
 
 export interface PropertyPackage {
