@@ -36,7 +36,11 @@ def _plant() -> Flowsheet:
         "reflux_layer": "organic", "max_iter": 120,
     }))
     fs.add(RigorousColumn("T101", {
-        "n_stages": 16, "feed_stage": 8, "reflux_ratio": 1.0,
+        # A3: water column resolved enough to reject ethanol+cyclohexane overhead
+        # and concentrate water in the bottoms. The aqueous draw from T-100 is
+        # ETHANOL-rich, so T-101 needs a long stripping section (feed near the top)
+        # and a high reflux to drive the bottoms toward pure water.
+        "n_stages": 30, "feed_stage": 15, "reflux_ratio": 5.0,
         "distillate_rate": 2.0, "method": "naphtali_sandholm",
         "reboiled": True, "max_iter": 120,
     }))
@@ -68,7 +72,7 @@ def test_entrainer_plant_closes_and_concentrates_ethanol():
     fs = _plant()
     t100, t101, mk = fs.units["T100"], fs.units["T101"], fs.units["MK"]
     eth_prev = 0.0
-    for d100, d101, mkt in [(4.0, 2.0, 8.0), (7.0, 4.0, 6.0), (10.0, 6.0, 5.0)]:
+    for d100, d101, mkt in [(4.0, 2.0, 8.0), (7.0, 5.0, 6.0), (10.0, 7.0, 5.0)]:
         t100.params["distillate_rate"] = d100
         t101.params["distillate_rate"] = d101
         mk.params["target"] = mkt
@@ -78,6 +82,13 @@ def test_entrainer_plant_closes_and_concentrates_ethanol():
         # the entrainer concentrates ethanol in the bottoms as D rises.
         assert etoh.z["ethanol"] > eth_prev
         eth_prev = etoh.z["ethanol"]
+
+    # A3: push the water column's draw to its convergent ceiling so the water
+    # product (T-101 bottoms) concentrates — water is the heavy key while ethanol
+    # + cyclohexane leave overhead as the REC recycle.
+    t101.params["distillate_rate"] = 8.0
+    rep = fs.solve(method="direct", max_iter=30)
+    assert rep.converged, "recycle did not converge at the A3 water-draw step"
 
     # Closed-plant overall mass balance: the only streams crossing the boundary
     # are the fresh feed + the cyclohexane make-up IN, and the two product
@@ -94,6 +105,13 @@ def test_entrainer_plant_closes_and_concentrates_ethanol():
     rec = fs.streams["REC"]
     assert rec.molar_flow * rec.z["cyclohexane"] > 0.5
     assert etoh.z["ethanol"] > 0.78        # ~0.79 at D100=10 (trending anhydrous)
+    # A3: the retuned water column (n=30 / feed_stage=15 / RR=5) concentrates the
+    # water product. In this 30-stage loop it reaches ~0.64 water (up from ~0.32
+    # at the old 16-stage / RR=1 / low-draw column) — a 2x gain. Book-scale
+    # >=0.95 needs the 62-stage T-100 of example 34 (anhydrous bottoms -> ALL the
+    # water reports to the aqueous draw) AND driving D101 past T-101's own
+    # high-draw fold (the TASK B wall); see PROGRESS §K/§L.
+    assert water.z["water"] > 0.60
 
 
 @pytest.mark.slow
