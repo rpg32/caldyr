@@ -6,6 +6,7 @@ import {
 } from "@xyflow/react";
 import { X } from "lucide-react";
 import { useState } from "react";
+import { compositionRows, fmtFrac } from "../lib/composition";
 import { useStore, type ColorMode } from "../store";
 import type { StreamState } from "../types";
 
@@ -65,6 +66,23 @@ function Callout({ id, state, pinned }: { id: string; state: StreamState; pinned
         {state.vapor_fraction != null && state.phase === "VLE"
           ? ` (VF ${state.vapor_fraction.toFixed(2)})` : ""}
       </div>
+      <CompositionLines state={state} />
+    </div>
+  );
+}
+
+/** Top components by mole fraction in the pinned/hover callout. */
+function CompositionLines({ state }: { state: StreamState }) {
+  const rows = compositionRows(state.z, state.molar_flow);
+  if (!rows.length) return null;
+  const shown = rows.slice(0, 4);
+  const rest = rows.length - shown.length;
+  return (
+    <div className="edge-callout-comp">
+      {shown.map((r) => (
+        <div key={r.comp}>{r.comp} {fmtFrac(r.frac)}</div>
+      ))}
+      {rest > 0 && <div>+{rest} more</div>}
     </div>
   );
 }

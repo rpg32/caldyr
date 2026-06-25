@@ -103,6 +103,10 @@ body, #root { margin: 0; height: 100vh; }
   background: none; border: 0; color: var(--muted);
 }
 .edge-callout-head button:hover { color: var(--bad); }
+.edge-callout-comp {
+  margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line);
+  color: var(--muted); font-size: 10px; line-height: 1.45;
+}
 
 /* ---- view modes & groups ---- */
 .node-bfd { min-width: 130px; min-height: 56px; justify-content: center; border-width: 2px; }
