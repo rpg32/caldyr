@@ -8,7 +8,7 @@ import { api } from "../api";
 import { compositionRows, fmtFrac } from "../lib/composition";
 import { PARAM_META, compositionSum, metaFor, paramApplies, validateParam } from "../lib/params";
 import { useStore, type Tab } from "../store";
-import type { EnvelopeResponse } from "../types";
+import type { EnvelopeResponse, StreamState } from "../types";
 import { AnalysisPanel } from "./AnalysisPanel";
 import { CalcPanel } from "./CalcPanel";
 import { DesignPanel } from "./DesignPanel";
@@ -17,7 +17,7 @@ import { LogicalEditor } from "./LogicalEditor";
 import { OptimizePanel } from "./OptimizePanel";
 import { StreamTable } from "./StreamTable";
 import { StudyPanel } from "./StudyPanel";
-import { Button, Hint, PanelTitle } from "./ui";
+import { Button, Hint, NumberInput, PanelTitle } from "./ui";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "params", label: "Params" },
@@ -83,19 +83,17 @@ function NumField({
     <label className="my-1.5 flex items-center justify-between gap-2">
       <span className="text-muted" title={meta.label}>{meta.label}</span>
       <span className="flex items-center gap-1.5">
-        <input
-          type="number"
-          step="any"
+        <NumberInput
           className={`w-[110px] rounded-md border bg-panel2 px-2 py-1 text-right text-text ${
             error ? "border-bad" : "border-line"
           }`}
-          value={Number.isNaN(value) ? "" : value}
+          value={value}
           min={meta.min}
           max={meta.max}
           title={error ?? `${meta.label}${meta.unit !== "–" && meta.unit ? ` in ${meta.unit}` : ""}`}
           aria-label={meta.label}
           aria-invalid={!!error}
-          onChange={(e) => onChange(parseFloat(e.target.value))}
+          onChange={onChange}
         />
         <span className="w-10 text-[11px] text-muted">{meta.unit}</span>
       </span>
@@ -177,6 +175,9 @@ function NodePanel({ nodeId }: { nodeId: string }) {
   const node = useStore((s) => s.nodes.find((n) => n.id === nodeId))!;
   const components = useStore((s) => s.components);
   const setParam = useStore((s) => s.setParam);
+  const inletEdge = useStore((s) => s.edges.find((e) => e.target === nodeId));
+  const inletState = useStore((s) =>
+    inletEdge ? s.solveRes?.streams[inletEdge.id] : undefined);
   const p = node.data.params;
 
   return (
@@ -226,7 +227,20 @@ function NodePanel({ nodeId }: { nodeId: string }) {
       )}
 
       {node.data.kind === "product" && (
-        <Hint>Product sink. The stream feeding it is reported by the engine after a solve.</Hint>
+        inletState ? (
+          <>
+            <div className="mb-1 text-[11px] text-muted">
+              feed stream: <span className="text-text">{inletEdge!.id}</span>
+            </div>
+            <StreamReadout state={inletState} />
+          </>
+        ) : (
+          <Hint>
+            Product sink. {inletEdge
+              ? "Press Solve to see the stream feeding it."
+              : "Connect a stream to this product, then Solve."}
+          </Hint>
+        )
       )}
     </div>
   );
@@ -252,14 +266,14 @@ function CompositionEditor({
       {components.map((c) => (
         <label key={c} className="my-1.5 flex items-center justify-between gap-2">
           <span className="text-muted">{c}</span>
-          <input
-            type="number" step="any" min={0} max={1}
+          <NumberInput
+            min={0} max={1}
             className={`w-[110px] rounded-md border bg-panel2 px-2 py-1 text-right text-text ${
               ok ? "border-line" : "border-warn"
             }`}
             value={z[c] ?? 0}
             aria-label={`Mole fraction of ${c}`}
-            onChange={(e) => setParam(nodeId, "z", { ...z, [c]: parseFloat(e.target.value) || 0 })}
+            onChange={(v) => setParam(nodeId, "z", { ...z, [c]: v })}
           />
         </label>
       ))}
@@ -332,6 +346,24 @@ function EnvelopeChart({ env }: { env: EnvelopeResponse }) {
   );
 }
 
+/** Solved state (T/P/flow/phase/VF) + composition for one stream. */
+function StreamReadout({ state }: { state: StreamState }) {
+  return (
+    <>
+      <table className="data-table">
+        <tbody>
+          <tr><td>T</td><td>{state.T?.toFixed(2) ?? "—"} K</td></tr>
+          <tr><td>P</td><td>{state.P != null ? (state.P / 1000).toFixed(1) : "—"} kPa</td></tr>
+          <tr><td>flow</td><td>{state.molar_flow?.toFixed(3) ?? "—"} mol/s</td></tr>
+          <tr><td>phase</td><td>{state.phase ?? "—"}</td></tr>
+          <tr><td>vapor frac</td><td>{state.vapor_fraction?.toFixed(3) ?? "—"}</td></tr>
+        </tbody>
+      </table>
+      <CompositionTable state={state} />
+    </>
+  );
+}
+
 function CompositionTable({ state }: { state: { z?: Record<string, number>; molar_flow: number | null } }) {
   const rows = compositionRows(state.z, state.molar_flow);
   if (!rows.length) return null;
@@ -396,16 +428,7 @@ function StreamPanel({ edgeId }: { edgeId: string }) {
       </label>
       {state ? (
         <>
-          <table className="data-table">
-            <tbody>
-              <tr><td>T</td><td>{state.T?.toFixed(2) ?? "—"} K</td></tr>
-              <tr><td>P</td><td>{state.P != null ? (state.P / 1000).toFixed(1) : "—"} kPa</td></tr>
-              <tr><td>flow</td><td>{state.molar_flow?.toFixed(3) ?? "—"} mol/s</td></tr>
-              <tr><td>phase</td><td>{state.phase ?? "—"}</td></tr>
-              <tr><td>vapor frac</td><td>{state.vapor_fraction?.toFixed(3) ?? "—"}</td></tr>
-            </tbody>
-          </table>
-          <CompositionTable state={state} />
+          <StreamReadout state={state} />
           {env && env.stream === edgeId ? (
             <EnvelopeChart env={env} />
           ) : (

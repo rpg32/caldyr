@@ -6,7 +6,7 @@ import { api } from "../api";
 import { useStore } from "../store";
 import type { ConstraintSpec, DesignVarSpec, MetricSpec, OptimizeResponse } from "../types";
 import { MetricEditor, metricValid } from "./MetricEditor";
-import { Button, Hint, PanelTitle } from "./ui";
+import { Button, Hint, NumberInput, PanelTitle } from "./ui";
 
 const sel = "rounded-md border border-line bg-panel2 px-1.5 py-1 text-text min-w-0";
 const num = "w-[72px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text";
@@ -32,13 +32,13 @@ function DesignVarRow({ dv, units, paramsOf, onChange, onRemove }: {
         <option value="">— param —</option>
         {paramsOf(dv.unit_id).map((p) => <option key={p} value={p}>{p}</option>)}
       </select>
-      <input className={num} type="number" step="any" value={dv.lower} placeholder="min"
+      <NumberInput className={num} value={dv.lower} placeholder="min"
         aria-label="Lower bound"
-        onChange={(e) => onChange({ ...dv, lower: parseFloat(e.target.value) })} />
+        onChange={(v) => onChange({ ...dv, lower: v })} />
       <span className="text-muted">…</span>
-      <input className={num} type="number" step="any" value={dv.upper} placeholder="max"
+      <NumberInput className={num} value={dv.upper} placeholder="max"
         aria-label="Upper bound"
-        onChange={(e) => onChange({ ...dv, upper: parseFloat(e.target.value) })} />
+        onChange={(v) => onChange({ ...dv, upper: v })} />
       <button className="cursor-pointer p-1 text-muted hover:text-bad" onClick={onRemove}
         aria-label="Remove design variable"><Trash2 size={12} /></button>
     </div>
@@ -133,9 +133,9 @@ export function OptimizePanel() {
             <option value=">=">≥</option>
             <option value="<=">≤</option>
           </select>
-          <input className={num} type="number" step="any" value={c.value} aria-label="Constraint value"
-            onChange={(e) => setConstraints(constraints.map((x, j) =>
-              (j === i ? { ...x, value: parseFloat(e.target.value) } : x)))} />
+          <NumberInput className={num} value={c.value} aria-label="Constraint value"
+            onChange={(v) => setConstraints(constraints.map((x, j) =>
+              (j === i ? { ...x, value: v } : x)))} />
           <button className="cursor-pointer p-1 text-muted hover:text-bad"
             onClick={() => setConstraints(constraints.filter((_, j) => j !== i))}
             aria-label="Remove constraint"><Trash2 size={12} /></button>

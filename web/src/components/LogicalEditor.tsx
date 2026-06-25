@@ -3,7 +3,7 @@
 //   Adjust {type:"adjust", vary:[unit,param], bounds:[lo,hi], spec:{...}, value, tolerance}
 import { Link2, Plus, Target, Trash2 } from "lucide-react";
 import { useStore } from "../store";
-import { PanelTitle } from "./ui";
+import { NumberInput, PanelTitle } from "./ui";
 
 const sel = "rounded-md border border-line bg-panel2 px-1.5 py-1 text-text min-w-0";
 const num = "w-[70px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text";
@@ -46,16 +46,16 @@ function SetEditor({ op, onChange }: { op: Op; onChange: (op: Op) => void }) {
       <UnitParamPicker label="target" value={target}
         onChange={(v) => onChange({ ...op, target: v })} />
       <span className="text-muted">=</span>
-      <input className={num} type="number" step="any" aria-label="Multiplier"
+      <NumberInput className={num} aria-label="Multiplier"
         value={Number(op.multiplier ?? 1)}
-        onChange={(e) => onChange({ ...op, multiplier: parseFloat(e.target.value) })} />
+        onChange={(v) => onChange({ ...op, multiplier: v })} />
       <span className="text-muted">×</span>
       <UnitParamPicker label="source" value={source}
         onChange={(v) => onChange({ ...op, source: v })} />
       <span className="text-muted">+</span>
-      <input className={num} type="number" step="any" aria-label="Offset"
+      <NumberInput className={num} aria-label="Offset"
         value={Number(op.offset ?? 0)}
-        onChange={(e) => onChange({ ...op, offset: parseFloat(e.target.value) })} />
+        onChange={(v) => onChange({ ...op, offset: v })} />
     </div>
   );
 }
@@ -75,13 +75,13 @@ function AdjustEditor({ op, onChange }: { op: Op; onChange: (op: Op) => void }) 
       <span className="text-[11px] text-muted">vary</span>
       <UnitParamPicker label="vary" value={vary}
         onChange={(v) => onChange({ ...op, vary: v })} />
-      <input className={num} type="number" step="any" aria-label="Lower bound"
+      <NumberInput className={num} aria-label="Lower bound"
         value={bounds[0]}
-        onChange={(e) => onChange({ ...op, bounds: [parseFloat(e.target.value), bounds[1]] })} />
+        onChange={(v) => onChange({ ...op, bounds: [v, bounds[1]] })} />
       <span className="text-muted">…</span>
-      <input className={num} type="number" step="any" aria-label="Upper bound"
+      <NumberInput className={num} aria-label="Upper bound"
         value={bounds[1]}
-        onChange={(e) => onChange({ ...op, bounds: [bounds[0], parseFloat(e.target.value)] })} />
+        onChange={(v) => onChange({ ...op, bounds: [bounds[0], v] })} />
       <span className="basis-full" />
       <span className="text-[11px] text-muted">until</span>
       <select className={sel} value={String(spec.type ?? "T")} aria-label="Spec type"
@@ -109,9 +109,9 @@ function AdjustEditor({ op, onChange }: { op: Op; onChange: (op: Op) => void }) 
         </select>
       )}
       <span className="text-muted">=</span>
-      <input className={num} type="number" step="any" aria-label="Spec value"
+      <NumberInput className={num} aria-label="Spec value"
         value={Number(op.value ?? 0)}
-        onChange={(e) => onChange({ ...op, value: parseFloat(e.target.value) })} />
+        onChange={(v) => onChange({ ...op, value: v })} />
     </div>
   );
 }
