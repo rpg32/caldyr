@@ -88,7 +88,7 @@ export function QuantityInput(
         onChange={(d) => onChange(toSI(dim, d, set, u))} />
       {units && onUnitChange ? (
         <select
-          className="min-w-[3rem] rounded-md border border-line bg-panel2 px-1 py-0.5 text-[11px] text-muted"
+          className="w-[58px] shrink-0 rounded-md border border-line bg-panel2 px-1 py-0.5 text-[11px] text-muted"
           value={u} aria-label="Unit"
           title="Display unit for this field (the value is stored in SI)"
           // picking the unit-set default clears the override so the field follows the system
@@ -97,7 +97,7 @@ export function QuantityInput(
           {units.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
         </select>
       ) : (
-        <span className="min-w-[2.5rem] whitespace-nowrap text-[11px] text-muted">{u}</span>
+        <span className="w-[58px] shrink-0 whitespace-nowrap text-[11px] text-muted">{u}</span>
       )}
     </span>
   );
