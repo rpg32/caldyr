@@ -244,6 +244,37 @@ export const dmePlant: FlowDoc = {
   },
 };
 
+// Book §9.5.6 (Hameed 2025): anhydrous ethanol via a cyclohexane entrainer in an
+// integrated DECANTING-CONDENSER column. The overhead ternary heteroazeotrope
+// settles into a cyclohexane-rich organic layer (refluxed in full) and an
+// ethanol/water aqueous layer (the distillate); the bottoms is near-anhydrous
+// ethanol. Predictive UNIFAC VLLE. A rigorous heteroazeotropic column — Solve
+// takes ~1 minute. (Book scale is ~62 stages; this 20-stage demo is fast.)
+export const entrainerColumn: FlowDoc = {
+  schema: "caldyr.flow/1",
+  meta: { ui: { product: "ethanol" } },
+  components: [{ id: "ethanol" }, { id: "water" }, { id: "cyclohexane" }],
+  property_package: "thermo:UNIFAC",
+  units: [
+    { id: "T100", type: "RigorousColumn",
+      params: { n_stages: 20, feeds: [{ stage: 2 }, { stage: 12 }],
+                reflux_ratio: 3.0, distillate_rate: 4.0,
+                method: "naphtali_sandholm", reboiled: true,
+                decant_condenser: true, condenser_T: 305.0,
+                reflux_layer: "organic", max_iter: 140 },
+      xy: [400, 200] },
+  ],
+  streams: [
+    { id: "SOLV", from: null, to: "T100:in1",
+      spec: { T: 298.15, P: 101325, molar_flow: 8.0, z: { cyclohexane: 1.0 } } },
+    { id: "FEED", from: null, to: "T100:in2",
+      spec: { T: 343.0, P: 101325, molar_flow: 27.8,
+              z: { ethanol: 0.87, water: 0.13 } } },
+    { id: "AQ", from: "T100:distillate", to: null },
+    { id: "ETOH", from: "T100:bottoms", to: null },
+  ],
+};
+
 export interface Template {
   name: string;
   blurb: string;
@@ -266,4 +297,6 @@ export const TEMPLATES: Template[] = [
     product: "vinyl chloride", flow: vcmPlant },
   { name: "DME plant", blurb: "Book ch. 15.2 (simplified): methanol dehydrated to dimethyl ether over an adiabatic reactor, with a two-column separation and the methanol recycle closed (PR — ChemSep has no NRTL parameters for the DME pairs).",
     product: "dimethyl ether", flow: dmePlant },
+  { name: "Anhydrous ethanol (entrainer)", blurb: "Book §9.5.6: ethanol dehydrated past its water azeotrope by a cyclohexane entrainer in an integrated DECANTING-CONDENSER column — the overhead heteroazeotrope settles into an organic (refluxed) and aqueous (distillate) layer, leaving near-anhydrous ethanol in the bottoms (predictive UNIFAC VLLE; rigorous heteroazeotropic column — Solve takes ~1 min).",
+    product: "ethanol", flow: entrainerColumn },
 ];

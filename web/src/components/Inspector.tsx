@@ -5,7 +5,7 @@ import {
   XAxis, YAxis,
 } from "recharts";
 import { api } from "../api";
-import { compositionSum, metaFor, validateParam } from "../lib/params";
+import { PARAM_META, compositionSum, metaFor, paramApplies, validateParam } from "../lib/params";
 import { useStore, type Tab } from "../store";
 import type { EnvelopeResponse } from "../types";
 import { AnalysisPanel } from "./AnalysisPanel";
@@ -102,6 +102,76 @@ function NumField({
   );
 }
 
+/** Checkbox for a boolean param (e.g. decant_condenser, reboiled). */
+function BoolField({
+  paramKey, value, onChange,
+}: { paramKey: string; value: boolean; onChange: (v: boolean) => void }) {
+  const meta = metaFor(paramKey);
+  return (
+    <label className="my-1.5 flex items-center justify-between gap-2">
+      <span className="text-muted" title={meta.hint ?? meta.label}>{meta.label}</span>
+      <input
+        type="checkbox"
+        className="h-4 w-4 accent-accent"
+        checked={!!value}
+        aria-label={meta.label}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+    </label>
+  );
+}
+
+/** Dropdown for an enumerated param (e.g. method, reflux_layer). */
+function SelectField({
+  paramKey, value, onChange,
+}: { paramKey: string; value: string; onChange: (v: string) => void }) {
+  const meta = metaFor(paramKey);
+  const opts = meta.options ?? [];
+  return (
+    <label className="my-1.5 flex items-center justify-between gap-2">
+      <span className="text-muted" title={meta.hint ?? meta.label}>{meta.label}</span>
+      <select
+        className="w-[120px] rounded-md border border-line bg-panel2 px-2 py-1 text-text"
+        value={String(value ?? opts[0] ?? "")}
+        aria-label={meta.label}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        {opts.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </label>
+  );
+}
+
+/** Render a single unit param with the right widget for its type. */
+function ParamField({
+  paramKey, value, onChange,
+}: { paramKey: string; value: unknown; onChange: (v: unknown) => void }) {
+  const meta = metaFor(paramKey);
+  if (meta.type === "boolean" || typeof value === "boolean")
+    return <BoolField paramKey={paramKey} value={!!value} onChange={onChange} />;
+  if (meta.type === "select")
+    return <SelectField paramKey={paramKey} value={String(value ?? "")} onChange={onChange} />;
+  if (typeof value === "number")
+    return <NumField paramKey={paramKey} value={value} onChange={onChange} />;
+  // unknown non-scalar (feeds, reactions, z, ...): read-only JSON.
+  return (
+    <div className="my-1.5 flex items-center justify-between gap-2 text-muted">
+      <span>{meta.label}</span>
+      <code className="max-w-[200px] overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-text">
+        {JSON.stringify(value)}
+      </code>
+    </div>
+  );
+}
+
+/** Starting value for a conditionally-revealed param not yet in the unit. */
+function revealValue(paramKey: string): unknown {
+  const meta = metaFor(paramKey);
+  if (meta.type === "select") return meta.options?.[0] ?? "";
+  if (meta.type === "boolean") return false;
+  return NaN; // empty number field — prompts the user to fill it
+}
+
 function NodePanel({ nodeId }: { nodeId: string }) {
   const node = useStore((s) => s.nodes.find((n) => n.id === nodeId))!;
   const components = useStore((s) => s.components);
@@ -130,16 +200,21 @@ function NodePanel({ nodeId }: { nodeId: string }) {
 
       {node.data.kind === "unit" && (
         <>
-          {Object.entries(p).map(([k, v]) =>
-            typeof v === "number" ? (
-              <NumField key={k} paramKey={k} value={v} onChange={(nv) => setParam(node.id, k, nv)} />
-            ) : (
-              <div key={k} className="my-1.5 flex items-center justify-between gap-2 text-muted">
-                <span>{k}</span>
-                <code className="max-w-[200px] overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-text">
-                  {JSON.stringify(v)}
-                </code>
-              </div>
+          {/* Params currently set, minus any whose `requires` predicate isn't met
+              (e.g. condenser_T is hidden unless decant_condenser is on). */}
+          {Object.entries(p)
+            .filter(([k]) => paramApplies(k, p))
+            .map(([k, v]) => (
+              <ParamField key={k} paramKey={k} value={v}
+                onChange={(nv) => setParam(node.id, k, nv)} />
+            ))}
+          {/* Conditionally-revealed params not yet set (e.g. enabling the decant
+              condenser surfaces condenser_T + reflux_layer to fill in). */}
+          {Object.keys(PARAM_META)
+            .filter((k) => !(k in p) && PARAM_META[k].requires && paramApplies(k, p))
+            .map((k) => (
+              <ParamField key={k} paramKey={k} value={revealValue(k)}
+                onChange={(nv) => setParam(node.id, k, nv)} />
             ))}
           {Object.keys(p).length === 0 && (
             <Hint>No parameters set — this unit will use engine defaults.</Hint>

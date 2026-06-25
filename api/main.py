@@ -26,6 +26,7 @@ from caldyr.io import from_dict, to_dict
 from caldyr.solver import DesignVar, optimize
 from caldyr.unitops import REGISTRY
 
+from .param_schemas import PARAM_SCHEMAS
 from .models import (
     CostRequest,
     EnvelopeRequest,
@@ -123,7 +124,7 @@ def unit_types() -> list[dict]:
         except Exception:
             ports = []
         out.append({"type": name, "doc": (cls.__doc__ or "").strip().split("\n")[0],
-                    "ports": ports})
+                    "ports": ports, "params": PARAM_SCHEMAS.get(name, [])})
     return out
 
 

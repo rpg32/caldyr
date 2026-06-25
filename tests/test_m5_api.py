@@ -94,6 +94,30 @@ def test_health_and_metadata():
     assert "thermo:NRTL" in {p["id"] for p in client.get("/property-packages").json()}
 
 
+def test_unit_type_param_schema_decant_column():
+    """RigorousColumn advertises a param schema (for the GUI's typed forms),
+    including the integrated decanting-condenser params with their conditional
+    applicability (condenser_T / reflux_layer require decant_condenser)."""
+    types = client.get("/unit-types").json()
+    # every entry carries a (possibly empty) params list
+    assert all("params" in u for u in types)
+    col = next(u for u in types if u["type"] == "RigorousColumn")
+    by_name = {p["name"]: p for p in col["params"]}
+    assert {"decant_condenser", "condenser_T", "reflux_layer", "method"} <= set(by_name)
+
+    assert by_name["decant_condenser"]["type"] == "boolean"
+    # condenser_T is conditionally required only when the decant condenser is on
+    ct = by_name["condenser_T"]
+    assert ct["type"] == "number" and ct.get("required") is True
+    assert ct["requires"] == {"decant_condenser": True}
+    # reflux_layer is an enum gated on the same predicate
+    rl = by_name["reflux_layer"]
+    assert rl["type"] == "select" and rl["options"] == ["organic", "aqueous"]
+    assert rl["requires"] == {"decant_condenser": True}
+    # the solver method is a select including naphtali_sandholm (decant needs it)
+    assert "naphtali_sandholm" in by_name["method"]["options"]
+
+
 # -- solve -----------------------------------------------------------------
 @pytest.mark.parametrize("backend", ["sequential", "equation_oriented"])
 def test_solve_mixer_heater(backend):
