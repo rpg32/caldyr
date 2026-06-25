@@ -65,6 +65,15 @@ Only the column units got a typed param schema; everything else is
   cover every unit op, OR give the "add parameter" box an autocomplete/dropdown of
   that unit's available params with description + unit + default.
 - **Source of truth:** engine unit-op `params.get(...)` keys (+ docstrings).
+- **STATUS (2026-06-25, merged `210125f`): ✅ DONE.** `api/param_schemas.py` now
+  carries a schema for ALL 36 unit ops (was RigorousColumn only), extracted from
+  each unit's `params.get` keys/defaults/bounds/docstrings and served by
+  `/unit-types`. The web Inspector (`UnitParamsEditor`/`SchemaParamRow`) shows
+  every available param with its widget, default, help, unit (+ per-field unit
+  picker) and conditional visibility; reset (×) reverts an override; there's no
+  free-text add (so typos can't create junk params); unknown/legacy params surface
+  under "Extra parameters" with a remove (×); required + out-of-bounds are flagged
+  (engine still validates at solve).
 
 ## 5. (FEATURE) Expose + make editable ALL cost/heuristic assumptions — #50
 Costing uses heuristics and a price catalog the user can't see/edit fully.
