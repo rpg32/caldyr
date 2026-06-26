@@ -219,6 +219,86 @@ export function validateReactions(
   return errors;
 }
 
+// ---- atom-balance hint (non-blocking) ----------------------------------
+//
+// Components carry a Hill-system formula (e.g. "N2", "H3N", "C6H12") from
+// GET /components. We parse it to element counts and check that Σ νᵢ·(elements)
+// is zero across the signed stoichiometry. This is advisory only — the engine
+// is balance-agnostic and lumped/pseudo-components legitimately won't balance.
+
+export type BalanceStatus = "balanced" | "unbalanced" | "unknown";
+
+export interface BalanceResult {
+  status: BalanceStatus;
+  deltas: Record<string, number>; // element -> (products − reactants); nonzero only
+  missing: string[]; // components with no parseable formula (status === "unknown")
+}
+
+// Parse a Hill formula into element counts; null if it contains anything we
+// can't interpret (charges, hydrate dots, R-groups), so the caller treats the
+// reaction as "balance unknown" rather than silently wrong.
+export function parseFormula(formula: string | undefined): Record<string, number> | null {
+  if (!formula || !/^[A-Za-z0-9()]+$/.test(formula)) return null;
+  const stack: Record<string, number>[] = [{}];
+  let i = 0;
+  while (i < formula.length) {
+    const ch = formula[i];
+    if (ch === "(") {
+      stack.push({});
+      i++;
+    } else if (ch === ")") {
+      i++;
+      let num = "";
+      while (i < formula.length && /\d/.test(formula[i])) num += formula[i++];
+      const mult = num ? parseInt(num, 10) : 1;
+      const top = stack.pop();
+      if (!top || stack.length === 0) return null;
+      const below = stack[stack.length - 1];
+      for (const [el, n] of Object.entries(top)) below[el] = (below[el] ?? 0) + n * mult;
+    } else if (/[A-Z]/.test(ch)) {
+      let sym = ch;
+      i++;
+      while (i < formula.length && /[a-z]/.test(formula[i])) sym += formula[i++];
+      let num = "";
+      while (i < formula.length && /\d/.test(formula[i])) num += formula[i++];
+      const cnt = num ? parseInt(num, 10) : 1;
+      const top = stack[stack.length - 1];
+      top[sym] = (top[sym] ?? 0) + cnt;
+    } else {
+      return null;
+    }
+  }
+  return stack.length === 1 ? stack[0] : null;
+}
+
+// Element imbalance of one draft reaction given a component-id → formula map.
+export function atomBalance(d: DraftReaction, formulaById: Record<string, string>): BalanceResult {
+  const stoich = stoichFromDraft(d);
+  const comps = Object.keys(stoich).filter((c) => stoich[c] !== 0);
+  const parsed: Record<string, Record<string, number>> = {};
+  const missing: string[] = [];
+  for (const c of comps) {
+    const els = parseFormula(formulaById[c]);
+    if (els) parsed[c] = els;
+    else missing.push(c);
+  }
+  if (missing.length > 0) return { status: "unknown", deltas: {}, missing };
+  const deltas: Record<string, number> = {};
+  for (const c of comps) {
+    for (const [el, n] of Object.entries(parsed[c])) deltas[el] = (deltas[el] ?? 0) + stoich[c] * n;
+  }
+  const nonzero: Record<string, number> = {};
+  for (const [el, v] of Object.entries(deltas)) if (Math.abs(v) > 1e-9) nonzero[el] = v;
+  return { status: Object.keys(nonzero).length > 0 ? "unbalanced" : "balanced", deltas: nonzero, missing: [] };
+}
+
+// "H: −2, N: +1" from a delta map (signed, products − reactants).
+export function formatBalanceDelta(deltas: Record<string, number>): string {
+  return Object.entries(deltas)
+    .map(([el, v]) => `${el}: ${v > 0 ? "+" : "−"}${Math.abs(Math.round(v * 1e6) / 1e6)}`)
+    .join(", ");
+}
+
 // One-line summary for the Inspector row (e.g. "1 reaction: nitrogen + 3 hydrogen → 2 ammonia").
 export function summarizeReactions(params: Record<string, unknown>): string {
   const hasAny =

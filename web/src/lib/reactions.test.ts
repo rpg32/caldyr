@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ReactionEditorOpts } from "../types";
 import {
+  atomBalance,
   emptyDraft,
+  formatBalanceDelta,
   normalizeReactions,
+  parseFormula,
   previewReaction,
   serializeReactions,
   summarizeReactions,
@@ -140,6 +143,54 @@ describe("previewReaction / summarizeReactions", () => {
     expect(
       summarizeReactions({ reactions: [{ stoich: { a: -1, b: 1 } }, { stoich: { b: -1, c: 1 } }] }),
     ).toMatch(/^2 reactions: a → b/);
+  });
+});
+
+describe("parseFormula", () => {
+  it("parses flat Hill formulae", () => {
+    expect(parseFormula("N2")).toEqual({ N: 2 });
+    expect(parseFormula("H3N")).toEqual({ H: 3, N: 1 });
+    expect(parseFormula("C6H12")).toEqual({ C: 6, H: 12 });
+    expect(parseFormula("Ar")).toEqual({ Ar: 1 });
+  });
+  it("handles parenthesised groups with multipliers", () => {
+    expect(parseFormula("Ca(OH)2")).toEqual({ Ca: 1, O: 2, H: 2 });
+  });
+  it("returns null for uninterpretable formulae", () => {
+    expect(parseFormula(undefined)).toBeNull();
+    expect(parseFormula("")).toBeNull();
+    expect(parseFormula("CuSO4·5H2O")).toBeNull(); // hydrate dot
+    expect(parseFormula("R-OH")).toBeNull();
+  });
+});
+
+describe("atomBalance", () => {
+  // Hill formulae as served by GET /components.
+  const F = { nitrogen: "N2", hydrogen: "H2", ammonia: "H3N", argon: "Ar" };
+
+  it("reports a balanced reaction", () => {
+    const d = normalizeReactions({ reaction: { stoich: { nitrogen: -1, hydrogen: -3, ammonia: 2 } } })[0];
+    expect(atomBalance(d, F)).toEqual({ status: "balanced", deltas: {}, missing: [] });
+  });
+
+  it("reports the element deltas for an unbalanced reaction", () => {
+    // N2 + H2 -> 2 NH3 : H short by 4, products carry +1 extra N pair... compute:
+    // deltas = products - reactants = N:(2*1 - 1*2)=0, H:(2*3 - 1*2)=4
+    const d = normalizeReactions({ reaction: { stoich: { nitrogen: -1, hydrogen: -1, ammonia: 2 } } })[0];
+    const r = atomBalance(d, F);
+    expect(r.status).toBe("unbalanced");
+    expect(r.deltas).toEqual({ H: 4 });
+  });
+
+  it("is unknown when a component has no parseable formula", () => {
+    const d = normalizeReactions({ reaction: { stoich: { nitrogen: -1, sludge: 1 } } })[0];
+    const r = atomBalance(d, { ...F, sludge: "R-X" });
+    expect(r.status).toBe("unknown");
+    expect(r.missing).toContain("sludge");
+  });
+
+  it("formats a signed delta string", () => {
+    expect(formatBalanceDelta({ H: 4, N: -1 })).toBe("H: +4, N: −1");
   });
 });
 

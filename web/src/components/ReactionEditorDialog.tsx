@@ -7,8 +7,9 @@
 import { Plus, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
-  emptyDraft, emptyRow, normalizeReactions, previewReaction, serializeReactions,
-  validateReactions, type DraftReaction, type DraftRow,
+  atomBalance, emptyDraft, emptyRow, formatBalanceDelta, normalizeReactions,
+  previewReaction, serializeReactions, validateReactions,
+  type DraftReaction, type DraftRow,
 } from "../lib/reactions";
 import { useStore } from "../store";
 import type { ReactionEditorOpts } from "../types";
@@ -22,7 +23,14 @@ export function ReactionEditorDialog() {
   const close = useStore((s) => s.closeReactionEditor);
   const setReactions = useStore((s) => s.setReactions);
   const components = useStore((s) => s.components);
+  const catalog = useStore((s) => s.componentCatalog);
   const node = useStore((s) => (target ? s.nodes.find((n) => n.id === target.nodeId) : undefined));
+
+  // component id -> Hill formula (for the advisory atom-balance hint).
+  const formulaById = useMemo(
+    () => Object.fromEntries(catalog.map((c) => [c.id, c.formula])),
+    [catalog],
+  );
 
   const opts = (target?.schema.editor_opts ?? {
     kind: "stoichiometric", multiple: false, conversion: false, key_required: false,
@@ -85,7 +93,7 @@ export function ReactionEditorDialog() {
 
         {drafts.map((d, i) => (
           <ReactionCard key={i} d={d} index={i} total={drafts.length} opts={opts}
-            components={components}
+            components={components} formulaById={formulaById}
             onChange={(fn) => patch(i, fn)}
             onRemove={drafts.length > 1 ? () => setDrafts((ds) => ds.filter((_, idx) => idx !== i)) : undefined} />
         ))}
@@ -110,14 +118,17 @@ export function ReactionEditorDialog() {
   );
 }
 
-function ReactionCard({ d, index, total, opts, components, onChange, onRemove }: {
+function ReactionCard({ d, index, total, opts, components, formulaById, onChange, onRemove }: {
   d: DraftReaction; index: number; total: number; opts: ReactionEditorOpts;
-  components: string[];
+  components: string[]; formulaById: Record<string, string>;
   onChange: (fn: (d: DraftReaction) => DraftReaction) => void;
   onRemove?: () => void;
 }) {
   const reactantOpts = d.reactants.map((r) => r.comp).filter(Boolean);
   const keyNeeded = opts.key_required || opts.kind === "kinetic";
+  // Advisory atom balance — only meaningful once both sides have a component.
+  const bothSides = d.reactants.some((r) => r.comp) && d.products.some((r) => r.comp);
+  const bal = bothSides ? atomBalance(d, formulaById) : null;
 
   return (
     <div className="my-2 rounded-lg border border-line bg-panel2/40 p-2.5">
@@ -141,6 +152,21 @@ function ReactionCard({ d, index, total, opts, components, onChange, onRemove }:
       <div className="mt-2 rounded-md bg-panel px-2 py-1 text-center text-[12px] text-text">
         {previewReaction(d)}
       </div>
+
+      {bal && bal.status === "unbalanced" && (
+        <div className="mt-1 text-center text-[11px] text-warn"
+          title="Advisory only — the solver does not require a balanced reaction. Lumped or pseudo-components may not balance.">
+          ⚠ Not atom-balanced — net {formatBalanceDelta(bal.deltas)} (products − reactants)
+        </div>
+      )}
+      {bal && bal.status === "balanced" && (
+        <div className="mt-1 text-center text-[11px] text-ok">✓ Atom-balanced</div>
+      )}
+      {bal && bal.status === "unknown" && (
+        <div className="mt-1 text-center text-[11px] text-muted">
+          Atom balance unchecked — no formula for {bal.missing.join(", ")}
+        </div>
+      )}
 
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5">
         {/* Key reactant is always offered (recommended for equilibrium, required
