@@ -26,6 +26,7 @@ export interface ParamSchema {
 export interface UnitType {
   type: string;
   doc: string;
+  description?: string;   // first docstring paragraph — palette tooltip
   ports: Port[];
   params?: ParamSchema[];
 }
