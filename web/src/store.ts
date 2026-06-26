@@ -22,8 +22,8 @@ import {
 } from "./lib/persist";
 import { UNIT_SETS, type UnitSet } from "./lib/units";
 import type {
-  BalanceResult, CostConfigOverrides, CostResponse, FlowDoc, PriceCatalog,
-  PropertyPackage, SolveResponse, UnitType,
+  BalanceResult, CostConfigOverrides, CostDefaults, CostResponse, FlowDoc,
+  PriceCatalog, PropertyPackage, SolveResponse, UnitType,
 } from "./types";
 
 export type Tab = "params" | "streams" | "economics" | "optimize" | "study" | "calc" | "tools";
@@ -73,6 +73,7 @@ interface State {
   packages: PropertyPackage[];
   componentCatalog: { id: string; name: string; formula: string; cas: string }[];
   priceCatalog: PriceCatalog;          // default cost prices (for pre-filling)
+  costDefaults: CostDefaults | null;   // default TEA assumptions (Settings seed)
   engineReady: boolean;
   // flowsheet
   nodes: CaldyrNode[];
@@ -123,6 +124,7 @@ interface State {
   balanceBusy: boolean;
   // projects dialog
   projectsOpen: boolean;
+  settingsOpen: boolean;
   projects: SavedProject[];
   // history & clipboard
   past: HistoryEntry[];
@@ -188,6 +190,7 @@ interface State {
   rejectPending: () => void;
   runBalance: () => Promise<void>;
   toggleProjects: () => void;
+  toggleSettings: () => void;
   saveCurrentProject: (name: string) => void;
   loadProject: (name: string) => void;
   removeProject: (name: string) => void;
@@ -238,6 +241,7 @@ export const useStore = create<State>((set, get) => {
     packages: [],
     componentCatalog: [],
     priceCatalog: { prices_per_kg: {}, utility_prices: {}, prices_source: "" },
+    costDefaults: null,
     engineReady: false,
     nodes: [],
     edges: [],
@@ -277,6 +281,7 @@ export const useStore = create<State>((set, get) => {
     balance: null,
     balanceBusy: false,
     projectsOpen: false,
+    settingsOpen: false,
     projects: listProjects(),
     past: [],
     future: [],
@@ -285,14 +290,16 @@ export const useStore = create<State>((set, get) => {
 
     init: async () => {
       try {
-        const [types, pkgs, catalog, prices] = await Promise.all([
+        const [types, pkgs, catalog, prices, costDefaults] = await Promise.all([
           api.unitTypes(), api.propertyPackages(),
           api.components().catch(() => []),  // older API: autocomplete just stays empty
           api.prices().catch(() => null),    // older API: no default price catalog
+          api.costDefaults().catch(() => null),
         ]);
         set({
           unitTypes: types, packages: pkgs, componentCatalog: catalog,
-          ...(prices ? { priceCatalog: prices } : {}), engineReady: true,
+          ...(prices ? { priceCatalog: prices } : {}),
+          ...(costDefaults ? { costDefaults } : {}), engineReady: true,
         });
         const saved = loadAutosave();
         if (saved) {
@@ -910,6 +917,7 @@ export const useStore = create<State>((set, get) => {
     toggleChat: () => set({ chatOpen: !get().chatOpen }),
 
     toggleProjects: () => set({ projectsOpen: !get().projectsOpen }),
+    toggleSettings: () => set({ settingsOpen: !get().settingsOpen }),
 
     saveCurrentProject: (name) => {
       const trimmed = name.trim();

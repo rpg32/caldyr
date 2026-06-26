@@ -1,6 +1,6 @@
 import {
   Bot, Boxes, Calculator, CircleHelp, FilePlus2, FolderKanban, FolderOpen, Moon,
-  Network, Play, Redo2, Save, Sun, Undo2,
+  Network, Play, Redo2, Save, Settings, Sun, Undo2,
 } from "lucide-react";
 import { UNIT_SETS, type UnitSet } from "../lib/units";
 import { useStore, type ColorMode, type ViewMode } from "../store";
@@ -115,6 +115,8 @@ export function Toolbar() {
       </Button>
 
       <span className="ml-auto truncate text-muted" role="status">{s.status}</span>
+      <Button variant="ghost" aria-label="Cost assumptions settings" title="Cost assumptions (prices, factors, sizing)"
+        icon={<Settings size={14} />} onClick={s.toggleSettings} />
       <Button variant="ghost" aria-label="Show the quick tour" title="Quick tour"
         icon={<CircleHelp size={14} />} onClick={relaunchTour} />
       <Button variant="ghost" aria-label="Toggle color theme" title="Toggle light/dark"
