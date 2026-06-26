@@ -23,7 +23,8 @@ import {
 import { UNIT_SETS, type UnitSet } from "./lib/units";
 import type {
   BalanceResult, CostConfigOverrides, CostDefaults, CostResponse, FlowDoc,
-  PriceCatalog, PropertyPackage, Scenario, ScenarioResult, SolveResponse, UnitType,
+  ParamSchema, PriceCatalog, PropertyPackage, Scenario, ScenarioResult,
+  SolveResponse, UnitType,
 } from "./types";
 
 export type Tab = "params" | "streams" | "economics" | "optimize" | "study" | "calc" | "tools";
@@ -108,6 +109,8 @@ interface State {
   costConfig: CostConfigOverrides;
   // named cases (params + cost assumptions) for this flowsheet; ride in meta.ui
   scenarios: Scenario[];
+  // reaction editor: which unit param the modal is editing (null = closed)
+  reactionEditorTarget: { nodeId: string; schema: ParamSchema } | null;
   inspectorWidth: number;
   viewMode: ViewMode;
   groups: Group[];
@@ -184,6 +187,9 @@ interface State {
   compareScenarios: () => Promise<ScenarioResult[]>;  // re-cost each, no canvas mutation
   scenariosOpen: boolean;
   toggleScenarios: () => void;
+  openReactionEditor: (nodeId: string, schema: ParamSchema) => void;
+  closeReactionEditor: () => void;
+  setReactions: (nodeId: string, reactions: unknown[]) => void;
   setInspectorWidth: (w: number) => void;
   setViewMode: (m: ViewMode) => void;
   groupSelection: () => void;
@@ -293,6 +299,7 @@ export const useStore = create<State>((set, get) => {
     costConfig: {},     // per-flowsheet; restored from meta.ui on load
     scenarios: [],
     scenariosOpen: false,
+    reactionEditorTarget: null,
     inspectorWidth: Math.min(640, Math.max(300, Number(loadPref("panelw")) || 360)),
     viewMode: "pfd",
     groups: [],
@@ -916,6 +923,26 @@ export const useStore = create<State>((set, get) => {
     },
 
     toggleScenarios: () => set({ scenariosOpen: !get().scenariosOpen }),
+
+    openReactionEditor: (nodeId, schema) => set({ reactionEditorTarget: { nodeId, schema } }),
+    closeReactionEditor: () => set({ reactionEditorTarget: null }),
+
+    // Write the unifying list form and drop the singular `reaction`/unit-level
+    // `conversion` keys, in one undo step (the editor's Save path).
+    setReactions: (nodeId, reactions) => {
+      commit(`reactions:${nodeId}`);
+      markStale();
+      set({
+        nodes: get().nodes.map((n) => {
+          if (n.id !== nodeId) return n;
+          const params: Record<string, unknown> = { ...n.data.params, reactions };
+          delete params.reaction;
+          delete params.conversion;
+          return { ...n, data: { ...n.data, params } };
+        }),
+      });
+      get().refreshPorts(nodeId);
+    },
 
     setInspectorWidth: (w) => {
       const clamped = Math.min(640, Math.max(300, Math.round(w)));

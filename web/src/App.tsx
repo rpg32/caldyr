@@ -4,6 +4,7 @@ import { Inspector } from "./components/Inspector";
 import { Palette } from "./components/Palette";
 import { GlossaryDialog } from "./components/GlossaryDialog";
 import { ProjectsDialog } from "./components/ProjectsDialog";
+import { ReactionEditorDialog } from "./components/ReactionEditorDialog";
 import { ScenariosDialog } from "./components/ScenariosDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Toasts } from "./components/Toasts";
@@ -122,6 +123,7 @@ export function App() {
       <Toasts />
       <ProjectsDialog />
       <ScenariosDialog />
+      <ReactionEditorDialog />
       <SettingsDialog />
       <GlossaryDialog />
       <Tour />

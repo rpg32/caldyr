@@ -7,6 +7,7 @@ import {
 import { api } from "../api";
 import { compositionRows, fmtFrac, streamMassFlow } from "../lib/composition";
 import { compositionSum, metaFor, paramApplies, validateParam } from "../lib/params";
+import { summarizeReactions } from "../lib/reactions";
 import { defaultUnit, fmtDim, unitsForDim, type Dim, type UnitSet } from "../lib/units";
 import { useStore, type Tab } from "../store";
 import type { EnvelopeResponse, ParamSchema, StreamState } from "../types";
@@ -195,15 +196,18 @@ const ROW_SEL = "rounded-md border border-line bg-panel2 px-2 py-1 text-text";
 
 /** One schema-described parameter: the right widget for its type, showing the
  *  engine default until the user sets it, with a reset-to-default control. */
-function SchemaParamRow({ schema, value, set, unitOverride, onUnitChange, onSet, onReset }: {
+function SchemaParamRow({ schema, value, set, unitOverride, nodeId, params, onUnitChange, onSet, onReset }: {
   schema: ParamSchema;
   value: unknown;                       // explicit value, or undefined (= default)
   set: UnitSet;
   unitOverride?: string;
+  nodeId: string;                       // owning unit node (for the reaction editor)
+  params: Record<string, unknown>;      // owning unit's full params (reaction summary)
   onUnitChange: (u: string | null) => void;
   onSet: (v: unknown) => void;
   onReset: () => void;
 }) {
+  const openReactionEditor = useStore((s) => s.openReactionEditor);
   const isSet = value !== undefined;
   const eff = isSet ? value : schema.default;
   const missing = !!schema.required && !isSet && schema.default === undefined;
@@ -215,7 +219,18 @@ function SchemaParamRow({ schema, value, set, unitOverride, onUnitChange, onSet,
   const dim = schema.dim as Dim | undefined;
 
   let widget;
-  if (schema.complex || schema.type === "json") {
+  if (schema.editor === "reaction") {
+    // Dedicated structured editor: show a one-line summary + an Edit button that
+    // opens the reusable ReactionEditorDialog for this unit.
+    widget = (
+      <button
+        className="flex min-w-0 items-center gap-1.5 text-[11px] text-accent hover:underline"
+        title="Edit reactions" onClick={() => openReactionEditor(nodeId, schema)}>
+        <span className="truncate text-text">{summarizeReactions(params)}</span>
+        <span className="shrink-0">Edit…</span>
+      </button>
+    );
+  } else if (schema.complex || schema.type === "json") {
     widget = (
       <code className="truncate text-right text-[11px] text-text"
         title={isSet ? JSON.stringify(value) : undefined}>
@@ -289,15 +304,35 @@ function UnitParamsEditor({ nodeId, unitType, params }: {
   if (schema.length === 0) return <LegacyParams nodeId={nodeId} params={params} />;
 
   const schemaNames = new Set(schema.map((s) => s.name));
-  const visible = schema.filter((e) => schemaApplies(e, params, schema));
-  const extras = Object.keys(params).filter((k) => !schemaNames.has(k));
+  // A unit may declare both `reaction` and `reactions` with the same reaction
+  // editor; collapse them to a single "Reactions" row (the editor reads/writes
+  // both forms regardless of which entry is shown).
+  let seenReactionEditor = false;
+  // ConversionReactor edits per-reaction conversion inside the editor, so the
+  // unit-level `conversion` scalar becomes redundant — hide it.
+  const editsConversion = schema.some((e) => e.editor === "reaction" && e.editor_opts?.conversion);
+  const visible = schema.filter((e) => {
+    if (!schemaApplies(e, params, schema)) return false;
+    if (editsConversion && e.name === "conversion" && !e.editor) return false;
+    if (e.editor === "reaction") {
+      if (seenReactionEditor) return false;
+      seenReactionEditor = true;
+    }
+    return true;
+  });
+  // `reaction`/`conversion` are written as part of the `reactions` list — don't
+  // also surface them as unknown "Extra parameters".
+  const reactionKeys = seenReactionEditor ? new Set(["reaction", "reactions", "conversion"]) : new Set<string>();
+  const extras = Object.keys(params).filter((k) => !schemaNames.has(k) && !reactionKeys.has(k));
 
   return (
     <>
       {visible.map((e) => (
-        <SchemaParamRow key={e.name} schema={e}
+        <SchemaParamRow key={e.name}
+          schema={e.editor === "reaction" ? { ...e, label: "Reactions" } : e}
           value={e.name in params ? params[e.name] : undefined}
           set={unitSet} unitOverride={overrides[`${nodeId}:${e.name}`]}
+          nodeId={nodeId} params={params}
           onUnitChange={(u) => setUnitOverride(`${nodeId}:${e.name}`, u)}
           onSet={(v) => setParam(nodeId, e.name, v)}
           onReset={() => unsetParam(nodeId, e.name)} />
