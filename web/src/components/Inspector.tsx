@@ -18,7 +18,7 @@ import { LogicalEditor } from "./LogicalEditor";
 import { OptimizePanel } from "./OptimizePanel";
 import { StreamTable } from "./StreamTable";
 import { StudyPanel } from "./StudyPanel";
-import { Button, Hint, NumberInput, PanelTitle, QuantityInput } from "./ui";
+import { Button, Hint, NumberInput, PanelTitle, QuantityInput, Term } from "./ui";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "params", label: "Params" },
@@ -516,7 +516,7 @@ function StreamReadout({ state }: { state: StreamState }) {
           <tr><td>molar flow</td><td>{fmtDim("molar_flow", state.molar_flow, unitSet, 4)} {defaultUnit("molar_flow", unitSet)}</td></tr>
           <tr><td>mass flow</td><td>{fmtDim("mass_flow", massFlow, unitSet, 4)} {defaultUnit("mass_flow", unitSet)}</td></tr>
           <tr><td>phase</td><td>{state.phase ?? "—"}</td></tr>
-          <tr><td>vapor frac</td><td>{state.vapor_fraction?.toFixed(3) ?? "—"}</td></tr>
+          <tr><td><Term k="vapor fraction">vapor frac</Term></td><td>{state.vapor_fraction?.toFixed(3) ?? "—"}</td></tr>
         </tbody>
       </table>
       <CompositionTable state={state} />

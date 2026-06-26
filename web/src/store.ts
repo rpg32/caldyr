@@ -125,6 +125,7 @@ interface State {
   // projects dialog
   projectsOpen: boolean;
   settingsOpen: boolean;
+  glossaryOpen: boolean;
   projects: SavedProject[];
   // history & clipboard
   past: HistoryEntry[];
@@ -191,6 +192,7 @@ interface State {
   runBalance: () => Promise<void>;
   toggleProjects: () => void;
   toggleSettings: () => void;
+  toggleGlossary: () => void;
   saveCurrentProject: (name: string) => void;
   loadProject: (name: string) => void;
   removeProject: (name: string) => void;
@@ -282,6 +284,7 @@ export const useStore = create<State>((set, get) => {
     balanceBusy: false,
     projectsOpen: false,
     settingsOpen: false,
+    glossaryOpen: false,
     projects: listProjects(),
     past: [],
     future: [],
@@ -918,6 +921,7 @@ export const useStore = create<State>((set, get) => {
 
     toggleProjects: () => set({ projectsOpen: !get().projectsOpen }),
     toggleSettings: () => set({ settingsOpen: !get().settingsOpen }),
+    toggleGlossary: () => set({ glossaryOpen: !get().glossaryOpen }),
 
     saveCurrentProject: (name) => {
       const trimmed = name.trim();

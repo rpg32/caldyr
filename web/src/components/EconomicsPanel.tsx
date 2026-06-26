@@ -6,7 +6,7 @@ import {
 } from "recharts";
 import { useStore } from "../store";
 import { AssumptionsEditor, type AssumptionsSeed } from "./AssumptionsEditor";
-import { Button, Hint, PanelTitle, StaleNotice } from "./ui";
+import { Button, Hint, PanelTitle, StaleNotice, Term } from "./ui";
 
 const fmt = (x: number | null | undefined, d = 2) =>
   x == null ? "—" : x.toLocaleString(undefined, { maximumFractionDigits: d });
@@ -149,14 +149,16 @@ export function EconomicsPanel() {
           ["NPV", money(res.profitability.npv)],
         ] as const).map(([k, v]) => (
           <div key={k} className="rounded-lg border border-line bg-panel2 p-2">
-            <span className="block text-[11px] text-muted">{k}</span>
+            <span className="block text-[11px] text-muted">
+              <Term k={k === "OPEX/yr" ? "OPEX" : k}>{k}</Term>
+            </span>
             <b className="text-[15px]">{v}</b>
           </div>
         ))}
       </div>
       <PanelTitle>Equipment (installed)</PanelTitle>
       <table className="data-table">
-        <thead><tr><th>unit</th><th>type</th><th>size</th><th>Cbm</th></tr></thead>
+        <thead><tr><th>unit</th><th>type</th><th>size</th><th><Term>Cbm</Term></th></tr></thead>
         <tbody>
           {res.equipment.map((e, i) => (
             <tr key={`${e.unit_id}-${i}`}>
