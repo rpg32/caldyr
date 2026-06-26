@@ -7,7 +7,7 @@ import { downloadCsv } from "../lib/csv";
 import { defaultUnit, fmtDim, toDisplay, UNIT_SETS, type UnitSet } from "../lib/units";
 import { useState } from "react";
 import { useStore } from "../store";
-import { Badge, Button, Hint, PanelTitle, StaleNotice } from "./ui";
+import { Badge, Button, Hint, PanelTitle, StaleNotice, Term } from "./ui";
 
 function UnitSetPicker() {
   const unitSet = useStore((s) => s.unitSet);
@@ -159,7 +159,7 @@ export function StreamTable() {
       </div>
       {Object.keys(res.report.duties).length > 0 && (
         <table className="data-table mt-3">
-          <thead><tr><th>duty</th><th>{defaultUnit("power", unitSet)}</th></tr></thead>
+          <thead><tr><th><Term>duty</Term></th><th>{defaultUnit("power", unitSet)}</th></tr></thead>
           <tbody>
             {Object.entries(res.report.duties).map(([k, v]) => (
               <tr key={k}><td>{k}</td><td>{fmtDim("power", v, unitSet, 3)}</td></tr>
@@ -169,7 +169,7 @@ export function StreamTable() {
       )}
       {res.report.tear_streams.length > 0 && (
         <div className="mt-2 text-[11px] text-muted">
-          tear streams: {res.report.tear_streams.join(", ")}
+          <Term k="tear stream">tear streams</Term>: {res.report.tear_streams.join(", ")}
         </div>
       )}
       <ConvergencePlot history={res.report.history ?? []} />

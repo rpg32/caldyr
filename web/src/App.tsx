@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { CanvasView } from "./components/CanvasView";
 import { Inspector } from "./components/Inspector";
 import { Palette } from "./components/Palette";
+import { GlossaryDialog } from "./components/GlossaryDialog";
 import { ProjectsDialog } from "./components/ProjectsDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Toasts } from "./components/Toasts";
@@ -119,6 +120,7 @@ export function App() {
       <Toasts />
       <ProjectsDialog />
       <SettingsDialog />
+      <GlossaryDialog />
       <Tour />
     </div>
   );

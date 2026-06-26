@@ -1,6 +1,7 @@
 // Small presentational primitives shared across the app.
 import { Loader2 } from "lucide-react";
 import { useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from "react";
+import { glossaryDef } from "../lib/glossary";
 import { commitNumericDraft, isNumericDraft } from "../lib/number";
 import { defaultUnit, toDisplay, toSI, type Dim, type UnitSet } from "../lib/units";
 
@@ -113,6 +114,20 @@ export function DimField(
   return dim
     ? <QuantityInput dim={dim} set={set} unit={unit} {...rest} />
     : <NumberInput {...rest} />;
+}
+
+/** Inline jargon term: dotted underline + a hover definition from the glossary.
+ *  `k` overrides which glossary key to look up (defaults to the text content). */
+export function Term({ k, children }: { k?: string; children: ReactNode }) {
+  const key = k ?? (typeof children === "string" ? children : "");
+  const def = glossaryDef(key);
+  if (!def) return <>{children}</>;
+  return (
+    <abbr title={def}
+      className="cursor-help underline decoration-dotted decoration-muted underline-offset-2">
+      {children}
+    </abbr>
+  );
 }
 
 export function PanelTitle({ children }: { children: ReactNode }) {
