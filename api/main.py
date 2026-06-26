@@ -135,6 +135,16 @@ def health() -> dict:
     return {"status": "ok", "service": app.title, "version": app.version}
 
 
+def _first_paragraph(doc: str | None) -> str:
+    """First blank-line-delimited paragraph of a docstring, whitespace-collapsed —
+    a complete summary for the palette tooltip (not a mid-sentence first line)."""
+    text = (doc or "").strip()
+    if not text:
+        return ""
+    para = " ".join(text.split("\n\n")[0].split())
+    return para[:600]
+
+
 @app.get("/unit-types")
 def unit_types() -> list[dict]:
     out = []
@@ -145,6 +155,7 @@ def unit_types() -> list[dict]:
         except Exception:
             ports = []
         out.append({"type": name, "doc": (cls.__doc__ or "").strip().split("\n")[0],
+                    "description": _first_paragraph(cls.__doc__),
                     "ports": ports, "params": PARAM_SCHEMAS.get(name, [])})
     return out
 
