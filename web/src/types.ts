@@ -112,6 +112,13 @@ export interface CostAssumptions {
   citations: { topic: string; source: string }[];
 }
 
+// Default price catalog (from /prices) for pre-filling cost assumptions.
+export interface PriceCatalog {
+  prices_per_kg: Record<string, number>;
+  utility_prices: Record<string, number>;
+  prices_source: string;
+}
+
 // Editable cost-config overrides sent to /cost (all optional; engine SI/defaults).
 export interface CostConfigOverrides {
   prices_per_kg?: Record<string, number>;
