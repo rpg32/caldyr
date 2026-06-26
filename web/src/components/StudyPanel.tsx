@@ -7,7 +7,7 @@ import {
 } from "recharts";
 import { api } from "../api";
 import { downloadCsv } from "../lib/csv";
-import { dimFor } from "../lib/params";
+import { dimFor, dimForMetric } from "../lib/params";
 import { defaultUnit, fmtDim, toDisplay } from "../lib/units";
 import { useStore } from "../store";
 import type { FlowDoc, MetricSpec, SolveResponse } from "../types";
@@ -72,6 +72,11 @@ export function StudyPanel() {
   const xUnit = dim ? ` ${defaultUnit(dim, unitSet)}` : "";
   const fmtX = (x: number, digits = 4) =>
     (dim ? fmtDim(dim, x, unitSet, digits) : x.toPrecision(digits)) + xUnit;
+  // The watched metric also has a dimension (mol/s for flows, W for duties).
+  const yDim = dimForMetric(metric.type);
+  const fmtY = (y: number, digits = 4) =>
+    yDim ? fmtDim(yDim, y, unitSet, digits) : y.toPrecision(digits);
+  const yUnit = yDim ? ` / ${defaultUnit(yDim, unitSet)}` : "";
 
   const run = async () => {
     setRunning(true);
@@ -108,23 +113,33 @@ export function StudyPanel() {
   return (
     <div>
       <PanelTitle>Vary</PanelTitle>
-      <div className="flex flex-wrap items-center gap-1.5">
-        <select className={sel} value={unit} aria-label="Unit"
-          onChange={(e) => { setUnit(e.target.value); setParam(""); }}>
-          <option value="">— unit —</option>
-          {unitIds.map((u) => <option key={u} value={u}>{u}</option>)}
-        </select>
-        <select className={sel} value={param} aria-label="Parameter"
-          onChange={(e) => setParam(e.target.value)}>
-          <option value="">— param —</option>
-          {paramsOf(unit).map((p) => <option key={p} value={p}>{p}</option>)}
-        </select>
-        <DimField dim={dim} set={unitSet} className={num} value={from} aria-label="From" onChange={setFrom} />
-        <span className="text-muted">→</span>
-        <DimField dim={dim} set={unitSet} className={num} value={to} aria-label="To" onChange={setTo} />
-        <label className="flex items-center gap-1 text-[11px] text-muted">
-          steps
-          <input className="w-[52px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text"
+      <div className="space-y-1.5 text-[12px]">
+        <label className="flex items-center gap-2">
+          <span className="w-[68px] shrink-0 text-muted">Unit</span>
+          <select className={`${sel} flex-1`} value={unit} aria-label="Unit"
+            onChange={(e) => { setUnit(e.target.value); setParam(""); }}>
+            <option value="">— unit —</option>
+            {unitIds.map((u) => <option key={u} value={u}>{u}</option>)}
+          </select>
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="w-[68px] shrink-0 text-muted">Parameter</span>
+          <select className={`${sel} flex-1`} value={param} aria-label="Parameter"
+            onChange={(e) => setParam(e.target.value)}>
+            <option value="">— param —</option>
+            {paramsOf(unit).map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </label>
+        <div className="flex items-center gap-2">
+          <span className="w-[68px] shrink-0 text-muted">Range</span>
+          <DimField dim={dim} set={unitSet} className={num} value={from} aria-label="From" onChange={setFrom} />
+          <span className="text-muted">→</span>
+          <DimField dim={dim} set={unitSet} className={num} value={to} aria-label="To" onChange={setTo} />
+          {dim && <span className="text-[11px] text-muted">{defaultUnit(dim, unitSet)}</span>}
+        </div>
+        <label className="flex items-center gap-2">
+          <span className="w-[68px] shrink-0 text-muted">Steps</span>
+          <input className="w-[64px] rounded-md border border-line bg-panel2 px-1.5 py-1 text-right text-text"
             type="number" min={2} max={50} value={steps} aria-label="Steps"
             onChange={(e) => setSteps(parseInt(e.target.value) || 2)} />
         </label>
@@ -179,6 +194,30 @@ export function StudyPanel() {
                   dot={{ r: 2.5 }} connectNulls={false} isAnimationActive={false} />
               </LineChart>
             </ResponsiveContainer>
+          </div>
+        </>
+      )}
+
+      {points.length > 0 && (
+        <>
+          <PanelTitle>Results</PanelTitle>
+          <div className="max-h-56 overflow-auto rounded-md border border-line">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>{param || "x"}{dim ? ` / ${defaultUnit(dim, unitSet)}` : ""}</th>
+                  <th>{metricLabel(metric)}{yUnit}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {points.map((p, i) => (
+                  <tr key={i}>
+                    <td>{dim ? fmtDim(dim, p.x, unitSet, 4) : p.x.toPrecision(4)}</td>
+                    <td>{p.y == null ? <span className="text-muted">—</span> : fmtY(p.y)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </>
       )}
