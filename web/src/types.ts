@@ -20,7 +20,40 @@ export interface ParamSchema {
   options?: string[];
   requires?: Record<string, unknown>;  // show only when these params match
   complex?: boolean;                   // list/dict value — not a scalar widget
+  editor?: "reaction";                 // dedicated structured editor for this param
+  editor_opts?: ReactionEditorOpts;    // descriptor driving the reaction editor
   help?: string;
+}
+
+// Capability descriptor served per reaction-bearing param (see
+// api/param_schemas.py). Drives the reusable ReactionEditorDialog so the web
+// renders whatever the API declares — no per-unit logic in the client.
+export interface ReactionEditorOpts {
+  kind: "stoichiometric" | "kinetic";
+  multiple: boolean;       // Add-reaction allowed (more than one reaction)
+  conversion: boolean;     // per-reaction conversion field (ConversionReactor)
+  key_required: boolean;   // a key reactant must be chosen
+  reversible?: boolean;    // kinetic reverse params available (kinetic only)
+}
+
+// Stoichiometric reaction param value (Reaction.from_param in the engine).
+// `stoich` maps component id -> signed coefficient (reactants negative).
+export interface ReactionSpec {
+  stoich: Record<string, number>;
+  key?: string;
+  conversion?: number;     // ConversionReactor list form only (0..1)
+}
+
+// Kinetic reaction param value (KineticReaction.from_param in the engine).
+export interface KineticReactionSpec {
+  stoich: Record<string, number>;
+  key: string;
+  k0: number;
+  Ea: number;
+  orders?: Record<string, number>;
+  k0_rev?: number;
+  Ea_rev?: number;
+  orders_rev?: Record<string, number>;
 }
 
 export interface UnitType {
