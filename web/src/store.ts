@@ -13,6 +13,7 @@ import { diffFlows, mergePositions, type FlowDiff } from "./lib/diff";
 import { applyHelperLines, type HelperLines } from "./lib/helperLines";
 import { autoLayout } from "./lib/layout";
 import { ID_RE } from "./lib/params";
+import { unfedUnits } from "./lib/validate";
 import { ChatSocket, requestOverWs } from "./lib/ws";
 import {
   autosave, clearAutosave, deleteProject, downloadFlow, listProjects,
@@ -21,8 +22,8 @@ import {
 } from "./lib/persist";
 import { UNIT_SETS, type UnitSet } from "./lib/units";
 import type {
-  BalanceResult, CostConfigOverrides, CostResponse, FlowDoc, PropertyPackage,
-  SolveResponse, UnitType,
+  BalanceResult, CostConfigOverrides, CostResponse, FlowDoc, PriceCatalog,
+  PropertyPackage, SolveResponse, UnitType,
 } from "./types";
 
 export type Tab = "params" | "streams" | "economics" | "optimize" | "study" | "calc" | "tools";
@@ -71,6 +72,7 @@ interface State {
   unitTypes: UnitType[];
   packages: PropertyPackage[];
   componentCatalog: { id: string; name: string; formula: string; cas: string }[];
+  priceCatalog: PriceCatalog;          // default cost prices (for pre-filling)
   engineReady: boolean;
   // flowsheet
   nodes: CaldyrNode[];
@@ -94,6 +96,8 @@ interface State {
   pinnedStreams: string[];
   helperLines: HelperLines;
   fitNonce: number;
+  // unit nodes flagged by a pre-solve wiring check (no inlet) — shown with a red ring
+  invalidNodes: string[];
   unitSet: UnitSet;
   // per-field display-unit overrides, keyed by `${nodeId}:${param}` (a display
   // preference; the stored value stays SI). Falls back to the unitSet default.
@@ -233,6 +237,7 @@ export const useStore = create<State>((set, get) => {
     unitTypes: [],
     packages: [],
     componentCatalog: [],
+    priceCatalog: { prices_per_kg: {}, utility_prices: {}, prices_source: "" },
     engineReady: false,
     nodes: [],
     edges: [],
@@ -253,6 +258,7 @@ export const useStore = create<State>((set, get) => {
     pinnedStreams: [],
     helperLines: {},
     fitNonce: 0,
+    invalidNodes: [],
     unitSet: (UNIT_SETS as string[]).includes(loadPref("units") ?? "")
       ? (loadPref("units") as UnitSet) : "SI",
     unitOverrides: {},  // per-flowsheet; restored from meta.ui on load
@@ -279,11 +285,15 @@ export const useStore = create<State>((set, get) => {
 
     init: async () => {
       try {
-        const [types, pkgs, catalog] = await Promise.all([
+        const [types, pkgs, catalog, prices] = await Promise.all([
           api.unitTypes(), api.propertyPackages(),
           api.components().catch(() => []),  // older API: autocomplete just stays empty
+          api.prices().catch(() => null),    // older API: no default price catalog
         ]);
-        set({ unitTypes: types, packages: pkgs, componentCatalog: catalog, engineReady: true });
+        set({
+          unitTypes: types, packages: pkgs, componentCatalog: catalog,
+          ...(prices ? { priceCatalog: prices } : {}), engineReady: true,
+        });
         const saved = loadAutosave();
         if (saved) {
           get().loadFlowDoc(saved, "autosaved session");
@@ -378,7 +388,9 @@ export const useStore = create<State>((set, get) => {
       commit();
       markStale();
       const id = nextStreamId();
-      set({ edges: addEdge({ ...c, id, label: id }, get().edges) });
+      // a new wire may resolve a pre-solve "no inlet" flag on the target unit
+      const invalidNodes = get().invalidNodes.filter((n) => n !== c.target);
+      set({ edges: addEdge({ ...c, id, label: id }, get().edges), invalidNodes });
     },
 
     setSelection: (sel) => set({ selected: sel }),
@@ -694,7 +706,19 @@ export const useStore = create<State>((set, get) => {
 
     solve: async () => {
       if (get().busy) return;
-      set({ busy: "solve", status: "Solving..." });
+      const unfed = unfedUnits(get().nodes, get().edges);
+      if (unfed.length) {
+        set({
+          invalidNodes: unfed.map((u) => u.id),
+          status: "Solve failed — a unit has no inlet stream",
+          selected: { kind: "node", id: unfed[0].id }, tab: "params",
+        });
+        get().toast("error",
+          `${unfed.map((u) => u.label).join(", ")}: no inlet stream connected — `
+          + "wire a feed into each unit before solving.");
+        return;
+      }
+      set({ busy: "solve", status: "Solving...", invalidNodes: [] });
       try {
         // WebSocket first (live per-iteration progress); REST as fallback.
         let res: SolveResponse;

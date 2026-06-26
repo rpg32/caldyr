@@ -81,7 +81,9 @@ function NodeTitle({ id, label }: { id: string; label: string }) {
 
 export function UnitNode({ id, data, selected }: NodeProps<CaldyrNode>) {
   const bfd = useStore((s) => s.viewMode) === "bfd";
-  const cls = `node node-${data.kind}${selected ? " selected" : ""}${bfd ? " node-bfd" : ""}`;
+  const invalid = useStore((s) => s.invalidNodes.includes(id));
+  const cls = `node node-${data.kind}${selected ? " selected" : ""}`
+    + `${bfd ? " node-bfd" : ""}${invalid ? " node-invalid" : ""}`;
   const subtitle =
     data.kind === "unit" ? data.unitType
     : data.kind === "feed" ? "feed"

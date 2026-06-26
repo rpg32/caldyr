@@ -157,6 +157,17 @@ def components() -> list[dict]:
     return list(COMMON_COMPONENTS)
 
 
+@app.get("/prices")
+def prices() -> dict:
+    """Default raw-material/product ($/kg) and utility ($/GJ) prices so the UI can
+    pre-fill the costing assumptions (all overridable per flowsheet)."""
+    return {
+        "prices_per_kg": dict(econ_data.PRICES_PER_KG),
+        "utility_prices": {n: u.price_per_GJ for n, u in econ_data.UTILITIES.items()},
+        "prices_source": econ_data.PRICES_SOURCE,
+    }
+
+
 @app.post("/ports")
 def unit_ports(body: dict) -> list[dict]:
     """Per-instance port list for a unit type with given params.

@@ -652,7 +652,19 @@ function FlowsheetPanel() {
   const setPropertyPackage = useStore((s) => s.setPropertyPackage);
   const product = useStore((s) => s.product);
   const setProduct = useStore((s) => s.setProduct);
+  const priceCatalog = useStore((s) => s.priceCatalog);
+  const costConfig = useStore((s) => s.costConfig);
+  const setCostConfig = useStore((s) => s.setCostConfig);
   const [draft, setDraft] = useState("");
+
+  // Effective $/kg for the costing product: override, else catalog default, else
+  // unset (cost will fail with a clear message until a price is given).
+  const priceOverride = product ? costConfig.prices_per_kg?.[product] : undefined;
+  const catalogPrice = product ? priceCatalog.prices_per_kg[product] : undefined;
+  const productPrice = priceOverride ?? catalogPrice ?? NaN;
+  const setProductPrice = (v: number) =>
+    setCostConfig({ ...costConfig,
+      prices_per_kg: { ...costConfig.prices_per_kg, [product]: v } });
 
   const add = () => {
     if (draft.trim()) {
@@ -679,7 +691,8 @@ function FlowsheetPanel() {
       </label>
 
       <label className="my-1.5 flex items-center justify-between gap-2">
-        <span className="text-muted" title="Component whose product streams set the LCOP basis">
+        <span className="text-muted"
+          title="The primary product the LCOP (levelized cost of product, $/kg) is amortized against. By-product revenue credits are not modelled yet — pick the main product.">
           product (costing)
         </span>
         <select
@@ -691,6 +704,25 @@ function FlowsheetPanel() {
           {components.map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
       </label>
+      {product && (
+        <label className="my-1.5 flex items-center justify-between gap-2">
+          <span className="text-muted"
+            title="Sale price of the product ($/kg) — required for LCOP/NPV. Defaults to the catalog price if known; edit for your case.">
+            product price
+          </span>
+          <span className="flex items-center gap-1.5">
+            <NumberInput
+              className="w-[110px] rounded-md border border-line bg-panel2 px-2 py-1 text-right text-text"
+              value={productPrice} aria-label="Product price $/kg" onChange={setProductPrice} />
+            <span className="w-[58px] text-[11px] text-muted">$/kg</span>
+          </span>
+        </label>
+      )}
+      {product && Number.isNaN(productPrice) && (
+        <div className="mb-1 text-[11px] text-warn">
+          No catalog price for {product} — enter a $/kg price to enable costing.
+        </div>
+      )}
 
       <PanelTitle>Components</PanelTitle>
       <div className="flex flex-wrap gap-1.5">
