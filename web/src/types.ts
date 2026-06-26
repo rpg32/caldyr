@@ -132,6 +132,25 @@ export interface CostDefaults {
   citations: { topic: string; source: string }[];
 }
 
+// A named case: a snapshot of the flowsheet's unit/feed parameters + the cost
+// assumptions, so users can keep "base", "cheaper-N2", "high-capacity", … and
+// compare them. Persisted per-flowsheet in meta.ui.
+export interface Scenario {
+  name: string;
+  params: Record<string, Record<string, unknown>>; // nodeId -> params snapshot
+  costConfig: CostConfigOverrides;
+}
+
+export interface ScenarioResult {
+  name: string;
+  ok: boolean;
+  lcop?: number;
+  tci?: number;
+  opex?: number;
+  npv?: number;
+  error?: string;
+}
+
 // Editable cost-config overrides sent to /cost (all optional; engine SI/defaults).
 export interface CostConfigOverrides {
   prices_per_kg?: Record<string, number>;

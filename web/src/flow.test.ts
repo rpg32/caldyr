@@ -145,6 +145,16 @@ describe("canvasToFlow ∘ flowToCanvas round-trip", () => {
     expect(back.ui.cost_config).toEqual(cc);
   });
 
+  it("round-trips saved cases/scenarios through meta.ui", () => {
+    const scenarios = [
+      { name: "base", params: { PREHEAT: { T_out: 673.15 } }, costConfig: {} },
+      { name: "cheaper-N2", params: { PREHEAT: { T_out: 700 } }, costConfig: { prices_per_kg: { nitrogen: 0.05 } } },
+    ];
+    const doc2 = canvasToFlow(c.nodes, c.edges, c.components, c.propertyPackage, { scenarios });
+    const back = flowToCanvas(doc2, UNIT_TYPES);
+    expect(back.ui.scenarios).toEqual(scenarios);
+  });
+
   it("is a fixed point: a second round-trip yields the identical document", () => {
     const c2 = flowToCanvas(doc, UNIT_TYPES);
     const doc2 = canvasToFlow(c2.nodes, c2.edges, c2.components, c2.propertyPackage);

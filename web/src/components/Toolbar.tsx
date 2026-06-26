@@ -1,6 +1,6 @@
 import {
   BookOpen, Bot, Boxes, Calculator, CircleHelp, FilePlus2, FolderKanban, FolderOpen,
-  Moon, Network, Play, Redo2, Save, Settings, Sun, Undo2,
+  Layers, Moon, Network, Play, Redo2, Save, Settings, Sun, Undo2,
 } from "lucide-react";
 import { UNIT_SETS, type UnitSet } from "../lib/units";
 import { useStore, type ColorMode, type ViewMode } from "../store";
@@ -106,6 +106,10 @@ export function Toolbar() {
       <Button variant="ghost" icon={<FolderKanban size={14} />}
         title="Projects & templates" onClick={s.toggleProjects}>
         Projects
+      </Button>
+      <Button variant="ghost" icon={<Layers size={14} />}
+        title="Cases / scenarios — save, switch, compare" onClick={s.toggleScenarios}>
+        Cases
       </Button>
 
       <Sep />
