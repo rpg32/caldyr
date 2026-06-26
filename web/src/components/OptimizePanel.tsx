@@ -25,24 +25,30 @@ function DesignVarRow({ dv, units, paramsOf, set, onChange, onRemove }: {
 }) {
   const dim = dimFor(dv.param);
   return (
-    <div className="my-1 flex flex-wrap items-center gap-1.5">
-      <select className={sel} value={dv.unit_id} aria-label="Unit"
-        onChange={(e) => onChange({ ...dv, unit_id: e.target.value, param: "" })}>
-        <option value="">— unit —</option>
-        {units.map((u) => <option key={u} value={u}>{u}</option>)}
-      </select>
-      <select className={sel} value={dv.param} aria-label="Parameter"
-        onChange={(e) => onChange({ ...dv, param: e.target.value })}>
-        <option value="">— param —</option>
-        {paramsOf(dv.unit_id).map((p) => <option key={p} value={p}>{p}</option>)}
-      </select>
-      <DimField dim={dim} set={set} className={num} value={dv.lower} placeholder="min"
-        aria-label="Lower bound" onChange={(v) => onChange({ ...dv, lower: v })} />
-      <span className="text-muted">…</span>
-      <DimField dim={dim} set={set} className={num} value={dv.upper} placeholder="max"
-        aria-label="Upper bound" onChange={(v) => onChange({ ...dv, upper: v })} />
-      <button className="cursor-pointer p-1 text-muted hover:text-bad" onClick={onRemove}
-        aria-label="Remove design variable"><Trash2 size={12} /></button>
+    <div className="my-1.5 rounded-md border border-line bg-panel2/50 p-2">
+      <div className="flex items-center gap-1.5">
+        <select className={`${sel} flex-1`} value={dv.unit_id} aria-label="Unit"
+          onChange={(e) => onChange({ ...dv, unit_id: e.target.value, param: "" })}>
+          <option value="">— unit —</option>
+          {units.map((u) => <option key={u} value={u}>{u}</option>)}
+        </select>
+        <select className={`${sel} flex-1`} value={dv.param} aria-label="Parameter"
+          onChange={(e) => onChange({ ...dv, param: e.target.value })}>
+          <option value="">— param —</option>
+          {paramsOf(dv.unit_id).map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+        <button className="cursor-pointer p-1 text-muted hover:text-bad" onClick={onRemove}
+          aria-label="Remove design variable"><Trash2 size={12} /></button>
+      </div>
+      <div className="mt-1.5 flex items-center gap-2">
+        <span className="w-[68px] shrink-0 text-[11px] text-muted">between</span>
+        <DimField dim={dim} set={set} className={num} value={dv.lower} placeholder="min"
+          aria-label="Lower bound" onChange={(v) => onChange({ ...dv, lower: v })} />
+        <span className="text-muted">…</span>
+        <DimField dim={dim} set={set} className={num} value={dv.upper} placeholder="max"
+          aria-label="Upper bound" onChange={(v) => onChange({ ...dv, upper: v })} />
+        {dim && <span className="text-[11px] text-muted">{defaultUnit(dim, set)}</span>}
+      </div>
     </div>
   );
 }
@@ -105,13 +111,18 @@ export function OptimizePanel() {
   return (
     <div>
       <PanelTitle>Objective</PanelTitle>
-      <div className="flex flex-wrap items-center gap-1.5">
-        <select className={sel} value={sense} aria-label="Sense"
-          onChange={(e) => setSense(e.target.value as "min" | "max")}>
-          <option value="min">minimize</option>
-          <option value="max">maximize</option>
-        </select>
-        <MetricEditor value={objective} onChange={setObjective} />
+      <div className="rounded-md border border-line bg-panel2/50 p-2">
+        <label className="flex items-center gap-2">
+          <span className="w-[68px] shrink-0 text-[11px] text-muted">Goal</span>
+          <select className={`${sel} flex-1`} value={sense} aria-label="Sense"
+            onChange={(e) => setSense(e.target.value as "min" | "max")}>
+            <option value="min">minimize</option>
+            <option value="max">maximize</option>
+          </select>
+        </label>
+        <div className="mt-1.5">
+          <MetricEditor value={objective} onChange={setObjective} />
+        </div>
       </div>
 
       <PanelTitle>Design variables</PanelTitle>
@@ -126,25 +137,36 @@ export function OptimizePanel() {
       </Button>
 
       <PanelTitle>Constraints</PanelTitle>
-      {constraints.map((c, i) => (
-        <div key={i} className="my-1 flex flex-wrap items-center gap-1.5">
-          <MetricEditor value={c.metric}
-            onChange={(m) => setConstraints(constraints.map((x, j) => (j === i ? { ...x, metric: m } : x)))} />
-          <select className={sel} value={c.op} aria-label="Operator"
-            onChange={(e) => setConstraints(constraints.map((x, j) =>
-              (j === i ? { ...x, op: e.target.value as ">=" | "<=" } : x)))}>
-            <option value=">=">≥</option>
-            <option value="<=">≤</option>
-          </select>
-          <DimField dim={dimForMetric(c.metric.type)} set={unitSet} className={num}
-            value={c.value} aria-label="Constraint value"
-            onChange={(v) => setConstraints(constraints.map((x, j) =>
-              (j === i ? { ...x, value: v } : x)))} />
-          <button className="cursor-pointer p-1 text-muted hover:text-bad"
-            onClick={() => setConstraints(constraints.filter((_, j) => j !== i))}
-            aria-label="Remove constraint"><Trash2 size={12} /></button>
-        </div>
-      ))}
+      {constraints.map((c, i) => {
+        const cdim = dimForMetric(c.metric.type);
+        return (
+          <div key={i} className="my-1.5 rounded-md border border-line bg-panel2/50 p-2">
+            <div className="flex items-center gap-1.5">
+              <div className="min-w-0 flex-1">
+                <MetricEditor value={c.metric}
+                  onChange={(m) => setConstraints(constraints.map((x, j) => (j === i ? { ...x, metric: m } : x)))} />
+              </div>
+              <button className="cursor-pointer p-1 text-muted hover:text-bad"
+                onClick={() => setConstraints(constraints.filter((_, j) => j !== i))}
+                aria-label="Remove constraint"><Trash2 size={12} /></button>
+            </div>
+            <div className="mt-1.5 flex items-center gap-2">
+              <span className="w-[68px] shrink-0 text-[11px] text-muted">must be</span>
+              <select className={sel} value={c.op} aria-label="Operator"
+                onChange={(e) => setConstraints(constraints.map((x, j) =>
+                  (j === i ? { ...x, op: e.target.value as ">=" | "<=" } : x)))}>
+                <option value=">=">≥</option>
+                <option value="<=">≤</option>
+              </select>
+              <DimField dim={cdim} set={unitSet} className={num}
+                value={c.value} aria-label="Constraint value"
+                onChange={(v) => setConstraints(constraints.map((x, j) =>
+                  (j === i ? { ...x, value: v } : x)))} />
+              {cdim && <span className="text-[11px] text-muted">{defaultUnit(cdim, unitSet)}</span>}
+            </div>
+          </div>
+        );
+      })}
       <Button variant="ghost" icon={<Plus size={12} />}
         onClick={() => setConstraints([...constraints, { metric: EMPTY_METRIC, op: ">=", value: 0 }])}>
         constraint
