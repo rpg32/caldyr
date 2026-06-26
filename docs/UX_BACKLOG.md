@@ -101,15 +101,37 @@ Costing uses heuristics and a price catalog the user can't see/edit fully.
 Lots of acronyms (LCOP, TCI, ISBL/OSBL, CBM, COM, duty, reflux ratio, Murphree,
 HETP, LMTD, tear stream, vapor frac…).
 - **Fix:** inline tooltips on labels/headers + a searchable glossary/cheatsheet.
+- **STATUS (2026-06-25, merged `26bd7db`): ✅ DONE.** `lib/glossary.ts` (~30
+  terms, term+def+aka, case-insensitive lookup) + a searchable Glossary dialog
+  (toolbar book icon) + an inline `<Term>` tooltip (dotted underline) wired onto
+  the prominent econ/stream jargon. Unit-op param help is already inline via the
+  guided editor (#47).
 
 ## 7. (BUG) Palette hover tooltip truncated — #48
 The left-rail unit-op tooltip is cut off (only part of the docstring shows).
 - **Fix:** show the full description (wrap/scroll or larger tooltip). `web/` palette.
+- **STATUS (2026-06-25, merged `b651016`): ✅ DONE.** `/unit-types` now sends a
+  `description` = the first docstring PARAGRAPH (was a mid-sentence first line);
+  the palette renders a wrapping, scrollable `fixed`-positioned tooltip beside the
+  hovered item (no clipping by the palette's scroll overflow).
 
 ## 8. (FEATURE) Save configurations + multiple solve cases — #51
 Let users save named configs/settings and multiple cases per flowsheet (base vs
 cheaper-N2 vs high-capacity), switch/compare (LCOP/NPV/duties/purities side by
 side). Persist with the `.flow` (or alongside). Distinct from the single autosave.
+- **STATUS (2026-06-25, merged `dfe0b1b`): ✅ DONE.** A "Cases" dialog (toolbar):
+  each case snapshots the flowsheet's unit/feed params + cost assumptions; Save /
+  Apply (load onto canvas) / Compare (re-cost each without canvas mutation →
+  LCOP/TCI/OPEX/NPV table). Cases ride in `meta.ui` (travel with the .flow).
+  *Future:* compare duties/purities too (would re-solve, not just re-cost).
+
+---
+
+## ✅ ALL 8 BACKLOG ITEMS COMPLETE (2026-06-25).
+#54 stream composition, #53 `.5` input, #49 unit system (default + per-field),
+#47 guided param editor, #50 cost-assumption transparency + Settings dialog, #52
+glossary, #48 palette tooltip, #51 cases/scenarios. Plus drive-session follow-ups:
+inline product price + `/prices`, pre-solve wiring check, Product-node readout.
 
 ---
 
