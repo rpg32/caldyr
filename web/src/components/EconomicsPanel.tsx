@@ -1,12 +1,12 @@
-import { Dices, RotateCcw, SlidersHorizontal, X } from "lucide-react";
+import { Dices, SlidersHorizontal } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
   Bar, BarChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip,
   XAxis, YAxis,
 } from "recharts";
 import { useStore } from "../store";
-import type { CostConfigOverrides } from "../types";
-import { Button, Hint, NumberInput, PanelTitle, StaleNotice } from "./ui";
+import { AssumptionsEditor, type AssumptionsSeed } from "./AssumptionsEditor";
+import { Button, Hint, PanelTitle, StaleNotice } from "./ui";
 
 const fmt = (x: number | null | undefined, d = 2) =>
   x == null ? "—" : x.toLocaleString(undefined, { maximumFractionDigits: d });
@@ -99,79 +99,21 @@ function McHistogram({ samples, p10, p50, p90 }: {
   );
 }
 
-const pretty = (k: string) => k.replace(/_/g, " ");
-
-type GroupKey = "prices_per_kg" | "utility_prices" | "sizing" | "factors";
-
-/** One editable assumption: shows the effective value, overrides on edit, resets. */
-function EditRow({ label, unit, value, overridden, digits, onChange, onReset }: {
-  label: string; unit?: string; value: number; overridden: boolean; digits?: number;
-  onChange: (v: number) => void; onReset: () => void;
-}) {
-  return (
-    <label className="my-1 flex items-center gap-2 text-[12px]">
-      <span className={`min-w-0 flex-1 truncate ${overridden ? "text-accent" : "text-muted"}`}
-        title={label}>{label}</span>
-      <NumberInput
-        className="w-[92px] rounded-md border border-line bg-panel2 px-2 py-0.5 text-right text-text"
-        value={Number((value).toPrecision(digits ?? 6))} aria-label={label} onChange={onChange} />
-      <span className="w-12 shrink-0 text-[11px] text-muted">{unit ?? ""}</span>
-      {overridden ? (
-        <button className="shrink-0 cursor-pointer p-0.5 text-muted hover:text-accent"
-          title="Reset to default" aria-label={`Reset ${label}`} onClick={onReset}>
-          <X size={11} />
-        </button>
-      ) : <span className="w-[15px] shrink-0" aria-hidden />}
-    </label>
-  );
-}
-
-/** Editable rows for one nested override group (prices/utilities/sizing/factors). */
-function GroupRows({ values, group, unit }: {
-  values: Record<string, number | string>; group: GroupKey; unit?: string;
-}) {
-  const cfg = useStore((s) => s.costConfig);
-  const setCostConfig = useStore((s) => s.setCostConfig);
-  const ov = (cfg[group] ?? {}) as Record<string, number>;
-  const rows = Object.entries(values).filter(([, v]) => typeof v === "number");
-  if (!rows.length) return null;
-  return (
-    <>
-      {rows.map(([k, def]) => {
-        const overridden = k in ov;
-        return (
-          <EditRow key={k} label={pretty(k)} unit={unit}
-            value={overridden ? ov[k] : (def as number)} overridden={overridden}
-            onChange={(v) => setCostConfig({ ...cfg, [group]: { ...ov, [k]: v } })}
-            onReset={() => { const g = { ...ov }; delete g[k]; setCostConfig({ ...cfg, [group]: g }); }} />
-        );
-      })}
-    </>
-  );
-}
-
-/** "Assumptions in this solve" — every price, factor and heuristic that drove the
- *  result, with citations; editable per-flowsheet, re-cost to apply. */
+/** "Assumptions in this solve" — the prices, factors and heuristics that drove
+ *  this result, editable in place (seeded with the values actually used). The
+ *  Settings dialog offers the same editor seeded from defaults, available any
+ *  time (even before a cost). */
 function AssumptionsSection() {
   const res = useStore((s) => s.costRes);
-  const cfg = useStore((s) => s.costConfig);
-  const setCostConfig = useStore((s) => s.setCostConfig);
-  const cost = useStore((s) => s.cost);
-  const busy = useStore((s) => s.busy);
+  const toggleSettings = useStore((s) => s.toggleSettings);
   const [open, setOpen] = useState(false);
   const a = res?.assumptions;
   if (!a) return null;
 
-  const dirty = Object.keys(cfg).length > 0;
-  // financial scalars live at the top level of the override object
-  const scalar = (key: "discount_rate" | "operating_hours" | "project_years", def: number,
-                  unit: string, digits?: number) => (
-    <EditRow label={pretty(key)} unit={unit} digits={digits}
-      value={cfg[key] ?? def} overridden={cfg[key] != null}
-      onChange={(v) => setCostConfig({ ...cfg, [key]: v })}
-      onReset={() => { const c = { ...cfg }; delete c[key]; setCostConfig(c); }} />
-  );
-
+  const seed: AssumptionsSeed = {
+    financial: a.config, prices: a.prices_per_kg, utilities: a.utility_prices,
+    sizing: a.sizing, factors: a.factors, citations: a.citations,
+  };
   return (
     <div className="mt-3">
       <button className="flex w-full items-center gap-1.5 text-[11px] uppercase tracking-wider text-muted hover:text-text"
@@ -181,39 +123,9 @@ function AssumptionsSection() {
       </button>
       {open && (
         <div className="mt-1.5">
-          {dirty && (
-            <div className="mb-2 flex items-center gap-2">
-              <Button onClick={() => void cost()} busy={busy === "cost"}>Re-cost</Button>
-              <button className="flex items-center gap-1 text-[11px] text-muted hover:text-accent"
-                onClick={() => setCostConfig({} as CostConfigOverrides)}>
-                <RotateCcw size={11} /> reset all
-              </button>
-              <span className="text-[11px] text-warn">edited — re-cost to apply</span>
-            </div>
-          )}
-          <PanelTitle>Financial</PanelTitle>
-          {scalar("discount_rate", a.config.discount_rate, "", 4)}
-          {scalar("operating_hours", a.config.operating_hours, "h/yr", 6)}
-          {scalar("project_years", a.config.project_years, "yr", 2)}
-
-          {Object.keys(a.prices_per_kg).length > 0 && <PanelTitle>Component prices</PanelTitle>}
-          <GroupRows values={a.prices_per_kg} group="prices_per_kg" unit="$/kg" />
-
-          {Object.keys(a.utility_prices).length > 0 && <PanelTitle>Utility prices</PanelTitle>}
-          <GroupRows values={a.utility_prices} group="utility_prices" unit="$/GJ" />
-
-          <PanelTitle>Sizing heuristics</PanelTitle>
-          <GroupRows values={a.sizing} group="sizing" />
-
-          <PanelTitle>Cost factors (Turton COM + capital)</PanelTitle>
-          <GroupRows values={a.factors} group="factors" />
-
-          <PanelTitle>Sources</PanelTitle>
-          <ul className="ml-1 list-none text-[10.5px] leading-relaxed text-muted">
-            {a.citations.map((c) => (
-              <li key={c.topic}><span className="text-text">{c.topic}:</span> {c.source}</li>
-            ))}
-          </ul>
+          <button className="mb-2 text-[11px] text-accent hover:underline"
+            onClick={toggleSettings}>Open Settings (edit any time) →</button>
+          <AssumptionsEditor seed={seed} />
         </div>
       )}
     </div>

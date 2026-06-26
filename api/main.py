@@ -224,6 +224,35 @@ def _apply_overrides(defaults, overrides: dict | None):
     return dc_replace(defaults, **valid) if valid else defaults
 
 
+_COST_CITATIONS = [
+    {"topic": "Plant cost index (CEPCI escalation)", "source": econ_data.CEPCI_SOURCE},
+    {"topic": "Raw-material / product prices", "source": econ_data.PRICES_SOURCE},
+    {"topic": "Manufacturing cost COM_d + capital roll-up factors",
+     "source": "Turton et al., Analysis Synthesis & Design of Chemical Processes 4e, Ch. 7-8"},
+    {"topic": "Equipment purchased-cost correlations + bare-module factors",
+     "source": "Turton et al. 4e, Appendix A / Ch. 7"},
+    {"topic": "Sizing heuristics (U-values, residence, flooding, capacity)",
+     "source": "Turton 4e; Seader, Separation Process Principles 3e; GPSA Engineering Data Book 13e"},
+]
+
+
+@app.get("/cost-defaults")
+def cost_defaults() -> dict:
+    """Default techno-economic assumptions (financial, sizing, factors) so the UI
+    can offer a Settings editor before any cost has run. Prices live in /prices."""
+    cfg = TEAConfig()
+    return {
+        "config": {
+            "year": cfg.year, "operating_hours": cfg.operating_hours,
+            "discount_rate": cfg.discount_rate, "project_years": cfg.project_years,
+            "product_min_fraction": cfg.product_min_fraction,
+        },
+        "sizing": asdict(SizingOptions()),
+        "factors": asdict(CostFactors()),
+        "citations": _COST_CITATIONS,
+    }
+
+
 def _assumptions(cfg: TEAConfig, fs, res) -> dict:
     """The numbers + correlations that drove this cost result, with citations."""
     eff_prices = {**econ_data.PRICES_PER_KG, **(cfg.prices_per_kg or {})}
@@ -244,16 +273,7 @@ def _assumptions(cfg: TEAConfig, fs, res) -> dict:
                            for s in res.sizes if s.utility},
         "sizing": asdict(cfg.sizing or SizingOptions()),
         "factors": asdict(cfg.factors or CostFactors()),
-        "citations": [
-            {"topic": "Plant cost index (CEPCI escalation)", "source": econ_data.CEPCI_SOURCE},
-            {"topic": "Raw-material / product prices", "source": econ_data.PRICES_SOURCE},
-            {"topic": "Manufacturing cost COM_d + capital roll-up factors",
-             "source": "Turton et al., Analysis Synthesis & Design of Chemical Processes 4e, Ch. 7-8"},
-            {"topic": "Equipment purchased-cost correlations + bare-module factors",
-             "source": "Turton et al. 4e, Appendix A / Ch. 7"},
-            {"topic": "Sizing heuristics (U-values, residence, flooding, capacity)",
-             "source": "Turton 4e; Seader, Separation Process Principles 3e; GPSA Engineering Data Book 13e"},
-        ],
+        "citations": _COST_CITATIONS,
     }
 
 

@@ -1,7 +1,7 @@
 // Thin client over the engine API. All physics lives server-side.
 import type {
-  BalanceResult, CostConfigOverrides, CostResponse, EnvelopeResponse, FlowDoc,
-  OptimizeRequest, OptimizeResponse, PinchResponse, Port, PriceCatalog,
+  BalanceResult, CostConfigOverrides, CostDefaults, CostResponse, EnvelopeResponse,
+  FlowDoc, OptimizeRequest, OptimizeResponse, PinchResponse, Port, PriceCatalog,
   PropertyPackage, PropertyTableResponse, ReliefResponse, SolveResponse, UnitType,
 } from "./types";
 
@@ -41,6 +41,7 @@ export const api = {
       flow, config: { product_component, ...(overrides ?? {}) }, monte_carlo: monteCarlo,
     }),
   prices: () => get<PriceCatalog>("/prices"),
+  costDefaults: () => get<CostDefaults>("/cost-defaults"),
   optimize: (req: OptimizeRequest) => post<OptimizeResponse>("/optimize", req),
   envelope: (flow: FlowDoc, stream: string, n = 30) =>
     post<EnvelopeResponse>("/envelope", { flow, stream, n }),

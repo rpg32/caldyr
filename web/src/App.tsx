@@ -3,6 +3,7 @@ import { CanvasView } from "./components/CanvasView";
 import { Inspector } from "./components/Inspector";
 import { Palette } from "./components/Palette";
 import { ProjectsDialog } from "./components/ProjectsDialog";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { Toasts } from "./components/Toasts";
 import { Toolbar } from "./components/Toolbar";
 import { Tour } from "./components/Tour";
@@ -117,6 +118,7 @@ export function App() {
       </div>
       <Toasts />
       <ProjectsDialog />
+      <SettingsDialog />
       <Tour />
     </div>
   );

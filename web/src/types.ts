@@ -119,6 +119,18 @@ export interface PriceCatalog {
   prices_source: string;
 }
 
+// Default TEA assumptions (from /cost-defaults) — seeds the Settings editor
+// before any cost has run.
+export interface CostDefaults {
+  config: {
+    year: number; operating_hours: number; discount_rate: number;
+    project_years: number; product_min_fraction: number;
+  };
+  sizing: Record<string, number | string>;
+  factors: Record<string, number>;
+  citations: { topic: string; source: string }[];
+}
+
 // Editable cost-config overrides sent to /cost (all optional; engine SI/defaults).
 export interface CostConfigOverrides {
   prices_per_kg?: Record<string, number>;
