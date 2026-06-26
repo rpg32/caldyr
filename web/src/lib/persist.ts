@@ -16,6 +16,7 @@ export interface UiMeta {
   view_mode?: string;
   unit_overrides?: Record<string, string>;
   cost_config?: Record<string, unknown>;
+  scenarios?: Record<string, unknown>[];
   calcs?: { name: string; expr: string }[];
   groups?: {
     id: string; label: string; members: string[];

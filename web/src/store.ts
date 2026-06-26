@@ -23,7 +23,7 @@ import {
 import { UNIT_SETS, type UnitSet } from "./lib/units";
 import type {
   BalanceResult, CostConfigOverrides, CostDefaults, CostResponse, FlowDoc,
-  PriceCatalog, PropertyPackage, SolveResponse, UnitType,
+  PriceCatalog, PropertyPackage, Scenario, ScenarioResult, SolveResponse, UnitType,
 } from "./types";
 
 export type Tab = "params" | "streams" | "economics" | "optimize" | "study" | "calc" | "tools";
@@ -106,6 +106,8 @@ interface State {
   // per-flowsheet techno-economic assumption overrides (prices, factors, sizing,
   // rates) sent to /cost; rides in meta.ui. Empty = engine defaults.
   costConfig: CostConfigOverrides;
+  // named cases (params + cost assumptions) for this flowsheet; ride in meta.ui
+  scenarios: Scenario[];
   inspectorWidth: number;
   viewMode: ViewMode;
   groups: Group[];
@@ -176,6 +178,12 @@ interface State {
   setUnitSet: (u: UnitSet) => void;
   setUnitOverride: (key: string, unit: string | null) => void;
   setCostConfig: (c: CostConfigOverrides) => void;
+  saveScenario: (name: string) => void;       // snapshot current params + costConfig
+  applyScenario: (name: string) => void;       // load a scenario onto the canvas
+  removeScenario: (name: string) => void;
+  compareScenarios: () => Promise<ScenarioResult[]>;  // re-cost each, no canvas mutation
+  scenariosOpen: boolean;
+  toggleScenarios: () => void;
   setInspectorWidth: (w: number) => void;
   setViewMode: (m: ViewMode) => void;
   groupSelection: () => void;
@@ -238,6 +246,20 @@ export const useStore = create<State>((set, get) => {
   const applySnapshot = (snap: Snapshot) =>
     set({ ...snap, selected: null, resultsStale: true });
 
+  /** Current unit/feed parameter values, keyed by node id (a scenario snapshot). */
+  const snapshotParams = (nodes: CaldyrNode[]): Record<string, Record<string, unknown>> =>
+    Object.fromEntries(nodes
+      .filter((n) => n.data.kind === "unit" || n.data.kind === "feed")
+      .map((n) => [n.id, { ...n.data.params }]));
+
+  /** Nodes with a scenario's params overlaid (for building a flow doc without
+   *  mutating the canvas). */
+  const nodesWithParams = (
+    nodes: CaldyrNode[], params: Record<string, Record<string, unknown>>,
+  ): CaldyrNode[] =>
+    nodes.map((n) => (params[n.id]
+      ? { ...n, data: { ...n.data, params: { ...params[n.id] } } } : n));
+
   return {
     unitTypes: [],
     packages: [],
@@ -269,6 +291,8 @@ export const useStore = create<State>((set, get) => {
       ? (loadPref("units") as UnitSet) : "SI",
     unitOverrides: {},  // per-flowsheet; restored from meta.ui on load
     costConfig: {},     // per-flowsheet; restored from meta.ui on load
+    scenarios: [],
+    scenariosOpen: false,
     inspectorWidth: Math.min(640, Math.max(300, Number(loadPref("panelw")) || 360)),
     viewMode: "pfd",
     groups: [],
@@ -640,7 +664,7 @@ export const useStore = create<State>((set, get) => {
       set({
         nodes: [], edges: [], components: [], product: "",
         solveRes: null, costRes: null, resultsStale: false,
-        selected: null, tab: "params", unitOverrides: {}, costConfig: {},
+        selected: null, tab: "params", unitOverrides: {}, costConfig: {}, scenarios: [],
         status: "New flowsheet — add components in the panel, then units from the palette",
       });
     },
@@ -666,6 +690,7 @@ export const useStore = create<State>((set, get) => {
           viewMode: (c.ui.view_mode as ViewMode) ?? "pfd",
           unitOverrides: c.ui.unit_overrides ?? {},
           costConfig: (c.ui.cost_config as CostConfigOverrides) ?? {},
+          scenarios: (c.ui.scenarios as unknown as Scenario[]) ?? [],
           calcs: c.ui.calcs ?? [],
           groups: (c.ui.groups as Group[]) ?? [],
           logical: c.extras.logical ?? [],
@@ -690,6 +715,7 @@ export const useStore = create<State>((set, get) => {
         view_mode: s.viewMode,
         unit_overrides: s.unitOverrides,
         cost_config: s.costConfig as Record<string, unknown>,
+        scenarios: s.scenarios as unknown as Record<string, unknown>[],
         calcs: s.calcs,
         groups: s.groups,
       }, { logical: s.logical, solver_hints: s.solverHints });
@@ -837,6 +863,59 @@ export const useStore = create<State>((set, get) => {
     },
 
     setCostConfig: (c) => set({ costConfig: c }), // persisted via meta.ui on autosave
+
+    saveScenario: (name) => {
+      const nm = name.trim();
+      if (!nm) return;
+      const s = get();
+      const sc: Scenario = {
+        name: nm, params: snapshotParams(s.nodes), costConfig: s.costConfig,
+      };
+      // replace a same-named scenario, else append
+      const scenarios = s.scenarios.some((x) => x.name === nm)
+        ? s.scenarios.map((x) => (x.name === nm ? sc : x))
+        : [...s.scenarios, sc];
+      set({ scenarios });
+      get().toast("success", `Saved case "${nm}".`);
+    },
+
+    applyScenario: (name) => {
+      const s = get();
+      const sc = s.scenarios.find((x) => x.name === name);
+      if (!sc) return;
+      commit();
+      set({
+        nodes: nodesWithParams(s.nodes, sc.params),
+        costConfig: sc.costConfig, resultsStale: true,
+        status: `Loaded case "${name}" — solve/cost to see its results`,
+      });
+    },
+
+    removeScenario: (name) =>
+      set({ scenarios: get().scenarios.filter((x) => x.name !== name) }),
+
+    compareScenarios: async () => {
+      const s = get();
+      const out: ScenarioResult[] = [];
+      for (const sc of s.scenarios) {
+        const doc = canvasToFlow(
+          nodesWithParams(s.nodes, sc.params), s.edges, s.components, s.propertyPackage,
+          undefined, { logical: s.logical, solver_hints: s.solverHints });
+        try {
+          const res = await api.cost(doc, s.product, 0, sc.costConfig);
+          out.push({
+            name: sc.name, ok: true,
+            lcop: res.profitability.lcop, tci: res.capital.tci,
+            opex: res.opex.total, npv: res.profitability.npv,
+          });
+        } catch (e) {
+          out.push({ name: sc.name, ok: false, error: (e as Error).message });
+        }
+      }
+      return out;
+    },
+
+    toggleScenarios: () => set({ scenariosOpen: !get().scenariosOpen }),
 
     setInspectorWidth: (w) => {
       const clamped = Math.min(640, Math.max(300, Math.round(w)));

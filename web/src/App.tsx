@@ -4,6 +4,7 @@ import { Inspector } from "./components/Inspector";
 import { Palette } from "./components/Palette";
 import { GlossaryDialog } from "./components/GlossaryDialog";
 import { ProjectsDialog } from "./components/ProjectsDialog";
+import { ScenariosDialog } from "./components/ScenariosDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Toasts } from "./components/Toasts";
 import { Toolbar } from "./components/Toolbar";
@@ -56,6 +57,7 @@ function useAutosave() {
         && state.calcs === prev.calcs
         && state.unitOverrides === prev.unitOverrides
         && state.costConfig === prev.costConfig
+        && state.scenarios === prev.scenarios
       ) return;
       window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => useStore.getState().autosaveNow(), 800);
@@ -119,6 +121,7 @@ export function App() {
       </div>
       <Toasts />
       <ProjectsDialog />
+      <ScenariosDialog />
       <SettingsDialog />
       <GlossaryDialog />
       <Tour />
