@@ -5,6 +5,7 @@ import {
 } from "@xyflow/react";
 import { useCallback, useEffect, useMemo } from "react";
 import type { CaldyrNode } from "../flow";
+import { streamNumbers } from "../lib/streamNumbers";
 import { useStore } from "../store";
 import { ChatPanel } from "./ChatPanel";
 import { GroupNode, type GroupNodeType } from "./GroupNode";
@@ -136,6 +137,9 @@ export function CanvasView() {
     return out;
   }, [nodes, groups, collapsedOwner]);
 
+  // Stable stream numbers for the PFD flags (shared with the stream table).
+  const streamNos = useMemo(() => streamNumbers(nodes, edges), [nodes, edges]);
+
   const styledEdges: Edge[] = useMemo(() => {
     const bfd = viewMode === "bfd";
     const out: Edge[] = [];
@@ -162,6 +166,8 @@ export function CanvasView() {
             ? (state.T - tMin) / (tMax - tMin) : undefined,
           pinned: pinnedStreams.includes(e.id),
           plain: bfd,
+          pfd: !bfd,
+          streamNo: streamNos.get(e.id),
         },
       } satisfies StreamEdgeType);
     }
@@ -208,7 +214,7 @@ export function CanvasView() {
     }
     return out;
   }, [edges, nodes, solveRes, energyEdges, colorMode, tMin, tMax, pinnedStreams,
-      viewMode, logical, collapsedOwner]);
+      viewMode, logical, collapsedOwner, streamNos]);
 
   const onSelectionChange = useCallback(
     ({ nodes: ns, edges: es }: OnSelectionChangeParams) => {

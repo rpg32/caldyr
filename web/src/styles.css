@@ -81,6 +81,46 @@ body, #root { margin: 0; height: 100vh; }
   border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px;
 }
 
+/* ---- PFD / P&ID symbol nodes: the equipment symbol IS the node ---- */
+.pfd-node {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  color: var(--muted); background: none; border: 0;
+}
+.pfd-symbol { position: relative; display: flex; color: inherit; }
+.pfd-symbol .pfd-body { fill: var(--panel2); }
+.pfd-node.kind-feed { color: var(--ok); }
+.pfd-node.kind-product { color: var(--muted); }
+.pfd-node.selected { color: var(--accent); }
+.pfd-node.invalid { color: var(--bad); }
+.pfd-label {
+  display: flex; flex-direction: column; align-items: center; line-height: 1.15;
+  text-align: center; color: var(--text);
+}
+.pfd-node.selected .pfd-label .node-title { color: var(--accent); }
+.pfd-node.invalid .pfd-label .node-title { color: var(--bad); }
+.pfd-label .node-title { white-space: nowrap; font-size: 12px; }
+/* Ring the symbol when a node fails the pre-solve wiring check. */
+.pfd-node.invalid .pfd-symbol::after {
+  content: ""; position: absolute; inset: -4px; border-radius: 8px;
+  border: 1.5px solid var(--bad);
+}
+
+/* ---- PFD stream flags: a numbered diamond in place of the stream name ---- */
+.stream-flag {
+  position: absolute; pointer-events: none;
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+}
+.stream-flag::before {                     /* the diamond (rotated square) */
+  content: ""; position: absolute; inset: 1px; transform: rotate(45deg);
+  background: var(--panel); border: 1px solid var(--line);
+}
+.stream-flag span {                        /* the number, kept upright */
+  position: relative; font-size: 9px; font-weight: 700; color: var(--text);
+}
+.stream-flag.selected::before { border-color: var(--accent); }
+.stream-flag.selected span { color: var(--accent); }
+
 /* ---- stream edges: labels, callouts ---- */
 .edge-label {
   position: absolute; pointer-events: none;

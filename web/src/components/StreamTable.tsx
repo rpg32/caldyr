@@ -4,6 +4,7 @@ import {
 } from "recharts";
 import { componentOrder, fmtFrac, streamMassFlow } from "../lib/composition";
 import { downloadCsv } from "../lib/csv";
+import { streamNumbers } from "../lib/streamNumbers";
 import { defaultUnit, fmtDim, toDisplay, UNIT_SETS, type UnitSet } from "../lib/units";
 import { useState } from "react";
 import { useStore } from "../store";
@@ -62,9 +63,15 @@ export function StreamTable() {
   const res = useStore((s) => s.solveRes);
   const stale = useStore((s) => s.resultsStale);
   const unitSet = useStore((s) => s.unitSet);
+  const nodes = useStore((s) => s.nodes);
+  const edges = useStore((s) => s.edges);
   const [showComp, setShowComp] = useState(true);
   if (!res) return <Hint>Press Solve to compute the stream table.</Hint>;
-  const streams = Object.values(res.streams).filter((s) => s.molar_flow != null);
+  // Same flow-order numbering the canvas stream flags use (# column below).
+  const nos = streamNumbers(nodes, edges);
+  const streams = Object.values(res.streams)
+    .filter((s) => s.molar_flow != null)
+    .sort((a, b) => (nos.get(a.id) ?? Infinity) - (nos.get(b.id) ?? Infinity));
   const comps = componentOrder(streams);
   const mw = res.molar_mass;
   const Tu = defaultUnit("temperature", unitSet);
@@ -74,12 +81,13 @@ export function StreamTable() {
 
   const exportCsv = () => downloadCsv(
     [
-      ["stream", `T (${Tu})`, `P (${Pu})`, `n (${nu})`, `m (${mu})`,
+      ["#", "stream", `T (${Tu})`, `P (${Pu})`, `n (${nu})`, `m (${mu})`,
        "phase", "vapor_fraction",
        ...Object.keys(streams[0]?.z ?? {}).map((c) => `z_${c}`)],
       ...streams.map((s) => {
         const m = streamMassFlow(s.z, s.molar_flow, mw);
         return [
+          nos.get(s.id) ?? null,
           s.id,
           s.T != null ? toDisplay("temperature", s.T, unitSet) : null,
           s.P != null ? toDisplay("pressure", s.P, unitSet) : null,
@@ -120,6 +128,7 @@ export function StreamTable() {
         <table className="data-table">
           <thead>
             <tr>
+              <th title="stream number">#</th>
               <th>stream</th>
               <th>T / {Tu}</th>
               <th>P / {Pu}</th>
@@ -137,6 +146,7 @@ export function StreamTable() {
               const m = streamMassFlow(s.z, s.molar_flow, mw);
               return (
                 <tr key={s.id}>
+                  <td>{nos.get(s.id) ?? "—"}</td>
                   <td>{s.id}</td>
                   <td>{fmtDim("temperature", s.T, unitSet, 2)}</td>
                   <td>{fmtDim("pressure", s.P, unitSet, 3)}</td>
