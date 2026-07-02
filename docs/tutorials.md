@@ -55,7 +55,6 @@ rigorous distillation), and **13** (the Pyomo backend). The full catalog:
 | `18_cyclohexane_plant.py` | Full plant | The cyclohexane plant end to end (Hameed ch. 15.1): benzene hydrogenation, feed-effluent HX, H₂ recycle. |
 | `19_crude_assay.py` | Petroleum | Crude assay characterization → pseudo-components (TBP/MW/API curves → 38 hypocomponents). |
 | `20_crude_tower.py` | Petroleum | A steam-stripped crude atmospheric tower: side draws, pumparounds, non-reboiled MESH. |
-| `21_resid_crude_tower.py` | Petroleum | The full resid-bearing crude atmospheric tower (Naphtali-Sandholm). |
 | `21_solids.py` | Solids | Solids operations (Hameed ch. 12): cyclone, rotary vacuum filter, baghouse, a kaolin train. |
 | `22_amine_sweetening.py` | Gas treating | A DEA absorber over the reactive acid-gas package. |
 | `23_amine_plant.py` | Gas treating | The full amine gas-sweetening plant (Hameed §15.3): absorber + regenerator. |
@@ -71,6 +70,7 @@ rigorous distillation), and **13** (the Pyomo backend). The full catalog:
 | `33_entrainer_decant_column.py` | Azeotropic | Anhydrous ethanol via an integrated decanting-condenser column (UNIFAC VLLE). |
 | `34_entrainer_plant.py` | Full plant | The full closed §9.5.6 anhydrous-ethanol entrainer plant with the cyclohexane recycle. |
 | `35_entrainer_economics.py` | Techno-economics | The entrainer plant costed end to end: tower + trays + decanting condenser + reboiler, LCOP, tornado, Monte-Carlo. |
+| `36_resid_crude_tower.py` | Petroleum | The full resid-bearing crude atmospheric tower (Naphtali-Sandholm). |
 
 For the engine entry points behind these — solvers, unit ops, analysis tools,
 and the TEA pipeline — see [Unit operations](unit-operations.md),

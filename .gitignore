@@ -13,6 +13,8 @@ dist/
 node_modules/
 web/dist/
 .vite/
+# typescript incremental build cache (regenerated on every build)
+web/*.tsbuildinfo
 # os / editor
 .DS_Store
 .idea/

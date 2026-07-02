@@ -50,11 +50,11 @@ tea = analyze(fs, report, TEAConfig(product_component="ammonia"))
 print(tea.profitability.lcop)
 ```
 
-Every example in `examples/` (01–18) is runnable and validated — the
+Every example in `examples/` (01–36) is runnable and validated — the
 authoritative feature tour, from a two-unit balance through rigorous columns,
-absorbers, extraction, pipe networks & relief sizing, heat integration, and
-the full cyclohexane plant of the book's ch. 15. `examples/04`–`05` build and
-cost the ammonia loop end-to-end.
+absorbers, extraction, pipe networks & relief sizing, heat integration, crude
+towers, gas sweetening, solids, and azeotropic/entrainer plants. `examples/04`–`05`
+build and cost the ammonia loop end-to-end.
 
 ## This documentation site
 
