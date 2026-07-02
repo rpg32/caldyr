@@ -37,7 +37,10 @@ the splitter purges 10% of the recycle vapor. That recycle is a **closed loop**,
 so the solver must *tear* it: guess the recycle stream, solve around the loop,
 and iterate until the guess matches the result.
 
-<!-- SCREENSHOT: the solved ammonia loop on the PFD canvas, colored by phase, with the recycle and purge streams visible -->
+![The solved ammonia loop on the PFD canvas, streams colored by phase](img/ammonia-loop-solved.png)
+*The solved loop in the web app's PFD view, streams colored by phase (legend
+bottom-left). The recycle runs back along the bottom from the splitter to the
+mixer; the purge and liquid-ammonia product leave at the right.*
 
 ---
 
@@ -66,7 +69,10 @@ and iterate until the guess matches the result.
    up capital and operating cost, and shows the LCOP, an interactive tornado, and
    (press **Monte-Carlo**) a P10/P50/P90 histogram.
 
-<!-- SCREENSHOT: the Econ tab showing equipment costs, LCOP KPI, and the tornado chart -->
+![The Econ tab: KPI cards, installed equipment costs, and the LCOP tornado](img/ammonia-econ.png)
+*The Econ tab after pressing Cost: KPI cards (LCOP $0.690/kg, TCI, OPEX, NPV), the
+installed-equipment table, and the LCOP sensitivity tornado — feed price is the
+longest bar by far.*
 
 > The Copilot panel can do all of this from a sentence ("build and cost an
 > ammonia loop") and hand you back the same flowsheet as a reviewable diff — but

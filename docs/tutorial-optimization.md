@@ -101,14 +101,18 @@ rather than Python callables:
 
 1. Load or build the flash-recycle flowsheet and **Solve** it once.
 2. Open the **Opt** tab.
-3. **Objective:** sense `min`, metric **duty** of stream `Q`.
-4. **Design variable:** unit `FL`, param `T`, bounds `340`–`370`, initial `360`.
+3. **Objective:** sense `min`, metric **duty** (the flash duty, listed as
+   `FL_duty`).
+4. **Design variable:** unit `FL`, param `T`, bounds `340`–`370` K.
 5. **Constraint:** metric **component_rate** of `n-pentane` in stream `VAP`,
    operator `>=`, value `4.2`.
 6. Press **Optimize**. The panel reports the optimal `FL.T`, the objective, and
    re-solves so the canvas and stream table show the optimum.
 
-<!-- SCREENSHOT: the Opt panel with the duty objective, FL.T design variable, and the n-pentane recovery constraint filled in, showing the optimal result -->
+![The Opt panel: duty objective, FL.T design variable, n-pentane recovery constraint, and the optimal result](img/optimization-opt-panel.png)
+*The Opt builder filled in: minimize the flash duty over `FL.T` ∈ [340, 370] K
+subject to n-pentane in `VAP` ≥ 4.2 mol/s. The Result shows the optimum — `FL.T` =
+360.83 K at 222.6 kW — which you can apply back onto the canvas.*
 
 **The honest limit of the panel.** Its objective and constraint metrics are
 `duty`, `flow`, and `component_rate` read off the solved flowsheet — the physical
@@ -226,7 +230,10 @@ the feed-price and correlation-error samples — is the honest uncertainty on th
 answer. `seed` makes it reproducible; `n` trades runtime for smoothness. The
 **Econ** tab shows this as a histogram with the P10/P50/P90 marked.
 
-<!-- SCREENSHOT: the Econ tab tornado and Monte-Carlo histogram side by side -->
+![The Econ tab: the LCOP tornado above the Monte-Carlo histogram](img/ammonia-econ-mc.png)
+*The Econ tab for the ammonia loop after running Monte-Carlo: the LCOP sensitivity
+tornado (feed price dominant) above the P10/P50/P90 histogram of the LCOP
+distribution.*
 
 ---
 

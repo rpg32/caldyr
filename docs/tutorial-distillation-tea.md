@@ -166,7 +166,11 @@ sizing, and spotting pinches:
      16   381.69      50.00     118.65     0.0475     0.1025   (reboiler)
 ```
 
-<!-- SCREENSHOT: the Inspector "Design results" panel showing the rigorous column's temperature and composition stage-profile charts -->
+![The Inspector Design results panel: the rigorous column's converged stage profiles](img/distillation-design-results.png)
+*The Inspector's Params tab for the solved `RigorousColumn`: the Design results
+table (converged duties, R, MESH iteration/flash counts) above the temperature and
+liquid-composition stage-profile charts — benzene and toluene crossing near the
+feed stage.*
 
 **When you would care about the difference.** For this near-ideal benzene/toluene
 split FUG and MESH agree closely. They diverge — and the rigorous column earns
@@ -227,8 +231,10 @@ Two honest observations:
 Every separations engineer knows the shape of this trade-off: **more reflux →
 fewer stages (cheaper tower) but more boilup (bigger, costlier condenser/reboiler
 and more steam)**. Caldyr lets you put dollar figures on both ends. Sweep
-`rr_factor` (the multiple of R_min) and re-cost each design — this is the Study
-tab's job in the web app, and a five-line loop in Python:
+`rr_factor` (the multiple of R_min) and re-cost each design. The web app's **Study**
+tab sweeps a parameter live and charts an engine metric (reboiler duty, a product
+flow); to bring the *economics* in you re-cost each point, which is a five-line
+loop in Python:
 
 ```python
 for rr in (1.05, 1.1, 1.2, 1.3, 1.5, 2.0):
@@ -267,7 +273,10 @@ LCOP barely moves because feed cost swamps it — but the shape is real, and on 
 feed you produce rather than buy, or with expensive steam, the same curve sets the
 design.)
 
-<!-- SCREENSHOT: the Study tab with reflux ratio on the x-axis and TCI / utilities plotted, showing the crossover -->
+![Capital and utility cost versus reflux ratio for the benzene/toluene column](img/distillation-reflux-tradeoff.png)
+*Plotting the sweep: capital (TCI, blue) bottoms out near 1.5× R_min, while annual
+utilities (orange) rise monotonically with reflux. The two curves are the competing
+costs behind the "1.1–1.3 × R_min" rule of thumb.*
 
 ---
 
