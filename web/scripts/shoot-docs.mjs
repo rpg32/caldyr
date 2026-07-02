@@ -137,12 +137,23 @@ async function shootAmmonia(browser, canvasOnly = false) {
   });
   await page.waitForTimeout(400);
   await page.getByRole("radio", { name: "PFD" }).click();
-  await page.locator('select[title^="Color streams"]').selectOption("phase");
   await page.getByRole("button", { name: "Solve", exact: true }).click();
   await page.waitForFunction(statusMatches("/^Solved/"), null, { timeout: 90000 });
   await page.waitForTimeout(400);
   await page.getByRole("button", { name: "Arrange" }).click().catch(() => {});
   await page.waitForTimeout(1500);
+  // Apply phase coloring AFTER the solve so it uses the solved stream data — set
+  // before Solve it stays gray. Toggle none→phase to force a recolor, then wait
+  // until the legend's "solve to color streams" hint disappears (= streams colored).
+  const colorSel = page.locator('select[title^="Color streams"]');
+  await colorSel.selectOption("none");
+  await page.waitForTimeout(200);
+  await colorSel.selectOption("phase");
+  await page.waitForFunction(
+    "() => !document.querySelector('.react-flow') || " +
+    "![...document.querySelectorAll('.react-flow *')].some(e => /solve to color/i.test(e.textContent || ''))",
+    null, { timeout: 8000}).catch(() => {});
+  await page.waitForTimeout(500);
   await page.locator(".react-flow__controls-fitview").click().catch(() => {});
   await page.waitForTimeout(700);
   // Hero shot: hide the minimap/controls/attribution, then clip tight to the
