@@ -48,7 +48,10 @@
   duties, convergence plot, and the mass & energy **balance check**.
 - **Econ** — KPIs, installed equipment costs, interactive tornado, Monte-Carlo
   histogram (P10/P50/P90).
-- **Opt** — optimization builder over any objective/design-variables/constraints.
+- **Opt** — optimization builder over a **physical** objective/constraint
+  (duty, stream flow, or component rate) and design variables. Economic
+  objectives like LCOP are Python-only (`solver.optimize` with a callable) — see
+  [tutorial 3](tutorial-optimization.md).
 - **Study** — parameter sweeps with live charts and CSV export.
 
 ## Projects
