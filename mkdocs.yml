@@ -29,6 +29,11 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
+  - Tutorials:
+    - Overview: tutorials.md
+    - Ammonia synthesis loop: tutorial-ammonia-loop.md
+    - Distillation column: tutorial-distillation-tea.md
+    - Optimization: tutorial-optimization.md
   - Using the app: ui-guide.md
   - Unit operations: unit-operations.md
   - Analysis tools: analysis-tools.md
