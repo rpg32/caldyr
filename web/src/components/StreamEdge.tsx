@@ -18,6 +18,8 @@ export interface StreamEdgeData extends Record<string, unknown> {
   tNorm?: number; // 0..1 within the solved temperature range
   pinned?: boolean;
   plain?: boolean; // BFD view: no labels/callouts
+  pfd?: boolean;   // PFD/P&ID view: show a numbered stream flag instead of a name
+  streamNo?: number; // stable stream number (see lib/streamNumbers)
 }
 export type StreamEdgeType = Edge<StreamEdgeData, "stream">;
 
@@ -100,16 +102,35 @@ export function StreamEdge({
   const [hovered, setHovered] = useState(false);
   const [path, labelX, labelY] = getSmoothStepPath({
     sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition,
-    borderRadius: 6,
+    borderRadius: 2, // near-orthogonal corners for a classic PFD look
   });
   const color = edgeColor(data, selected);
   const showCallout = data?.state && (data.pinned || hovered);
+  // A directional arrowhead that follows the edge colour. Colours vary per edge
+  // (phase/temperature map to concrete rgb; others to a theme CSS var), so each
+  // edge carries its own marker rather than sharing a fixed palette.
+  const markerId = `stream-arrow-${id}`;
+  // Material streams in PFD/P&ID get a numbered diamond flag; the stream name
+  // moves to the hover/pin callout. Energy streams keep the plain text label.
+  const flagged = data?.pfd && !data?.energy && data?.streamNo != null;
+  // Nudge the flag off the wire, perpendicular to the overall edge direction, so
+  // it doesn't sit on top of the line or a neighbouring node's tag label.
+  const dx = targetX - sourceX;
+  const dy = targetY - sourceY;
+  const plen = Math.hypot(dx, dy) || 1;
+  const flagX = labelX - (dy / plen) * 13;
+  const flagY = labelY + (dx / plen) * 13;
 
   return (
     <g onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
+      <marker id={markerId} viewBox="0 0 10 10" refX="8.5" refY="5"
+        markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" style={{ fill: color }} />
+      </marker>
       <BaseEdge
         id={id}
         path={path}
+        markerEnd={`url(#${markerId})`}
         style={{
           stroke: color,
           strokeWidth: selected || hovered ? 2.2 : 1.5,
@@ -117,14 +138,22 @@ export function StreamEdge({
         }}
       />
       <EdgeLabelRenderer>
-        {!data?.plain && (
+        {!data?.plain && (flagged ? (
+          <div
+            className={`stream-flag${selected ? " selected" : ""}`}
+            style={{ transform: `translate(-50%, -50%) translate(${flagX}px, ${flagY}px)` }}
+            title={String(label ?? id)}
+          >
+            <span>{data!.streamNo}</span>
+          </div>
+        ) : (
           <div
             className={`edge-label${selected ? " selected" : ""}`}
             style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
           >
             {String(label ?? id)}
           </div>
-        )}
+        ))}
         {!data?.plain && showCallout && (
           <div
             className="edge-callout-anchor"

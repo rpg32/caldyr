@@ -3,9 +3,10 @@ import { useEffect, useRef, useState } from "react";
 import type { CaldyrNode } from "../flow";
 import { useStore } from "../store";
 import type { Port } from "../types";
-import { glyphFor } from "./glyphs";
+import { humanizeType } from "../lib/format";
+import { portAnchors, symbolFor, type Anchor } from "./pfdSymbols";
 
-// One handle per port: inlets on the left, outlets on the right, spaced evenly.
+// BFD view: one handle per port, inlets left / outlets right, spaced evenly.
 // Energy ports (duties/work) render in amber so they read as utility connections.
 function PortHandles({ ports, dir }: { ports: Port[]; dir: "inlet" | "outlet" }) {
   const side = ports.filter((p) => p.direction === dir);
@@ -27,6 +28,31 @@ function PortHandles({ ports, dir }: { ports: Port[]; dir: "inlet" | "outlet" })
           title={`${p.name} (${p.kind})`}
         />
       ))}
+    </>
+  );
+}
+
+// PFD view: handles pinned to the symbol's physical nozzles (see pfdSymbols). The
+// side↔offset is turned into a Position + left/top so edges route orthogonally.
+function AnchoredHandles({ ports, anchors }: { ports: Port[]; anchors: Map<string, Anchor> }) {
+  return (
+    <>
+      {ports.map((p) => {
+        const a = anchors.get(p.name);
+        if (!a) return null;
+        const type = p.direction === "inlet" ? "target" : "source";
+        const along = `${a.offset * 100}%`;
+        const style: React.CSSProperties = {
+          background: p.kind === "energy" ? "var(--energy)" : "var(--accent)",
+          width: 8, height: 8,
+        };
+        if (a.position === Position.Left || a.position === Position.Right) style.top = along;
+        else style.left = along;
+        return (
+          <Handle key={p.name} id={p.name} type={type} position={a.position}
+            style={style} title={`${p.name} (${p.kind})`} />
+        );
+      })}
     </>
   );
 }
@@ -79,24 +105,46 @@ function NodeTitle({ id, label }: { id: string; label: string }) {
   );
 }
 
+function subtitleOf(data: CaldyrNode["data"]): string {
+  // Spaced words for CamelCase engine types ("Equilibrium Reactor"); boundary
+  // nodes just read "feed" / "product".
+  return data.kind === "unit" ? humanizeType(data.unitType ?? "") : data.kind;
+}
+
 export function UnitNode({ id, data, selected }: NodeProps<CaldyrNode>) {
   const bfd = useStore((s) => s.viewMode) === "bfd";
   const invalid = useStore((s) => s.invalidNodes.includes(id));
-  const cls = `node node-${data.kind}${selected ? " selected" : ""}`
-    + `${bfd ? " node-bfd" : ""}${invalid ? " node-invalid" : ""}`;
-  const subtitle =
-    data.kind === "unit" ? data.unitType
-    : data.kind === "feed" ? "feed"
-    : "product";
+
+  // BFD keeps the labelled card (correct for block diagrams); PFD/P&ID draw the
+  // equipment symbol as the node body with the tag + type below it.
+  if (bfd) {
+    const cls = `node node-${data.kind} node-bfd${selected ? " selected" : ""}`
+      + `${invalid ? " node-invalid" : ""}`;
+    return (
+      <div className={cls}>
+        <PortHandles ports={data.ports} dir="inlet" />
+        <span className="node-text">
+          <NodeTitle id={id} label={data.label} />
+        </span>
+        <PortHandles ports={data.ports} dir="outlet" />
+      </div>
+    );
+  }
+
+  const { w, h, body } = symbolFor(data.kind, data.unitType);
+  const anchors = portAnchors(data.kind, data.unitType, data.ports);
+  const cls = `pfd-node kind-${data.kind}${selected ? " selected" : ""}`
+    + `${invalid ? " invalid" : ""}`;
   return (
     <div className={cls}>
-      <PortHandles ports={data.ports} dir="inlet" />
-      {!bfd && <span className="node-glyph">{glyphFor(data.kind, data.unitType)}</span>}
-      <span className="node-text">
+      <div className="pfd-symbol" style={{ width: w, height: h }}>
+        {body}
+        <AnchoredHandles ports={data.ports} anchors={anchors} />
+      </div>
+      <div className="pfd-label" style={{ maxWidth: Math.max(w, 96) }}>
         <NodeTitle id={id} label={data.label} />
-        {!bfd && <div className="node-sub">{subtitle}</div>}
-      </span>
-      <PortHandles ports={data.ports} dir="outlet" />
+        <div className="node-sub">{subtitleOf(data)}</div>
+      </div>
     </div>
   );
 }

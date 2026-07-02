@@ -12,8 +12,13 @@ const getElk = () => {
 const OPTIONS: Record<string, string> = {
   "elk.algorithm": "layered",
   "elk.direction": "RIGHT",
-  "elk.layered.spacing.nodeNodeBetweenLayers": "110",
-  "elk.spacing.nodeNode": "70",
+  // Roomier than the old card layout: equipment symbols are taller/wider and
+  // carry a tag label below, so give layers and neighbours more air.
+  "elk.layered.spacing.nodeNodeBetweenLayers": "130",
+  "elk.spacing.nodeNode": "90",
+  // Keep stream flags/labels off the wire and neighbouring nodes' tags.
+  "elk.spacing.edgeNode": "28",
+  "elk.layered.spacing.edgeNodeBetweenLayers": "55",
   "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
   "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
   // Break recycle cycles at the edge that runs against flowsheet order (the
