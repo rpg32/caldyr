@@ -73,6 +73,8 @@ closure — are **exposed, not hidden**: see any solve's Streams tab or its
 ## Contributing & license
 
 Issues and PRs welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md); every unit op
-and property method must ship with a cited validation test. License terms are in
-[`LICENSE`](LICENSE), and Caldyr never vendors GPL code (e.g. DWSIM internals) —
+and property method must ship with a cited validation test. Caldyr is licensed
+under the [AGPL-3.0](LICENSE): free for everyone to use, self-host, and modify —
+and anyone who offers a modified Caldyr as a network service must share their
+changes. Caldyr never vendors third-party GPL code (e.g. DWSIM internals) —
 interop happens across its API only.
