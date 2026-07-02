@@ -1,5 +1,7 @@
+import { ReactFlowProvider } from "@xyflow/react";
 import { useEffect, useRef } from "react";
 import { CanvasView } from "./components/CanvasView";
+import { CommandPalette } from "./components/CommandPalette";
 import { Inspector } from "./components/Inspector";
 import { Palette } from "./components/Palette";
 import { GlossaryDialog } from "./components/GlossaryDialog";
@@ -26,7 +28,8 @@ function useKeyboardShortcuts() {
       if (!(e.ctrlKey || e.metaKey) || inTextInput(e)) return;
       const s = useStore.getState();
       const k = e.key.toLowerCase();
-      if (k === "z" && e.shiftKey) { e.preventDefault(); s.redo(); }
+      if (k === "k") { e.preventDefault(); s.toggleCommandPalette(); }
+      else if (k === "z" && e.shiftKey) { e.preventDefault(); s.redo(); }
       else if (k === "z") { e.preventDefault(); s.undo(); }
       else if (k === "y") { e.preventDefault(); s.redo(); }
       else if (k === "c") { s.copySelection(); }
@@ -109,24 +112,29 @@ export function App() {
   useAutosave();
 
   return (
-    <div className="flex h-screen flex-col bg-bg text-text">
-      <Toolbar />
-      <div
-        className="grid min-h-0 flex-1"
-        style={{ gridTemplateColumns: `150px 1fr 6px ${inspectorWidth}px` }}
-      >
-        <Palette />
-        <CanvasView />
-        <PanelResizer />
-        <Inspector />
+    // Provider hoisted above the canvas so the command palette can read the live
+    // React Flow viewport (to drop new units at canvas centre).
+    <ReactFlowProvider>
+      <div className="flex h-screen flex-col bg-bg text-text">
+        <Toolbar />
+        <div
+          className="grid min-h-0 flex-1"
+          style={{ gridTemplateColumns: `150px 1fr 6px ${inspectorWidth}px` }}
+        >
+          <Palette />
+          <CanvasView />
+          <PanelResizer />
+          <Inspector />
+        </div>
+        <Toasts />
+        <ProjectsDialog />
+        <ScenariosDialog />
+        <ReactionEditorDialog />
+        <SettingsDialog />
+        <GlossaryDialog />
+        <CommandPalette />
+        <Tour />
       </div>
-      <Toasts />
-      <ProjectsDialog />
-      <ScenariosDialog />
-      <ReactionEditorDialog />
-      <SettingsDialog />
-      <GlossaryDialog />
-      <Tour />
-    </div>
+    </ReactFlowProvider>
   );
 }

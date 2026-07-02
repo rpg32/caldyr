@@ -131,6 +131,7 @@ interface State {
   projectsOpen: boolean;
   settingsOpen: boolean;
   glossaryOpen: boolean;
+  commandPaletteOpen: boolean;
   projects: SavedProject[];
   // history & clipboard
   past: HistoryEntry[];
@@ -152,7 +153,7 @@ interface State {
   setProduct: (p: string) => void;
   addComponent: (id: string) => void;
   removeComponent: (id: string) => void;
-  addUnit: (kind: "unit" | "feed" | "product", unitType?: UnitType) => void;
+  addUnit: (kind: "unit" | "feed" | "product", unitType?: UnitType, position?: { x: number; y: number }) => void;
   setParam: (nodeId: string, key: string, value: unknown) => void;
   unsetParam: (nodeId: string, key: string) => void;
   refreshPorts: (nodeId: string) => void;
@@ -207,6 +208,8 @@ interface State {
   toggleProjects: () => void;
   toggleSettings: () => void;
   toggleGlossary: () => void;
+  toggleCommandPalette: () => void;
+  setCommandPalette: (open: boolean) => void;
   saveCurrentProject: (name: string) => void;
   loadProject: (name: string) => void;
   removeProject: (name: string) => void;
@@ -316,6 +319,7 @@ export const useStore = create<State>((set, get) => {
     projectsOpen: false,
     settingsOpen: false,
     glossaryOpen: false,
+    commandPaletteOpen: false,
     projects: listProjects(),
     past: [],
     future: [],
@@ -340,7 +344,12 @@ export const useStore = create<State>((set, get) => {
           get().loadFlowDoc(saved, "autosaved session");
           set({ past: [] });
         } else {
-          set({ status: "Ready — add units from the palette or load an example" });
+          // First visit (no restored session): greet with the projects/template
+          // picker rather than a blank canvas. The first-run Tour still fires.
+          set({
+            status: "Ready — start from a template or add units from the palette",
+            projectsOpen: true,
+          });
         }
       } catch (e) {
         set({ status: `API unreachable — is the engine running? (${(e as Error).message})` });
@@ -462,11 +471,13 @@ export const useStore = create<State>((set, get) => {
       set({ components: get().components.filter((c) => c !== id) });
     },
 
-    addUnit: (kind, unitType) => {
+    addUnit: (kind, unitType, at) => {
       commit();
       const s = get();
       const n = s.nodes.length;
-      const position = { x: 140 + (n % 8) * 40, y: 80 + (n % 8) * 30 };
+      // Explicit drop point (e.g. from the command palette → canvas center),
+      // else the classic cascading placement near the top-left.
+      const position = at ?? { x: 140 + (n % 8) * 40, y: 80 + (n % 8) * 30 };
       let node: CaldyrNode;
       if (kind === "unit" && unitType) {
         const id = uniqueNodeId(`${unitType.type.slice(0, 4).toUpperCase()}${n + 1}`);
@@ -1028,6 +1039,8 @@ export const useStore = create<State>((set, get) => {
     toggleProjects: () => set({ projectsOpen: !get().projectsOpen }),
     toggleSettings: () => set({ settingsOpen: !get().settingsOpen }),
     toggleGlossary: () => set({ glossaryOpen: !get().glossaryOpen }),
+    toggleCommandPalette: () => set({ commandPaletteOpen: !get().commandPaletteOpen }),
+    setCommandPalette: (open) => set({ commandPaletteOpen: open }),
 
     saveCurrentProject: (name) => {
       const trimmed = name.trim();
