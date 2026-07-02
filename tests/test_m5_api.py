@@ -110,9 +110,10 @@ def test_unit_type_param_schema_decant_column():
     ct = by_name["condenser_T"]
     assert ct["type"] == "number" and ct.get("required") is True
     assert ct["requires"] == {"decant_condenser": True}
-    # reflux_layer is an enum gated on the same predicate
+    # reflux_layer is an enum gated on the same predicate ('light'/'heavy' are
+    # accepted aliases for 'organic'/'aqueous')
     rl = by_name["reflux_layer"]
-    assert rl["type"] == "select" and rl["options"] == ["organic", "aqueous"]
+    assert rl["type"] == "select" and rl["options"] == ["organic", "light", "aqueous", "heavy"]
     assert rl["requires"] == {"decant_condenser": True}
     # the solver method is a select including naphtali_sandholm (decant needs it)
     assert "naphtali_sandholm" in by_name["method"]["options"]
