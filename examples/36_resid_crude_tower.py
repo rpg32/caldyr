@@ -19,7 +19,7 @@ inside-out Newton stalls at a wide-boiling side-draw stage. The robust method is
 solved at once by a damped Newton with per-component flow variables, warm-started
 by the inside-out method. It closes the tower to machine precision.
 
-    python examples/21_resid_crude_tower.py
+    python examples/36_resid_crude_tower.py
 """
 import sys
 import time

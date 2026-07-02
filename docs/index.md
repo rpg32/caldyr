@@ -19,13 +19,15 @@ analyzer, but git-native, scriptable, and with an LLM in the loop.*
 
 ## What's inside
 
-- **26 unit operations**, each validated against a cited reference: mixers,
+- **36 unit operations**, each validated against a cited reference: mixers,
   heaters/coolers, fired heaters, air coolers, splitters, valves, pipe
   segments, pumps, compressors, expanders, flash drums, evaporators, heat
-  exchangers, three-phase separators, component splitters, conversion /
-  equilibrium / Gibbs (Cantera) / CSTR / PFR reactors, shortcut (FUG) and
-  rigorous (MESH) distillation, absorbers/strippers, reboiled absorbers,
-  liquid-liquid extraction columns, and the HYSYS-style Balance op — see the
+  exchangers, multi-stream (LNG) exchangers, three-phase separators, decanters,
+  component splitters, conversion / equilibrium / Gibbs (Cantera) / CSTR / PFR /
+  Claus reactors, shortcut (FUG) and rigorous (MESH) distillation, absorbers/
+  strippers, reboiled absorbers, liquid-liquid extraction columns, gas
+  saturators, solids ops (cyclone, rotary-vacuum filter, baghouse), and the
+  HYSYS-style Balance op — see the
   [unit-operations reference](unit-operations.md).
 - **Two solvers, one physics**: sequential-modular (Wegstein-accelerated
   tearing) and equation-oriented (simultaneous), agreeing to ~1e-9.

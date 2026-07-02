@@ -2,7 +2,7 @@
 
 ## Canvas
 
-- **Palette** (left): Feed/Product boundaries and all 26 unit operations
+- **Palette** (left): Feed/Product boundaries and all 36 unit operations
   (served live from the engine's registry — anything registered in
   `caldyr.unitops` appears automatically; see the
   [unit-operations reference](unit-operations.md)). Click to add.

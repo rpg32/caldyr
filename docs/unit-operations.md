@@ -1,6 +1,6 @@
 # Unit operations
 
-All 26 registered unit operations, grouped by service. Every unit follows the
+The registered unit operations, grouped by service. Every unit follows the
 same contract: typed ports (material or energy), JSON-friendly `params` that
 round-trip through `.flow`, a `solve(inlets) -> outlets` implementation on the
 flowsheet's property package, and a test validated against a cited reference

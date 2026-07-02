@@ -1,60 +1,78 @@
 # Caldyr
 
-**Open-source, AI-native process simulation & techno-economic analysis.**
-Build BFDs / PFDs / P&IDs, run steady-state mass & energy balances, size and
-cost equipment, and optimize and scale flowsheets — from a modern web UI *and* a
-scriptable Python API.
+**Open-source process simulation with techno-economics built in. Flowsheets that
+solve, cost, and optimize — in your browser or in Python.**
 
-> Working name; rename freely. Think *open Aspen HYSYS + economic analyzer, but
-> git-native, scriptable, and with an LLM in the loop.*
+Caldyr is a steady-state chemical process simulator — the kind of tool used to
+design plants (think Aspen HYSYS) — that is free, git-native, and scriptable. It
+solves mass & energy balances over flowsheets, sizes and costs the equipment, and
+optimizes, all on validated open thermodynamics.
 
-## Why
-Commercial simulators (Aspen HYSYS/Plus, PRO/II, UniSim, gPROMS; Thermoflow for
-power) are costly, Windows-locked, GUI-only, black-box, and unfriendly to version
-control, automation, and optimization. Caldyr is **open, free, API-first,
-git-native, AI-native**, with **techno-economics and optimization in the core** —
-and it stands on validated open thermodynamics rather than reinventing it.
+![A solved ammonia-loop PFD in Caldyr](docs/img/ammonia-loop-solved.png)
 
-## What works today
-- **18 unit operations**, each validated against a cited reference: mixers,
-  heaters/coolers, fired equipment, splitters, valves, pumps, compressors,
-  expanders, flash drums, three-phase (VLLE) separators, component splitters,
-  heat exchangers, conversion / equilibrium / Gibbs (Cantera) / CSTR / PFR
-  reactors, and both shortcut (FUG) and rigorous (MESH) distillation columns.
-- **Two solver backends, one physics** — sequential-modular (Wegstein tearing)
-  and equation-oriented — agreeing to ~1e-9; optimization on top.
-- **Logical ops** (Set/Adjust), solver hints, and balance diagnostics.
-- **Techno-economics in core**: Turton costing, CEPCI escalation, capital/opex,
-  NPV/IRR/LCOP, tornado sensitivity, Monte-Carlo uncertainty.
-- **Web app**: flowsheet canvas with BFD/PFD/P&ID views, phase/temperature
-  stream coloring, auto-layout, groups, undo/copy/paste, projects & templates,
-  optimization & case-study builders, plots — and an **AI copilot** (local LLM
-  via Ollama) whose every edit arrives as a reviewable diff.
-- **MCP server** so Claude Desktop / Codex CLI can drive the engine directly.
+## Why Caldyr
 
-## Foundations (we build on, not reinvent)
-`thermo` + `chemicals` + `CoolProp` (properties/EOS) · `Cantera` (equilibrium/
-kinetics) · `Pyomo` (optional EO optimization backend) · `@xyflow/react`
-(canvas) · DWSIM (interop/validation oracle, GPL — API only).
+- **Real thermodynamics, validated solvers.** Peng-Robinson / SRK / NRTL / UNIFAC
+  via `thermo`, `CoolProp`, and `Cantera` — no invented numbers in the solve path.
+  Two backends (sequential-modular + equation-oriented) agree to ~1e-9, and every
+  unit op ships with a test against a textbook / DWSIM / Aspen reference.
+- **Economics as a first-class citizen.** Equipment sizing → Turton costing →
+  capital/opex → NPV/IRR/LCOP → tornado + Monte-Carlo, in the core — the analysis
+  Aspen sells as a separate product.
+- **Git-native and scriptable.** Flowsheets are plain JSON (`.flow`) that diff and
+  review in git; every action in the web canvas is also in the Python API.
 
-## Quickstart
+## 60-second quickstart
+
 ```bash
-pip install -e ".[dev,api,ai,kinetics]"
-pytest -q                                  # the full validated suite
+pip install -e ".[dev,api,ai,kinetics]"      # engine + API + copilot + Cantera
+pytest -q                                     # the full validated suite
 
-python -m uvicorn api.main:app --port 8753 # engine API
-cd web && npm install && npm run dev       # UI at http://localhost:5273
-```
-Docs: `python -m mkdocs serve` (or read `docs/`). Start with
-`docs/getting-started.md`; architecture in `ARCHITECTURE.md`.
-
-## Layout
-```
-engine/caldyr/{core,thermo,unitops,solver,economics,analysis,ai,io}   # the engine
-api/   FastAPI bridge        web/  React + @xyflow/react UI
-examples/  validated cases   tests/  pytest    docs/  mkdocs site
+python -m uvicorn api.main:app --port 8753    # engine API
+cd web && npm install && npm run dev          # UI at http://localhost:5273
 ```
 
-## License
-Permissive (see `LICENSE`). Never vendor GPL code (e.g. DWSIM internals) — interop
-across its API only.
+In the UI: **Projects → Templates → Ammonia loop**, press **Solve** (watch live
+convergence), then pick a product and press **Cost**. Or headless in Python:
+
+```python
+from caldyr.io import load_flow
+from caldyr.economics import TEAConfig, analyze
+
+fs = load_flow("flowsheet.flow")
+report = fs.solve()                           # or backend="equation_oriented"
+tea = analyze(fs, report, TEAConfig(product_component="ammonia"))
+print(tea.profitability.lcop)
+```
+
+Full tour: `docs/getting-started.md`; architecture in `ARCHITECTURE.md`.
+
+## What's inside
+
+| Area | What you get |
+|---|---|
+| **Unit operations** | **36 validated models** — mixers, heaters/coolers, fired heaters, air coolers, pumps, compressors, expanders, valves, pipe segments, flash drums & evaporators, heat exchangers (LMTD / ε-NTU) & multi-stream LNG exchangers, three-phase separators & decanters, conversion / equilibrium / Gibbs / CSTR / PFR / Claus reactors, shortcut (FUG) and rigorous (MESH) columns, absorbers/strippers, extraction, gas saturators, solids ops (cyclone, filters), component splitters, and the Balance logical op. |
+| **Thermodynamics** | Peng-Robinson & SRK (cubic EOS); NRTL, UNIFAC & UNIFAC-LLE (activity models — azeotropes, VLLE); IAPWS-95 steam — via `thermo` / `CoolProp` / `Cantera`. |
+| **Solvers** | Sequential-modular (Wegstein tear convergence) and equation-oriented (simultaneous Newton) on identical physics, agreeing to ~1e-9; SLSQP optimization on top; Set/Adjust logical ops, solver hints, and balance diagnostics. |
+| **Economics** | Sizing → Turton 4e bare-module costing (CEPCI escalation) → ISBL/OSBL/TCI capital → raw-materials/utilities/COM opex → NPV/IRR/payback/LCOP → tornado sensitivity + Monte-Carlo P10/P50/P90. |
+| **Web app** | Flowsheet canvas with BFD/PFD/P&ID views, phase/temperature stream coloring, auto-layout, groups, undo/copy-paste, a Ctrl+K command palette, projects & templates, optimization & case-study builders, and plots. |
+| **AI copilot** *(beta, local-first)* | An optional assistant that builds, edits, and explains flowsheets through typed tools — the engine does all the physics; the model only orchestrates. Runs locally via Ollama by default (no API key); every proposed edit arrives as a reviewable diff. Also exposed over MCP for Claude Desktop / Codex CLI. |
+
+## Validation
+
+Trust is the whole point. **Every one of the 36 worked examples in `examples/`
+cites its reference** — textbook, DWSIM, or Aspen — from the ammonia loop and
+benzene/toluene columns through crude towers, amine sweetening, Claus sulfur
+recovery, and azeotropic entrainer plants. Property methods are checked against
+known anchors (NRTL vs the ethanol/water azeotrope; `lnKeq` vs Haber-Bosch
+ammonia equilibrium), and the two solver backends cross-check to ~1e-9.
+Convergence diagnostics — residual history, tear streams, per-unit mass/energy
+closure — are **exposed, not hidden**: see any solve's Streams tab or its
+`SolveReport`.
+
+## Contributing & license
+
+Issues and PRs welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md); every unit op
+and property method must ship with a cited validation test. License terms are in
+[`LICENSE`](LICENSE), and Caldyr never vendors GPL code (e.g. DWSIM internals) —
+interop happens across its API only.
