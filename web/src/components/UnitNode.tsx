@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { CaldyrNode } from "../flow";
 import { useStore } from "../store";
 import type { Port } from "../types";
+import { humanizeType } from "../lib/format";
 import { portAnchors, symbolFor, type Anchor } from "./pfdSymbols";
 
 // BFD view: one handle per port, inlets left / outlets right, spaced evenly.
@@ -105,7 +106,9 @@ function NodeTitle({ id, label }: { id: string; label: string }) {
 }
 
 function subtitleOf(data: CaldyrNode["data"]): string {
-  return data.kind === "unit" ? (data.unitType ?? "") : data.kind;
+  // Spaced words for CamelCase engine types ("Equilibrium Reactor"); boundary
+  // nodes just read "feed" / "product".
+  return data.kind === "unit" ? humanizeType(data.unitType ?? "") : data.kind;
 }
 
 export function UnitNode({ id, data, selected }: NodeProps<CaldyrNode>) {

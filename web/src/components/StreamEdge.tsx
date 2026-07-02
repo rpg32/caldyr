@@ -113,6 +113,13 @@ export function StreamEdge({
   // Material streams in PFD/P&ID get a numbered diamond flag; the stream name
   // moves to the hover/pin callout. Energy streams keep the plain text label.
   const flagged = data?.pfd && !data?.energy && data?.streamNo != null;
+  // Nudge the flag off the wire, perpendicular to the overall edge direction, so
+  // it doesn't sit on top of the line or a neighbouring node's tag label.
+  const dx = targetX - sourceX;
+  const dy = targetY - sourceY;
+  const plen = Math.hypot(dx, dy) || 1;
+  const flagX = labelX - (dy / plen) * 13;
+  const flagY = labelY + (dx / plen) * 13;
 
   return (
     <g onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
@@ -134,7 +141,7 @@ export function StreamEdge({
         {!data?.plain && (flagged ? (
           <div
             className={`stream-flag${selected ? " selected" : ""}`}
-            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
+            style={{ transform: `translate(-50%, -50%) translate(${flagX}px, ${flagY}px)` }}
             title={String(label ?? id)}
           >
             <span>{data!.streamNo}</span>

@@ -16,8 +16,9 @@ const OPTIONS: Record<string, string> = {
   // carry a tag label below, so give layers and neighbours more air.
   "elk.layered.spacing.nodeNodeBetweenLayers": "130",
   "elk.spacing.nodeNode": "90",
-  // Keep stream flags/labels off the neighbouring column.
-  "elk.layered.spacing.edgeNodeBetweenLayers": "40",
+  // Keep stream flags/labels off the wire and neighbouring nodes' tags.
+  "elk.spacing.edgeNode": "28",
+  "elk.layered.spacing.edgeNodeBetweenLayers": "55",
   "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
   "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
   // Break recycle cycles at the edge that runs against flowsheet order (the

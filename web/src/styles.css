@@ -70,7 +70,7 @@ body, #root { margin: 0; height: 100vh; }
 .node.selected .node-glyph { color: var(--accent); }
 .node-text { text-align: left; min-width: 0; }
 .node-title { font-weight: 600; white-space: nowrap; }
-.node-sub { color: var(--muted); font-size: 10px; text-transform: lowercase; }
+.node-sub { color: var(--muted); font-size: 10px; }
 .node-invalid { border-color: var(--bad); box-shadow: 0 0 0 2px color-mix(in srgb, var(--bad) 35%, transparent); }
 .node-feed { border-color: var(--ok); }
 .node-feed .node-glyph { color: var(--ok); }
@@ -87,7 +87,12 @@ body, #root { margin: 0; height: 100vh; }
   color: var(--muted); background: none; border: 0;
 }
 .pfd-symbol { position: relative; display: flex; color: inherit; }
-.pfd-symbol .pfd-body { fill: var(--panel2); }
+/* Keep strokes ~1.8px at every zoom so symbols stay legible when fit-viewed. */
+.pfd-symbol svg :is(path, rect, circle, line, polygon, polyline) {
+  vector-effect: non-scaling-stroke;
+}
+/* Subtle themed silhouette so closed bodies read as solid shapes when small. */
+.pfd-symbol .pfd-body { fill: color-mix(in srgb, var(--text) 8%, transparent); }
 .pfd-node.kind-feed { color: var(--ok); }
 .pfd-node.kind-product { color: var(--muted); }
 .pfd-node.selected { color: var(--accent); }
