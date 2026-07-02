@@ -59,6 +59,11 @@ class SizingOptions:
     # Design air-side temperature rise across the tube bundle (typical ACHE
     # design rise of ~10-15 K; GPSA Section 10).
     air_cooler_air_rise: float = 10.0    # K
+    # Overall U for a fired-gas waste-heat-boiler / condenser service (the Claus
+    # sulfur condenser): gas-side controls, so ~30-60 W/m^2/K, well below a
+    # liquid-service shell-and-tube (Towler & Sinnott, Chemical Engineering
+    # Design, 2e, Ch. 12, typical overall coefficients — gas to boiling liquid).
+    whb_overall_U: float = 60.0          # W/m^2/K, gas-service WHB / condenser
     # Tray-column hydraulic design point: fraction of the Fair flooding
     # velocity (80% is the classic sieve-tray design point; Seader 3e
     # sec. 6.6) and the downcomer share of the tower cross-section.
@@ -274,6 +279,37 @@ def _mshe_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
     )]
 
 
+@register_sizer("SulfurCondenser")
+def _sulfur_condenser_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Sulfur condenser costed as a shell-and-tube exchanger on the heat-transfer
+    area A = Q/(U·LMTD) (Turton 4e Table A.1, shell-and-tube floating head).
+
+    In a Claus train the condenser is really a waste-heat boiler that raises steam
+    off the hot reaction/converter effluent, so two honest choices are baked in:
+    the area is sized on a gas-service overall U (``whb_overall_U`` ≈ 60 W/m^2/K,
+    Towler & Sinnott 2e Ch. 12) — far below a liquid-service coefficient — against
+    cooling water (303/316 K, Turton 4e Table 8.3) as the reference coolant; and
+    the recovered heat is a steam *credit* the opex model does not auto-book
+    (``utility=None``), rather than a cooling cost that would grossly overstate
+    opex. A class-5 capital figure — flagged in the notes."""
+    inlet = ctx.ins["in1"]
+    gas = ctx.outs["gas"]
+    q = abs(ctx.duty(unit))
+    cw = data.UTILITIES["cooling_water"]
+    lmtd = HeatExchanger.lmtd(max(inlet.T - cw.T_return, 1.0),
+                              max(gas.T - cw.T_supply, 1.0))
+    area = q / (ctx.opts.whb_overall_U * lmtd)
+    return [EquipmentSize(
+        unit_id=unit.id, equipment_type="heat_exchanger",
+        attribute=area, attribute_name="area_m2",
+        pressure_barg=_pa_to_barg(gas.P), material=ctx.opts.material,
+        notes=[f"sulfur condenser / waste-heat boiler: Q={q / 1e3:.0f} kW, "
+               f"LMTD={lmtd:.0f} K vs cooling water, U={ctx.opts.whb_overall_U} "
+               f"W/m^2/K (gas service); heat recovered as steam — credit not "
+               f"auto-booked (class-5)"],
+    )]
+
+
 def _rotating_size(unit, ctx: SizerContext, eq_type: str) -> list[EquipmentSize]:
     duty = ctx.duty(unit)
     power_kW = abs(duty) / 1000.0
@@ -413,6 +449,36 @@ def _evaporator_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
 @register_sizer("ConversionReactor", "EquilibriumReactor", "GibbsReactor")
 def _reactor_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
     return _vessel_size(unit, ctx, ctx.opts.reactor_residence_s)
+
+
+@register_sizer("ClausReactor")
+def _claus_reactor_size(unit, ctx: SizerContext) -> list[EquipmentSize]:
+    """Claus reaction furnace / catalytic converter costed as a vertical process
+    vessel on the gas-phase reactor space-time (Turton 4e Table A.1, vertical
+    process vessel), the same residence-time basis as the other equilibrium/Gibbs
+    reactors. The volume uses the *combined* inlet volumetric flow (acid gas +
+    combustion air) at inlet conditions × ``reactor_residence_s``.
+
+    NOTE: the thermal furnace is refractory-lined and runs at ~1300-1600 K, and a
+    Claus train is wet/sour service, so a plain carbon-steel pressure vessel
+    under-represents the real cost — this is an order-of-magnitude figure (the
+    catalytic converters are closer to a standard fixed-bed vessel). Flagged in
+    the notes."""
+    vdot = sum(s.molar_flow * ctx.pp.volume(s.T, s.P, s.normalized_z())
+               for s in ctx.ins.values() if s is not None and s.molar_flow)
+    volume = vdot * ctx.opts.reactor_residence_s
+    diameter = (4.0 * volume / (math.pi * ctx.opts.ld_ratio)) ** (1.0 / 3.0)
+    inlet = next(iter(ctx.ins.values()))
+    return [EquipmentSize(
+        unit_id=unit.id, equipment_type="vessel_vertical",
+        attribute=volume, attribute_name="volume_m3",
+        pressure_barg=_pa_to_barg(inlet.P), material=ctx.opts.material,
+        diameter_m=diameter,
+        notes=[f"Claus reactor as a vertical vessel: V = {vdot:.3g} m^3/s x "
+               f"{ctx.opts.reactor_residence_s:.0f} s = {volume:.2f} m^3, "
+               f"D={diameter:.2f} m (refractory furnace / sour service "
+               f"under-costed as a CS vessel — order-of-magnitude)"],
+    )]
 
 
 @register_sizer("CSTR", "PFR")
