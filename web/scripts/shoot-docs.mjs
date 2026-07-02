@@ -101,7 +101,30 @@ async function inspectorClip(page, marginBottom = 26) {
   return { x, y, width: VIEWPORT.width - x, height: Math.min(VIEWPORT.height, bottom + marginBottom) - y };
 }
 
-async function shootAmmonia(browser) {
+// Activate an inspector tab by firing the DOM click on the role=tab element —
+// a plain Playwright .click() intermittently doesn't switch the panel.
+async function clickTab(page, name) {
+  await page.evaluate((n) => {
+    const t = [...document.querySelectorAll("[role=tab]")].find((x) => x.textContent.trim() === n);
+    if (t) t.click();
+  }, name);
+  await page.waitForTimeout(250);
+}
+
+// Activate a tab and confirm its panel rendered (retry: a trailing solve update
+// can reset the tab back to "streams" right after a solve completes).
+async function activatePanel(page, name, sentinelLabel) {
+  for (let i = 0; i < 6; i++) {
+    await clickTab(page, name);
+    try {
+      await page.getByLabel(sentinelLabel).first().waitFor({ state: "visible", timeout: 900 });
+      return;
+    } catch { await page.waitForTimeout(400); }
+  }
+  throw new Error(`could not activate the ${name} panel`);
+}
+
+async function shootAmmonia(browser, canvasOnly = false) {
   const page = await newPage(browser, null);
   await page.getByRole("button", { name: "Projects" }).click();
   const dialog = page.getByRole("dialog");
@@ -118,13 +141,45 @@ async function shootAmmonia(browser) {
   await page.getByRole("button", { name: "Solve", exact: true }).click();
   await page.waitForFunction(statusMatches("/^Solved/"), null, { timeout: 90000 });
   await page.waitForTimeout(400);
+  await page.getByRole("button", { name: "Arrange" }).click().catch(() => {});
+  await page.waitForTimeout(1500);
   await page.locator(".react-flow__controls-fitview").click().catch(() => {});
   await page.waitForTimeout(700);
-  await page.locator(".react-flow").screenshot({ path: `${IMG}/ammonia-loop-solved.png` });
+  // Hero shot: hide the minimap/controls/attribution, then clip tight to the
+  // flowsheet's node bounding box + margin. The ammonia loop is an ⌐-shape (a
+  // horizontal train with the separator/splitter dropping on the right), leaving
+  // its lower-left corner empty; we tuck the phase legend into that empty corner
+  // so it's kept in frame without inflating the crop.
+  const clip = await page.evaluate((margin) => {
+    for (const sel of [".react-flow__minimap", ".react-flow__controls", ".react-flow__attribution"]) {
+      const el = document.querySelector(sel);
+      if (el) el.style.display = "none";
+    }
+    const pane = document.querySelector(".react-flow").getBoundingClientRect();
+    const nodes = [...document.querySelectorAll(".react-flow__node")].map((n) => n.getBoundingClientRect());
+    const nx0 = Math.min(...nodes.map((r) => r.left)), ny0 = Math.min(...nodes.map((r) => r.top));
+    const nx1 = Math.max(...nodes.map((r) => r.right)), ny1 = Math.max(...nodes.map((r) => r.bottom));
+    // place the phase legend inside the empty lower-left of the flowsheet's bbox
+    const legend = [...document.querySelectorAll(".react-flow__panel, .react-flow *")]
+      .find((e) => e.children.length <= 6 && /two-phase|vapor/i.test(e.textContent || ""));
+    if (legend) {
+      legend.style.bottom = "auto";
+      legend.style.right = "auto";
+      legend.style.left = `${nx0 - pane.left + 8}px`;
+      legend.style.top = `${ny0 - pane.top + (ny1 - ny0) * 0.72}px`;
+    }
+    const x0 = Math.max(pane.left, nx0 - margin);
+    const y0 = Math.max(pane.top, ny0 - margin);
+    const x1 = Math.min(pane.right, nx1 + margin);
+    const y1 = Math.min(pane.bottom, ny1 + margin);
+    return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+  }, 60);
+  await page.screenshot({ path: `${IMG}/ammonia-loop-solved.png`, clip });
+  if (canvasOnly) { await page.context().close(); console.log("ammonia: 1 shot (canvas)"); return; }
 
   await page.getByRole("button", { name: "Cost", exact: true }).click();
   await page.waitForFunction(statusMatches("/^Costed/"), null, { timeout: 90000 });
-  await page.getByRole("tab", { name: "Econ" }).click();
+  await clickTab(page, "Econ");
   await page.waitForTimeout(900);
   await page.screenshot({ path: `${IMG}/ammonia-econ.png`, clip: await inspectorClip(page) });
 
@@ -143,7 +198,7 @@ async function shootRigorous(browser) {
   await page.waitForTimeout(400);
   await page.locator(".react-flow__node", { hasText: "COL" }).first().click();
   await page.waitForTimeout(300);
-  await page.getByRole("tab", { name: "Params" }).click();
+  await clickTab(page, "Params");
   await page.waitForTimeout(300);
   // scroll the inspector's scroll container to the bottom so both charts show
   await page.evaluate(() => {
@@ -165,12 +220,18 @@ async function shootOptimize(browser) {
   const page = await newPage(browser, FLASH_RECYCLE);
   await page.getByRole("button", { name: "Solve", exact: true }).click();
   await page.waitForFunction(statusMatches("/^Solved/"), null, { timeout: 90000 });
-  await page.getByRole("tab", { name: "Opt" }).click();
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(1200);   // let trailing solve updates settle
+  await activatePanel(page, "Opt", "Sense");
+  // helper: choose the first option matching a predicate (boundary streams get
+  // auto-renamed on load — e.g. VAP -> PROD_VAP — and duties key as <unit>_duty)
+  const optionMatching = (loc, re) =>
+    loc.evaluate((s, r) => [...s.options].map((o) => o.value).find((v) => v && new RegExp(r).test(v)), re.source);
+
   await page.getByLabel("Sense").selectOption("min");
   await page.getByLabel("Metric type").first().selectOption("duty");
   await page.waitForTimeout(150);
-  await page.getByLabel("Duty").selectOption("FL_duty");   // web keys duties <unit>_duty
+  const dutyOpt = await optionMatching(page.getByLabel("Duty"), /duty|FL/i);
+  await page.getByLabel("Duty").selectOption(dutyOpt);
   await page.getByRole("button", { name: "design variable" }).click();
   await page.waitForTimeout(250);
   await page.getByLabel("Unit", { exact: true }).selectOption("FL");
@@ -182,7 +243,8 @@ async function shootOptimize(browser) {
   await page.waitForTimeout(250);
   await page.getByLabel("Metric type").last().selectOption("component_rate");
   await page.waitForTimeout(200);
-  await page.getByLabel("Stream").last().selectOption("VAP");
+  const vapOpt = await optionMatching(page.getByLabel("Stream").last(), /VAP/i);
+  await page.getByLabel("Stream").last().selectOption(vapOpt);
   await page.getByLabel("Component").last().selectOption("n-pentane");
   await page.getByLabel("Operator").selectOption(">=");
   await page.getByLabel("Constraint value").fill("4.2");
@@ -195,11 +257,17 @@ async function shootOptimize(browser) {
   console.log("optimize panel: 1 shot");
 }
 
+// Optional arg selects a subset: "canvas" (hero shot only), "ammonia",
+// "rigorous", or "optimize". No arg captures everything.
+const only = process.argv[2] || "";
 const browser = await chromium.launch({ headless: true });
 try {
-  await shootAmmonia(browser);
-  await shootRigorous(browser);
-  await shootOptimize(browser);
+  if (only === "canvas") await shootAmmonia(browser, true);
+  else {
+    if (!only || only === "ammonia") await shootAmmonia(browser);
+    if (!only || only === "rigorous") await shootRigorous(browser);
+    if (!only || only === "optimize") await shootOptimize(browser);
+  }
   console.log(`Done → ${IMG}`);
 } finally {
   await browser.close();
