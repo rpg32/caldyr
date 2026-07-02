@@ -1,6 +1,6 @@
 # Unit operations
 
-The registered unit operations, grouped by service. Every unit follows the
+All 36 registered unit operations, grouped by service. Every unit follows the
 same contract: typed ports (material or energy), JSON-friendly `params` that
 round-trip through `.flow`, a `solve(inlets) -> outlets` implementation on the
 flowsheet's property package, and a test validated against a cited reference
@@ -52,7 +52,9 @@ Conventions that apply everywhere:
 | `Flash` (FlashDrum) | `in1` → `vapor`, `liquid` + `duty` | `T` + `P` (isothermal PT flash, duty reported) or `P` alone (adiabatic PH flash) | Property-package VLE (see THERMO validation anchors) | Vertical vessel from residence time (default 300 s) |
 | `Evaporator` | `in1` → `vapor`, `liquid` + `duty` | `P` plus exactly one of `T`, `duty`, or `vapor_fraction` (bracketed root-find; pure-fluid case handled via saturated enthalpies) | Hameed (2025) §5.2 steam-heated evaporator | Vertical vessel + hot-utility opex on the duty |
 | `ThreePhaseSeparator` | `in1` → `vapor`, `liquid_light`, `liquid_heavy` + `duty` | `T` **required** (PT VLLE flash; PH 3-phase deliberately unsupported), `P` (default inlet). PR/SRK only; liquids labeled by mass density | `thermo` FlashVLN; water/n-hexane VLLE structure vs Tsonopoulos (1999) | Horizontal vessel from residence time |
+| `Decanter` | `in1` → `liquid_light`, `liquid_heavy`, `reflux`, `product`, `vapor` + `duty` | `T` **required** (PT VLLE flash, like ThreePhaseSeparator — no adiabatic PH), `P` (default inlet), `reflux_fraction` ∈ [0, 1] of the `reflux_layer` (rest → `product`; the other layer → its light/heavy port), `reflux_layer` `"light"` (default) / `"heavy"`. A miscible feed leaves wholly on `liquid_light` | `thermo` VLLE flash (`flash_pt_3p`; PR/SRK/NRTL/UNIFAC) — the reflux drum that lets a heteroazeotrope distillation cross the boundary (Hameed §9.5.6); examples 28, 33, 34 | Horizontal vessel from residence time (as ThreePhaseSeparator) |
 | `ComponentSplitter` | `in1` → `overhead`, `bottoms` + `duty` | `splits` per component, `default_split`, optional `T_/P_overhead/bottoms`. Black-box; the `duty` port keeps energy books honest | None implied (placeholder unit) | Vessel from residence time |
+| `SulfurCondenser` | `in1` → `gas`, `liquid` (liquid S8) + `duty` | `T` **required** (condenser outlet, K), `P`/`dP` (default inlet). Cools Claus process gas so elemental sulfur condenses; the residual leaves as S8 vapour at its saturation partial pressure `p_S8 = Psat(T)`, while compound-S and inerts stay gas. Needs the `nasa:gas` package (must carry S8) | Liquid-sulfur vapour-pressure model (`caldyr.thermo.sulfur`); the Claus train, Hameed §10.2.3; example 26 | **Not costed** (no sizer — costing a flowsheet containing it raises) |
 
 ## Columns (multistage)
 
@@ -73,6 +75,22 @@ Conventions that apply everywhere:
 | `GibbsReactor` | `in1` → `out` + `duty` | `T` (required), `P` or `dP`. Multi-reaction Gibbs minimization (Cantera `gri30.yaml` species mapping); unmappable components with zero flow pass through | Cantera equilibrate; SMR + WGS example flowsheet | Vessel |
 | `CSTR` | `in1` → `out` + `duty` | `V` (required), `reactions` (power-law `KineticReaction` dicts), `T` (isothermal) or adiabatic (nested Brent on the energy balance), `dP` | Fogler / Levenspiel closed forms | Vessel on `V` directly |
 | `PFR` | `in1` → `out` + `duty` | `V`, `reactions`, optional `T`, `n_steps`, `dP`; stiff LSODA integration; adiabatic T from a PH flash at every volume node | Fogler / Levenspiel closed forms | Vessel on `V` directly |
+| `ClausReactor` | `in1` (acid gas), `in2` (optional 2nd feed, e.g. air) → `out` + `duty` | `T` omitted → adiabatic reaction furnace (flame T predicted via `equilibrate('HP')`, duty 0); `T` set → isothermal catalytic converter (`equilibrate('TP')`); `P`/`dP` (default inlet). Cantera equilibrium over the mapped sulfur slate; needs the `nasa:gas` package | Cantera `equilibrate` over `nasa_gas.yaml` (the GibbsReactor pattern on the sulfur slate); Claus §10.2.3; example 26 | **Not costed** (no sizer) |
+
+## Solids
+
+Solids use a v1 particle model: the solid is an ordinary stream component, and
+the particle-size distribution rides on the unit as the `psd` param — it does
+**not** propagate downstream, so each solids unit re-specifies its own PSD (the
+per-bin splits are on `unit.design` for hand-chaining). Every unit carries a
+`duty` outlet that closes the small enthalpy change of the split. Hameed (2025)
+ch. 12; `examples/21_solids.py`.
+
+| Unit | Ports | Key params / specs | Validation source | Economics |
+|---|---|---|---|---|
+| `Cyclone` | `gas_in` → `gas_out`, `solids_out` + `duty` | `solids` (component id or list), `psd` (`{d_microns, mass_frac}` bins) and `particle_density` (kg/m³) — all required; `geometry` `"Lapple"` (default) / `"Stairmand_HE"` / `"Stairmand_HT"`; exactly one of `body_diameter` (m) or a design `inlet_velocity` (m/s); `n_cyclones` (default 1). d50, per-bin grade η, overall η, dP on `unit.design` | Lapple cut-diameter grade efficiency + Shepherd-Lapple dP (Cooper & Alley 4e ch. 4; Perry's 8e §17); Hameed §12.1 | Per cyclone on gas volumetric flow (Couper/Walas heavy-duty correlation — order-of-magnitude); parallel count on `quantity` |
+| `RotaryVacuumFilter` | `slurry_in` → `filtrate_out`, `cake_out` + `duty` | `solids`, `pressure_drop` (Pa), `cycle_time_s`, `alpha` (specific cake resistance, m/kg — no default) all required; `submergence` (default 0.20), `solids_capture` (default 1.0), `cake_moisture` (wet-basis, default 0.5), `filtrate_viscosity` (override), `drum_radius_m` (optional). Area/flux on `unit.design` | Constant-pressure continuous cake filtration (McCabe-Smith-Harriott 7e ch. 29; Perry's 8e §18); Hameed §12.2 | On the filtration area (order-of-magnitude correlation) |
+| `BaghouseFilter` | `gas_in` → `gas_out`, `solids_out` + `duty` | `solids` (required); `efficiency` (default 0.999), `face_velocity` m/s (air-to-cloth, default 0.01), `S_E` fabric drag (default 2.5e4), `K2` cake resistance (default 5.0e4), `dP_max` cleaning trigger (default 2000 Pa), `bag_diameter_m`/`bag_length_m` (0.15/3.0). Cloth area, bag count, filtration time on `unit.design` | Air-to-cloth cloth area + filter-drag dP model (Cooper & Alley ch. 6; EPA Air Pollution Control Cost Manual 6e); Hameed §12.3 | On the gross cloth area (EPA Cost Manual correlation) |
 
 ## Logical
 
@@ -84,6 +102,16 @@ Flowsheet-level **Set** and **Adjust** logical operations (parameter binding
 and spec-driven root-finds) are not unit ops — they live in the `.flow`
 document under `"logical"` and are described in the
 [app guide](ui-guide.md) and `docs/DATA_MODEL.md`.
+
+## Boundary & utility
+
+These carry no equipment cost; they exist to bring boundaries and inventories
+into the solve so an Adjust or the optimizer can drive them.
+
+| Unit | Ports | Key params / specs | Validation source | Economics |
+|---|---|---|---|---|
+| `Source` | → `out` (no inlet) | `molar_flow` (mol/s ≥ 0), `T` (K), `P` (Pa), `z` (composition) — all required. A boundary feed expressed as a unit op, so its rate/state is a *parameter* an Adjust or the optimizer can drive (unlike a fixed `Flowsheet.feed`) | First principles (a PT flash resolves the outlet state); the adjustable circulating-water makeup of `examples/24` | No equipment cost |
+| `Makeup` | `in1` → `out` | `component` (make-up species, must be in the stream) and `target` (its desired outlet molar flow, mol/s ≥ 0) required; `T`/`P` (make-up conditions, default inlet). Analytically injects pure `component` to hit `target` (`design['makeup_flow']`); a surplus is not removed (purge with a Splitter) | Analytic mole/energy balance (first principles) — an in-loop inventory controller that closes a drifting solvent/water recycle; `examples/24` | No equipment cost |
 
 ## Dynamic ports
 
