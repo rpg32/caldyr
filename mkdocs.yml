@@ -1,7 +1,13 @@
 site_name: Caldyr
+site_url: https://rpg32.github.io/caldyr/
 site_description: >-
   Open-source, AI-native process simulation & techno-economic analysis.
-repo_url: https://github.com/caldyr/caldyr  # update on publication
+repo_url: https://github.com/rpg32/caldyr
+repo_name: rpg32/caldyr
+# Internal planning docs live under docs/ for convenience but are not published.
+exclude_docs: |
+  REACTION_EDITOR_PLAN.md
+  UX_BACKLOG.md
 theme:
   name: material
   palette:

@@ -10,6 +10,9 @@ optimizes, all on validated open thermodynamics.
 
 ![A solved ammonia-loop PFD in Caldyr](docs/img/ammonia-loop-solved.png)
 
+> **Want it hosted?** A managed Caldyr — cloud solves, saved projects, collaboration, no setup — is coming.
+> [**Join the waitlist →**](WAITLIST_URL) <!-- TODO(launch): replace WAITLIST_URL with the live form link -->
+
 ## Why Caldyr
 
 - **Real thermodynamics, validated solvers.** Peng-Robinson / SRK / NRTL / UNIFAC

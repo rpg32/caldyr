@@ -7,6 +7,11 @@ cost equipment, optimize, and explain it all in plain language — from a modern
 web UI *and* a scriptable Python API. Think *open Aspen HYSYS + economic
 analyzer, but git-native, scriptable, and with an LLM in the loop.*
 
+!!! tip "Want it hosted?"
+    A managed Caldyr — cloud solves, saved projects, collaboration, no setup — is
+    coming. [**Join the waitlist →**](WAITLIST_URL)
+    <!-- TODO(launch): replace WAITLIST_URL with the live form link -->
+
 ## Why Caldyr
 
 | | Commercial simulators | Caldyr |
