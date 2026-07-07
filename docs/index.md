@@ -9,8 +9,7 @@ analyzer, but git-native, scriptable, and with an LLM in the loop.*
 
 !!! tip "Want it hosted?"
     A managed Caldyr — cloud solves, saved projects, collaboration, no setup — is
-    coming. [**Join the waitlist →**](WAITLIST_URL)
-    <!-- TODO(launch): replace WAITLIST_URL with the live form link -->
+    coming. [**Join the waitlist →**](https://forms.gle/2AfHSkZfW9xTWCsP6)
 
 ## Why Caldyr
 
