@@ -1,5 +1,9 @@
 # Caldyr
 
+[![CI](https://github.com/rpg32/caldyr/actions/workflows/ci.yml/badge.svg)](https://github.com/rpg32/caldyr/actions/workflows/ci.yml)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+
 **Open-source process simulation with techno-economics built in. Flowsheets that
 solve, cost, and optimize — in your browser or in Python.**
 

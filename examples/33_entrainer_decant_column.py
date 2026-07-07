@@ -7,7 +7,7 @@ is the ternary (ethanol/water/cyclohexane) heteroazeotrope: it condenses and
 settles into two liquids — a cyclohexane-rich ORGANIC layer and an ethanol/water
 AQUEOUS layer.
 
-The decisive modelling point (proven the hard way — see ``PROGRESS.md`` P6):
+The decisive modelling point (proven the hard way):
 
   * An **external** decanter feeds the entrainer back to the column as a stream,
     so the column overhead must carry the *entire* entrainer circulation out the

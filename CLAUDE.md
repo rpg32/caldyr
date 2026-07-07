@@ -217,7 +217,6 @@ integration (M3); Pyomo/IDAES EO backend (M4).
   (`src/lib/params.ts`), toasts/loading/stale states, Tailwind v4 design tokens
   (`@theme inline`) with light/dark themes. Tests: `npm test` (Vitest round-trip
   for flow.ts) and `npm run test:e2e` (Playwright smoke: solve+cost, undo).
-  The cross-repo plan & progress record is `../PROGRESS.md` — keep it updated.
 
 **M5 note:** delivered a working single canvas view (the DoD: build+solve+cost in
 the browser). The full BFD/PFD/P&ID three-view toggle and live plots are future

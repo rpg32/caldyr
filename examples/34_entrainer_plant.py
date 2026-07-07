@@ -36,12 +36,13 @@ Three techniques get the closed loop to book parity:
      entrainer inventory and the bottoms cyclohexane falls with it (the production
      equivalent is a logical **Adjust** on a bottoms-cyclohexane spec — exact, but
      each root-find step re-solves the whole 62-stage recycle, so the marginal-NS
-     endgame, PROGRESS P6 TASK B, makes a deep-cut Adjust impractical at this
-     scale; the make-up continuation shows the same physics robustly).
+     endgame — the turning-point fold documented in the RigorousColumn solver —
+     makes a deep-cut Adjust impractical at this scale; the make-up continuation
+     shows the same physics robustly).
 
 The high-D / low-make-up steps that would strip the LAST cyclohexane to anhydrous
-sit in that marginal-NS endgame (TASK B); the open-loop column (example 33) shows
-62 stages reaching anhydrous, so closed-loop book parity is gated on TASK B, not
+sit in that marginal-NS endgame; the open-loop column (example 33) shows 62
+stages reaching anhydrous, so closed-loop book parity is gated on that fold, not
 on a missing capability.
 
 NOTE: SLOW (a 62-stage VLLE column in a recycle, two continuation passes). Run it
@@ -166,8 +167,8 @@ def main() -> None:
         "method": "naphtali_sandholm", "reboiled": True,
         "decant_condenser": True, "condenser_T": 305.0,
         # warm steps converge in <15 iters; cap low so a high-D step that drifts
-        # into the marginal-NS endgame (PROGRESS P6 TASK B) fails FAST and the
-        # continuation falls back to the last converged draw instead of grinding.
+        # into the marginal-NS endgame fails FAST and the continuation falls
+        # back to the last converged draw instead of grinding.
         "reflux_layer": "organic", "max_iter": 70,
     })
     t100_62.warm_start_from(fs.units["T100"])
@@ -181,13 +182,13 @@ def main() -> None:
     print(f"  {'D100':>5} {'D101':>5} {'mk':>4}  {'recycle':>8}  "
           f"{'EtOH bottoms (x_EtOH / water / cyc)':<38}")
     # Re-establish the loop at the PASS-1 draw on 62 stages, then ramp the draw
-    # up gently (the high-D endgame is the marginal-NS regime — see PROGRESS P6
-    # TASK B — so small steps keep the recycle in its basin; a step that drifts
-    # out fails fast and the continuation falls back to the last converged draw).
+    # up gently (the high-D endgame is the marginal-NS regime, so small steps
+    # keep the recycle in its basin; a step that drifts out fails fast and the
+    # continuation falls back to the last converged draw).
     # D101 is ramped up alongside D100 (A3): with the 62-stage T-100 sending an
     # anhydrous bottoms, essentially all the feed water reports to AQ, and the
     # retuned T-101 concentrates it — the water product climbs as D101 rises until
-    # T-101's own high-draw fold (TASK B) caps it; the continuation then falls
+    # T-101's own high-draw fold caps it; the continuation then falls
     # back to the last converged draw.
     good = _continue(fs, [(10.0, 7.0, 5.0), (12.0, 9.0, 4.5), (14.0, 11.0, 4.0)])
     if good is None:
@@ -200,7 +201,7 @@ def main() -> None:
     #    **Adjust** that varies ["MK","target"] on a bottoms-cyclohexane
     #    component_rate spec (caldyr.solver.logical) — exact but slow here (each
     #    root-find step re-solves the whole 62-stage recycle), so the marginal-NS
-    #    endgame (TASK B) makes the deep-cut Adjust impractical at this scale.
+    #    endgame makes the deep-cut Adjust impractical at this scale.
     d100, d101, mk0 = good
     print(f"\nInventory control (A2) — step the make-up down at D100={d100:.0f} "
           f"(bottoms cyclohexane falls):", flush=True)
@@ -213,7 +214,7 @@ def main() -> None:
                 raise RuntimeError("recycle did not converge")
         except Exception as exc:
             # The deep-cut make-up step drifted into the lean-solvent marginal-NS
-            # endgame (TASK B). Restore the last CONVERGED make-up and re-solve so
+            # endgame. Restore the last CONVERGED make-up and re-solve so
             # the flowsheet is left clean; guard that fallback too (a re-solve from
             # the perturbed state can itself struggle) so the run still reports.
             print(f"  {d100:5.1f} {d101:5.1f} {mkt:4.1f}  "
@@ -240,8 +241,8 @@ def main() -> None:
           "recirculating; the retuned T-101\nconcentrates the water product (~0.53 "
           "here, up from ~0.32). Full book parity (>0.999\nEtOH / >0.95 water) "
           "needs the high-draw operating point that sits past the decant /\nwater-"
-          "column turning-point fold (PROGRESS P6 §K/§L) — the same wall the open-"
-          "loop\ncolumn (example 33) clears but the closed recycle does not in one "
+          "column turning-point fold — the same wall the open-loop\ncolumn "
+          "(example 33) clears but the closed recycle does not in one "
           "solve.")
 
 

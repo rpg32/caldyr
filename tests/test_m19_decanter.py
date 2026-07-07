@@ -16,9 +16,9 @@ property package's ``flash_pt_3p``:
 
 The NRTL-LLE assertions use an illustrative parameter set with a real
 miscibility gap (the ChemSep NRTL parameters bundled with thermo are fit to
-VLE only and carry essentially no gap — see the module finding in PROGRESS.md);
-the test checks the *flash is correct* (isoactivity, balances) rather than the
-exact mutual solubilities, which a single NRTL set cannot fit jointly with VLE.
+VLE only and carry essentially no gap for these pairs); the test checks the
+*flash is correct* (isoactivity, balances) rather than the exact mutual
+solubilities, which a single NRTL set cannot fit jointly with VLE.
 """
 import pytest
 

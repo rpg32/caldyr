@@ -31,7 +31,10 @@ run locally before releases.
    something new.
 4. The web palette, AI tools, and `.flow` schema pick it up automatically.
 
-## License hygiene
+## Licensing
+
+Caldyr is licensed under **AGPL-3.0-or-later**. By submitting a contribution
+you agree it is licensed under the same terms (inbound = outbound); no CLA.
 
 Never copy or statically link GPL code (e.g. DWSIM internals). Interop across
 process/API boundaries only.

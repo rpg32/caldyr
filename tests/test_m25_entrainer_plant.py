@@ -110,7 +110,7 @@ def test_entrainer_plant_closes_and_concentrates_ethanol():
     # at the old 16-stage / RR=1 / low-draw column) — a 2x gain. Book-scale
     # >=0.95 needs the 62-stage T-100 of example 34 (anhydrous bottoms -> ALL the
     # water reports to the aqueous draw) AND driving D101 past T-101's own
-    # high-draw fold (the TASK B wall); see PROGRESS §K/§L.
+    # high-draw turning-point fold.
     assert water.z["water"] > 0.60
 
 
