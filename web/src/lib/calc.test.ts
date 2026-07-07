@@ -49,6 +49,28 @@ describe("evaluateCalcs", () => {
     }
   });
 
+  it("supports the full operator grammar with lazy branches", () => {
+    const out = evaluateCalcs([
+      { name: "pow", expr: "2 ** 3 + 4 % 3" },
+      { name: "cmp", expr: '(T("S1") > 300 ? 1 : 0) + (T("S1") < 300 ? 10 : 20)' },
+      // the untaken branch must stay unevaluated (duty("missing") would throw)
+      { name: "lazy", expr: '1 > 0 ? 2 : duty("missing")' },
+      { name: "andor", expr: '(1 > 2 && duty("missing")) || 7' },
+    ], SOLVE);
+    expect(out[0].value).toBeCloseTo(9, 9);
+    expect(out[1].value).toBeCloseTo(21, 9);
+    expect(out[2].value).toBeCloseTo(2, 9);
+    expect(out[3].value).toBeCloseTo(7, 9);
+    expect(out.every((r) => r.error === null)).toBe(true);
+  });
+
+  it("restricts member access to Math's own properties", () => {
+    for (const expr of ["T.toString(2)", "Math.toString(2)", "Math.hasOwnProperty(1)"]) {
+      const [r] = evaluateCalcs([{ name: "bad", expr }], SOLVE);
+      expect(r.error).not.toBeNull();
+    }
+  });
+
   it("handles unsolved state gracefully", () => {
     const [r] = evaluateCalcs([{ name: "a", expr: 'T("S1")' }], null);
     expect(r.error).toMatch(/no solved stream/);

@@ -150,6 +150,11 @@ class ExtractionColumn(UnitOp):
                 f"ExtractionColumn {self.id!r}: n_stages={n_stages} must be "
                 f">= 1"
             )
+        if n_stages > 1000:
+            raise ExtractionColumnError(
+                f"ExtractionColumn {self.id!r}: n_stages={n_stages} exceeds "
+                f"the 1000-stage limit"
+            )
         if self.params.get("T") is None:
             raise ExtractionColumnError(
                 f"ExtractionColumn {self.id!r}: params['T'] is required — "

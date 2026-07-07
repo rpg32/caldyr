@@ -55,7 +55,7 @@ class SolveRequest(BaseModel):
     flow: FlowDoc
     backend: Literal["sequential", "equation_oriented"] = "sequential"
     tol: float = 1e-6
-    max_iter: int = 200
+    max_iter: int = Field(default=200, ge=1, le=10_000)
     method: Literal["wegstein", "direct"] = "wegstein"
 
 
@@ -111,7 +111,7 @@ class CostRequest(BaseModel):
     backend: Literal["sequential", "equation_oriented"] = "sequential"
     config: CostConfig = Field(default_factory=CostConfig)
     tornado: bool = True
-    monte_carlo: int = 0  # number of MC samples; 0 = skip
+    monte_carlo: int = Field(default=0, ge=0, le=10_000)  # MC samples; 0 = skip
 
 
 class EnvelopeRequest(BaseModel):
@@ -130,8 +130,8 @@ class PropertyTableRequest(BaseModel):
     flow: FlowDoc
     stream: str | None = None
     z: dict[str, float] | None = None
-    T: list[float] = Field(min_length=1)        # K, one or more grid values
-    P: list[float] = Field(min_length=1)        # Pa, one or more grid values
+    T: list[float] = Field(min_length=1, max_length=200)   # K grid values
+    P: list[float] = Field(min_length=1, max_length=200)   # Pa grid values
     props: list[str] | None = None              # default analysis.DEFAULT_PROPS
 
 

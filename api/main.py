@@ -16,6 +16,7 @@ from __future__ import annotations
 import api  # noqa: F401  - path bootstrap so `caldyr` imports
 
 import asyncio
+import re
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -612,12 +613,29 @@ def ai_tool(body: dict) -> dict:
     return out
 
 
+# Browsers do not apply CORS to WebSocket handshakes, so a malicious page could
+# open ws://localhost:<port>/... while the API runs (cross-site WS hijacking).
+# Browser connections must come from a local origin; non-browser clients send
+# no Origin header and are allowed.
+_LOCAL_ORIGIN = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
+
+
+async def _accept_local(ws: WebSocket) -> bool:
+    origin = ws.headers.get("origin")
+    if origin is not None and not _LOCAL_ORIGIN.match(origin):
+        await ws.close(code=1008)  # policy violation
+        return False
+    await ws.accept()
+    return True
+
+
 # -- WebSocket: solve with live iteration progress ----------------------------
 @app.websocket("/ws/solve")
 async def ws_solve(ws: WebSocket) -> None:
     """One solve per message: client sends {flow, backend?, tol?}; server
     streams {type:"iteration"|"result"|"error", ...} and awaits the next job."""
-    await ws.accept()
+    if not await _accept_local(ws):
+        return
     loop = asyncio.get_running_loop()
     try:
         while True:
@@ -666,7 +684,8 @@ async def ws_chat(ws: WebSocket) -> None:
     the socket."""
     from caldyr.ai.chat import ChatAgent
 
-    await ws.accept()
+    if not await _accept_local(ws):
+        return
     loop = asyncio.get_running_loop()
     agent: ChatAgent | None = None
     try:

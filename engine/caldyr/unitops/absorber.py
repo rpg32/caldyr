@@ -733,6 +733,11 @@ class Absorber(UnitOp):
             raise AbsorberError(
                 f"Absorber {self.id!r}: n_stages={n_stages} must be >= 1"
             )
+        if n_stages > 1000:
+            raise AbsorberError(
+                f"Absorber {self.id!r}: n_stages={n_stages} exceeds the "
+                f"1000-stage limit"
+            )
         P = float(self.params.get("P") or P_in)
         if P <= 0.0:
             raise AbsorberError(f"Absorber {self.id!r}: P={P} Pa must be > 0")
@@ -1115,6 +1120,11 @@ class ReboiledAbsorber(UnitOp):
             raise AbsorberError(
                 f"ReboiledAbsorber {self.id!r}: n_stages={n_stages} must be "
                 f">= 2 — the count includes the reboiler as stage n_stages"
+            )
+        if n_stages > 1000:
+            raise AbsorberError(
+                f"ReboiledAbsorber {self.id!r}: n_stages={n_stages} exceeds "
+                f"the 1000-stage limit"
             )
         feed_stage = int(self.params.get("feed_stage", 1))
         if not 1 <= feed_stage <= n_stages - 1:

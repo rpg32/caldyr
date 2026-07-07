@@ -1,7 +1,11 @@
 // Tiny CSV builder + download (no dependency).
 
 const cell = (v: unknown): string => {
-  const s = String(v ?? "");
+  let s = String(v ?? "");
+  // Ids/names can come from shared .flow files; a leading =+-@ or tab/CR would
+  // execute as a formula when the CSV is opened in Excel/Sheets. Numbers are
+  // exempt so negative values stay numeric.
+  if (typeof v === "string" && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 

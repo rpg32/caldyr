@@ -21,7 +21,14 @@ export function requestOverWs<T extends { type: string }>(
     };
     ws.onopen = () => ws.send(JSON.stringify(payload));
     ws.onmessage = (m) => {
-      const e = JSON.parse(m.data as string) as T;
+      let e: T;
+      try {
+        e = JSON.parse(m.data as string) as T;
+      } catch {
+        ws.close();
+        reject(new Error("malformed message from the engine"));
+        return;
+      }
       onEvent(e);
       if (isFinal(e)) {
         ws.close();
@@ -44,7 +51,15 @@ export class ChatSocket {
         resolve();
       };
       ws.onerror = () => reject(new Error("chat socket failed to connect"));
-      ws.onmessage = (m) => onEvent(JSON.parse(m.data as string));
+      ws.onmessage = (m) => {
+        let e: (Record<string, unknown> & { type: string }) | null = null;
+        try {
+          e = JSON.parse(m.data as string);
+        } catch {
+          return; // malformed frame: drop it rather than crash the handler
+        }
+        if (e && typeof e === "object") onEvent(e);
+      };
       ws.onclose = () => {
         this.ws = null;
         onClose();

@@ -644,6 +644,11 @@ class RigorousColumn(UnitOp):
                 f"the count includes the condenser (stage 1) and the reboiler "
                 f"(stage n_stages), so 3 is one tray plus condenser and reboiler"
             )
+        if n_stages > 1000:
+            raise RigorousColumnError(
+                f"RigorousColumn {self.id!r}: n_stages={n_stages} exceeds the "
+                f"1000-stage limit"
+            )
 
         method = str(self.params.get("method", "bubble_point"))
         if method not in ("bubble_point", "sum_rates", "inside_out",
@@ -1522,21 +1527,21 @@ class RigorousColumn(UnitOp):
                 max_iter=max_iter, total_condenser=False, reflux=R,
                 tol=_NS_TOL_REBOILED, decant=True, condenser_T=condenser_T,
                 reflux_organic=reflux_organic)
-        # NOTE (P6 TASK B, parity globalization — investigated, deferred). At the
+        # NOTE (parity globalization — investigated, deferred). At the
         # LEAN-entrainer / high-draw endgame this NS hits a SHARP, sub-1e-6 wall:
         # warm-started continuation converges to machine precision down to
         # ~solvent 2.95 (cyclohexane ~0.3 % in the bottoms), but just past it
         # (~2.9, where book parity cyclohexane < 0.05 % lives) the Newton plateaus
         # at ~2e-2. This is a genuine TURNING-POINT FOLD (the Jacobian goes
         # near-singular along the spec path), not a flash-transition basin issue
-        # (binodal smoothing was measured byte-identical — ruled out, PROGRESS
-        # §I). A pseudo-transient-continuation retry (implicit-Euler damped Newton
+        # (binodal smoothing was measured byte-identical — ruled out).
+        # A pseudo-transient-continuation retry (implicit-Euler damped Newton
         # + SER) was implemented and measured: it lowers the fold residual ~1000x
         # (2.8e-2 -> 3e-5) but convergence stays LINEAR (~400 iters) and never
         # reaches tol, the signature of a true fold — so it was reverted (no
         # practical convergence win / no validating test). The principled fix is
         # arc-length / a bottoms-cyclohexane-target spec reparameterization
-        # (free D or the solvent feed; PROGRESS §K, NEXT_STEPS option 2). Note
+        # (free D or the solvent feed). Note
         # the CLOSED loop sidesteps this entirely: the A2 inventory controller
         # drives the bottoms cyclohexane to 0.006 via the recycle without ever
         # entering this open-loop fixed-(D, solvent) fold.

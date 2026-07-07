@@ -24,6 +24,57 @@ export interface UiMeta {
   }[];
 }
 
+// -- structural gate for untrusted .flow JSON ---------------------------------
+// Shared files, old autosaves, and hand-edited localStorage all reach the store
+// through JSON.parse; the canvas then indexes into units/streams/components.
+// Reject anything whose containers aren't the expected shapes so a crafted or
+// corrupt doc fails here (null) instead of throwing mid-render.
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+function recordList(v: unknown): Record<string, unknown>[] | null {
+  if (v === undefined) return [];
+  if (!Array.isArray(v) || !v.every(isRecord)) return null;
+  return v as Record<string, unknown>[];
+}
+
+export function sanitizeFlowDoc(v: unknown): FlowDoc | null {
+  if (!isRecord(v)) return null;
+  if (typeof v.schema !== "string" || !v.schema.startsWith("caldyr.flow/")) return null;
+  const units = recordList(v.units);
+  const streams = recordList(v.streams);
+  const components = recordList(v.components);
+  if (!units || !streams || !components) return null;
+  for (const u of units) {
+    if (typeof u.id !== "string" || typeof u.type !== "string") return null;
+    if (u.params !== undefined && !isRecord(u.params)) return null;
+    if (u.xy !== undefined &&
+        !(Array.isArray(u.xy) && u.xy.every((n) => typeof n === "number"))) {
+      delete u.xy;
+    }
+  }
+  for (const s of streams) {
+    if (typeof s.id !== "string") return null;
+    if (s.from !== undefined && s.from !== null && typeof s.from !== "string") return null;
+    if (s.to !== undefined && s.to !== null && typeof s.to !== "string") return null;
+    if (s.spec !== undefined && s.spec !== null && !isRecord(s.spec)) return null;
+  }
+  for (const c of components) {
+    if (typeof c.id !== "string") return null;
+  }
+  if (v.meta !== undefined && !isRecord(v.meta)) delete v.meta;
+  const meta = v.meta as Record<string, unknown> | undefined;
+  if (meta && meta.ui !== undefined && !isRecord(meta.ui)) delete meta.ui;
+  const ui = meta?.ui as Record<string, unknown> | undefined;
+  if (ui && ui.calcs !== undefined) {
+    const ok = Array.isArray(ui.calcs) && ui.calcs.every(
+      (r) => isRecord(r) && typeof r.name === "string" && typeof r.expr === "string");
+    if (!ok) delete ui.calcs;
+  }
+  return v as FlowDoc;
+}
+
 export function downloadFlow(doc: FlowDoc, filename = "flowsheet.flow"): void {
   const blob = new Blob([JSON.stringify(doc, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -44,9 +95,9 @@ export function pickFlowFile(): Promise<FlowDoc | null> {
       if (!file) return resolve(null);
       file.text()
         .then((text) => {
-          const doc = JSON.parse(text) as FlowDoc;
-          if (typeof doc.schema !== "string" || !doc.schema.startsWith("caldyr.flow/")) {
-            throw new Error("not a caldyr .flow document (missing schema)");
+          const doc = sanitizeFlowDoc(JSON.parse(text));
+          if (!doc) {
+            throw new Error("not a valid caldyr .flow document");
           }
           resolve(doc);
         })
@@ -68,7 +119,7 @@ export function autosave(doc: FlowDoc): void {
 export function loadAutosave(): FlowDoc | null {
   try {
     const raw = localStorage.getItem(AUTOSAVE_KEY);
-    return raw ? (JSON.parse(raw) as FlowDoc) : null;
+    return raw ? sanitizeFlowDoc(JSON.parse(raw)) : null;
   } catch {
     return null;
   }
@@ -105,7 +156,17 @@ const PROJECTS_KEY = "caldyr.projects.v1";
 
 export function listProjects(): SavedProject[] {
   try {
-    return JSON.parse(localStorage.getItem(PROJECTS_KEY) ?? "[]") as SavedProject[];
+    const raw: unknown = JSON.parse(localStorage.getItem(PROJECTS_KEY) ?? "[]");
+    if (!Array.isArray(raw)) return [];
+    const out: SavedProject[] = [];
+    for (const p of raw) {
+      if (typeof p !== "object" || p === null) continue;
+      const { name, savedAt, doc } = p as Record<string, unknown>;
+      const clean = sanitizeFlowDoc(doc);
+      if (typeof name !== "string" || !clean) continue;
+      out.push({ name, savedAt: typeof savedAt === "string" ? savedAt : "", doc: clean });
+    }
+    return out;
   } catch {
     return [];
   }
