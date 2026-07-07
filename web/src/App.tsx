@@ -25,11 +25,14 @@ function inTextInput(e: KeyboardEvent): boolean {
 function useKeyboardShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || inTextInput(e)) return;
-      const s = useStore.getState();
+      if (!(e.ctrlKey || e.metaKey)) return;
       const k = e.key.toLowerCase();
-      if (k === "k") { e.preventDefault(); s.toggleCommandPalette(); }
-      else if (k === "z" && e.shiftKey) { e.preventDefault(); s.redo(); }
+      // Ctrl+K toggles even from text inputs so it can close the palette
+      // (whose search box has focus); everything else defers to the field.
+      if (k === "k") { e.preventDefault(); useStore.getState().toggleCommandPalette(); return; }
+      if (inTextInput(e)) return;
+      const s = useStore.getState();
+      if (k === "z" && e.shiftKey) { e.preventDefault(); s.redo(); }
       else if (k === "z") { e.preventDefault(); s.undo(); }
       else if (k === "y") { e.preventDefault(); s.redo(); }
       else if (k === "c") { s.copySelection(); }
