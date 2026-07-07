@@ -79,3 +79,15 @@ def test_costing_runs_end_to_end_with_plausible_magnitudes(sized):
         assert c.bare_module > c.purchased > 0.0
         # sanity band for one equipment item ($1k .. $100M, CEPCI-escalated)
         assert 1e3 < c.bare_module < 1e8
+
+
+def test_regression_pins_furnace_and_first_condenser(sized):
+    """Pin the sizes/costs the sizers produced when they were validated, so a
+    silent multiple-x sizing regression can't hide inside the sanity bands.
+    (An intentional correlation or CEPCI change should update these numbers.)"""
+    furn = sized["FURN"]
+    c1 = sized["C1"]
+    assert furn.attribute == pytest.approx(105.12, rel=1e-3)      # m^3
+    assert c1.attribute == pytest.approx(549.92, rel=1e-3)        # m^2
+    assert cost_equipment(furn).bare_module == pytest.approx(576_657, rel=1e-3)
+    assert cost_equipment(c1).bare_module == pytest.approx(348_141, rel=1e-3)
