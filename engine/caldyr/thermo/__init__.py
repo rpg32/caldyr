@@ -9,6 +9,32 @@ from .thermo_pkg import ThermoPackage
 _CUBIC = {"PR", "SRK"}
 _ACTIVITY = {"NRTL", "UNIFAC", "UNIFAC-LLE"}
 
+#: Every selector :func:`make_package` accepts, with a one-line "when to use".
+#: The single source of truth for what property packages exist — the AI tool
+#: layer (and anything else listing packages) serves from here.
+AVAILABLE_PACKAGES: list[dict[str, str]] = [
+    {"id": "thermo:PR", "name": "Peng-Robinson (cubic EOS)",
+     "use": "non-polar gases/hydrocarbons; supports petroleum assay pseudo-components"},
+    {"id": "thermo:SRK", "name": "Soave-Redlich-Kwong (cubic EOS)",
+     "use": "non-polar systems; supports petroleum assay pseudo-components"},
+    {"id": "thermo:NRTL", "name": "NRTL gamma-phi",
+     "use": "polar mixtures / azeotropes"},
+    {"id": "thermo:UNIFAC", "name": "Modified UNIFAC (Dortmund) gamma-phi",
+     "use": "predictive VLE+LLE / heteroazeotropes (3-phase distillation)"},
+    {"id": "thermo:UNIFAC-LLE", "name": "UNIFAC-LLE gamma-phi",
+     "use": "liquid-liquid extraction (Magnussen LLE table)"},
+    {"id": "coolprop:Water", "name": "Steam tables (IAPWS-95 via CoolProp)",
+     "use": "pure-water / steam flowsheets only"},
+    {"id": "amine:DEA", "name": "Reactive acid-gas, DEA (modified Kent-Eisenberg)",
+     "use": "CO2/H2S amine sweetening — absorbers, strippers, regenerators"},
+    {"id": "amine:MDEA", "name": "Reactive acid-gas, MDEA (modified Kent-Eisenberg)",
+     "use": "CO2/H2S amine sweetening — absorbers, strippers, regenerators"},
+    {"id": "amine:MEA", "name": "Reactive acid-gas, MEA (modified Kent-Eisenberg)",
+     "use": "CO2/H2S amine sweetening — absorbers, strippers, regenerators"},
+    {"id": "nasa:gas", "name": "Ideal gas over NASA polynomials (Cantera data)",
+     "use": "combustion/Claus species incl. sulfur allotropes S2/S8"},
+]
+
 
 def _validate_component_ids(components: list[str]) -> None:
     """Check every component id resolves in the chemicals database *before* the
@@ -105,6 +131,7 @@ def make_package(spec: str, components: list[str]) -> PropertyPackage:
 
 
 __all__ = [
+    "AVAILABLE_PACKAGES",
     "PhaseResult",
     "ThreePhaseResult",
     "PropertyPackage",

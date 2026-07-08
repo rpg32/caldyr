@@ -50,6 +50,40 @@ class Flowsheet:
         tu, tp = (dst.split(":") + [None])[:2] if dst else (None, None)
         self.connections.append(Connection(stream_id, fu, fp, tu, tp))
 
+    def remove_stream(self, stream_id: str) -> None:
+        """Remove one stream edge (feed, internal, or product) and its state.
+        Logical ops and tear guesses referencing it are pruned so the flowsheet
+        stays solvable."""
+        if (stream_id not in self.streams
+                and all(c.stream_id != stream_id for c in self.connections)):
+            raise ValueError(f"no stream {stream_id!r}; streams so far: "
+                             f"{sorted({c.stream_id for c in self.connections})}")
+        self.connections = [c for c in self.connections if c.stream_id != stream_id]
+        self.streams.pop(stream_id, None)
+        self.logical = [op for op in self.logical
+                        if (op.get("spec") or {}).get("stream") != stream_id]
+        (self.solver_hints.get("tear_guesses") or {}).pop(stream_id, None)
+
+    def remove_unit(self, unit_id: str) -> list[str]:
+        """Remove a unit plus every stream attached to it (their other endpoint
+        becomes an unconnected port, as in a graph editor). Logical ops varying
+        or reading the unit's params are pruned. Returns the removed stream ids."""
+        if unit_id not in self.units:
+            raise ValueError(f"no unit {unit_id!r}; units so far: {list(self.units)}")
+        del self.units[unit_id]
+        dead = list(dict.fromkeys(c.stream_id for c in self.connections
+                                  if unit_id in (c.from_unit, c.to_unit)))
+        for sid in dead:
+            self.remove_stream(sid)
+
+        def _refs_unit(op: dict) -> bool:
+            return any(isinstance(ref := op.get(role), (list, tuple))
+                       and ref and ref[0] == unit_id
+                       for role in ("target", "source", "vary"))
+
+        self.logical = [op for op in self.logical if not _refs_unit(op)]
+        return dead
+
     def feed(self, stream_id, dst, *, T=None, P=None, molar_flow=None, z=None) -> Stream:
         """Declare a boundary feed stream into ``dst`` ("UNIT:port") and register
         its spec. Returns the created Stream."""

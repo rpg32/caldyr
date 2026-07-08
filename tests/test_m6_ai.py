@@ -46,6 +46,20 @@ AMMONIA_RECIPE = [
     ("connect", {"id": "PURGE", "from": "SPLIT:out2", "to": None}),
 ]
 
+PENTANE_FLASH = [
+    ("new_flowsheet", {"components": ["n-pentane", "n-octane"]}),
+    ("add_unit", {"id": "MIX", "type": "Mixer", "params": {"dP": 0.0}}),
+    ("add_unit", {"id": "FL", "type": "Flash", "params": {"T": 360.0, "P": 101325.0}}),
+    ("add_unit", {"id": "SP", "type": "Splitter", "params": {"split": 0.6}}),
+    ("add_feed", {"id": "FEED", "to": "MIX:in1", "T": 330.0, "P": 101325.0,
+                  "molar_flow": 10.0, "z": {"n-pentane": 0.5, "n-octane": 0.5}}),
+    ("connect", {"id": "MIXOUT", "from": "MIX:out", "to": "FL:in1"}),
+    ("connect", {"id": "VAP", "from": "FL:vapor", "to": None}),
+    ("connect", {"id": "LIQ", "from": "FL:liquid", "to": "SP:in1"}),
+    ("connect", {"id": "RECY", "from": "SP:out1", "to": "MIX:in2"}),
+    ("connect", {"id": "BOT", "from": "SP:out2", "to": None}),
+]
+
 
 def _run(session, calls):
     out = {}
@@ -70,6 +84,31 @@ def test_list_tools_describe_the_engine():
     assert any(u["type"] == "EquilibriumReactor" for u in ut["unit_types"])
     pp = dispatch(s, "list_property_packages", {})
     assert any(p["id"] == "thermo:NRTL" for p in pp["property_packages"])
+
+
+def test_list_property_packages_serves_the_full_registry():
+    """The tool serves thermo.AVAILABLE_PACKAGES — not a hand-copied subset."""
+    s = AgentSession()
+    ids = {p["id"] for p in dispatch(s, "list_property_packages", {})["property_packages"]}
+    assert {"thermo:PR", "thermo:SRK", "thermo:NRTL", "thermo:UNIFAC",
+            "thermo:UNIFAC-LLE", "coolprop:Water", "amine:DEA", "amine:MDEA",
+            "amine:MEA", "nasa:gas"} <= ids
+
+
+def test_list_unit_types_single_type_full_docs():
+    s = AgentSession()
+    out = dispatch(s, "list_unit_types", {"type": "RigorousColumn"})
+    assert out["ok"] and out["type"] == "RigorousColumn"
+    assert "n_stages" in out["doc"]                   # full params documentation
+    assert any(p["name"] == "distillate" for p in out["ports"])
+    assert dispatch(s, "list_unit_types", {"type": "Nope"})["ok"] is False
+
+
+def test_system_prompt_covers_every_unit_type():
+    from caldyr.ai.agent import SYSTEM_PROMPT
+    from caldyr.unitops import REGISTRY
+    missing = [name for name in REGISTRY if name not in SYSTEM_PROMPT]
+    assert not missing, f"SYSTEM_PROMPT lacks port docs for {missing}"
 
 
 # -- the DoD: build + solve + cost via tools -------------------------------
@@ -111,19 +150,7 @@ def test_cost_auto_solves_if_needed():
 
 def test_optimize_tool():
     s = AgentSession()
-    _run(s, [
-        ("new_flowsheet", {"components": ["n-pentane", "n-octane"]}),
-        ("add_unit", {"id": "MIX", "type": "Mixer", "params": {"dP": 0.0}}),
-        ("add_unit", {"id": "FL", "type": "Flash", "params": {"T": 360.0, "P": 101325.0}}),
-        ("add_unit", {"id": "SP", "type": "Splitter", "params": {"split": 0.6}}),
-        ("add_feed", {"id": "FEED", "to": "MIX:in1", "T": 330.0, "P": 101325.0,
-                      "molar_flow": 10.0, "z": {"n-pentane": 0.5, "n-octane": 0.5}}),
-        ("connect", {"id": "MIXOUT", "from": "MIX:out", "to": "FL:in1"}),
-        ("connect", {"id": "VAP", "from": "FL:vapor", "to": None}),
-        ("connect", {"id": "LIQ", "from": "FL:liquid", "to": "SP:in1"}),
-        ("connect", {"id": "RECY", "from": "SP:out1", "to": "MIX:in2"}),
-        ("connect", {"id": "BOT", "from": "SP:out2", "to": None}),
-    ])
+    _run(s, PENTANE_FLASH)
     res = dispatch(s, "optimize", {
         "objective": {"sense": "min", "metric": {"type": "duty", "stream": "FL.duty"}},
         "design_vars": [{"unit_id": "FL", "param": "T", "lower": 340.0, "upper": 370.0,
@@ -133,6 +160,105 @@ def test_optimize_tool():
     })
     assert res["ok"] and res["success"]
     assert 340.0 <= res["design"]["FL.T"] <= 370.0
+
+
+# -- capability-parity tools (Phase 1 of the AI-centric plan) ----------------
+def test_remove_unit_takes_attached_streams_and_invalidates():
+    s = AgentSession()
+    _run(s, PENTANE_FLASH)
+    dispatch(s, "solve", {})
+    out = dispatch(s, "remove_unit", {"id": "SP"})
+    assert out["ok"] and set(out["removed_streams"]) == {"LIQ", "RECY", "BOT"}
+    fs = s.flowsheet
+    assert "SP" not in fs.units
+    assert {c.stream_id for c in fs.connections} == {"FEED", "MIXOUT", "VAP"}
+    assert s.report is None                        # structural edit -> stale solve
+    assert dispatch(s, "remove_unit", {"id": "GHOST"})["ok"] is False
+
+
+def test_remove_stream_then_flowsheet_still_solves():
+    s = AgentSession()
+    _run(s, PENTANE_FLASH)
+    out = dispatch(s, "remove_stream", {"id": "RECY"})   # break the recycle
+    assert out["ok"]
+    assert "RECY" not in {c.stream_id for c in s.flowsheet.connections}
+    assert dispatch(s, "remove_stream", {"id": "RECY"})["ok"] is False
+    solved = dispatch(s, "solve", {})                    # now acyclic
+    assert solved["ok"] and solved["converged"]
+
+
+def test_set_param_edits_one_value():
+    s = AgentSession()
+    _run(s, PENTANE_FLASH)
+    dispatch(s, "solve", {})
+    out = dispatch(s, "set_param", {"unit_id": "SP", "param": "split", "value": 0.8})
+    assert out["ok"] and s.flowsheet.units["SP"].params["split"] == 0.8
+    assert s.report is None                        # param edit -> stale solve
+    assert dispatch(s, "solve", {})["converged"]
+    # null clears the param back to the unit's default
+    ok = dispatch(s, "set_param", {"unit_id": "MIX", "param": "dP", "value": None})
+    assert ok["ok"] and "dP" not in s.flowsheet.units["MIX"].params
+    assert dispatch(s, "set_param",
+                    {"unit_id": "GHOST", "param": "T", "value": 1.0})["ok"] is False
+
+
+def test_pinch_analysis_tool():
+    s = AgentSession()
+    _run(s, AMMONIA_RECIPE)
+    out = dispatch(s, "pinch_analysis", {"dt_min": 10.0})   # auto-solves
+    assert out["ok"] and out["dt_min"] == 10.0
+    assert out["qh_min"] >= 0 and out["qc_min"] >= 0
+    assert out["heat_recovery_potential"] >= 0
+    kinds = {t["kind"] for t in out["streams"]}
+    assert kinds == {"hot", "cold"}                # PRE heats (cold), COOL cools (hot)
+    assert "minimum utilities" in out["summary"]
+
+
+def test_sweep_parameter_tool_leaves_session_untouched():
+    s = AgentSession()
+    _run(s, PENTANE_FLASH)
+    dispatch(s, "solve", {})
+    report_before = s.report
+    out = dispatch(s, "sweep_parameter", {
+        "unit_id": "FL", "param": "T", "start": 340.0, "stop": 370.0, "steps": 4,
+        "metric": {"type": "component_rate", "stream": "VAP", "component": "n-pentane"}})
+    assert out["ok"] and len(out["points"]) == 4
+    assert out["points"][0]["value"] == 340.0 and out["points"][-1]["value"] == 370.0
+    ys = [p["metric"] for p in out["points"] if p["metric"] is not None]
+    assert len(ys) >= 3 and ys == sorted(ys)       # hotter flash boils off more pentane
+    # a sensitivity study is read-only: param and solve state are untouched
+    assert s.flowsheet.units["FL"].params["T"] == 360.0
+    assert s.report is report_before
+    bad = dispatch(s, "sweep_parameter", {
+        "unit_id": "FL", "param": "T", "start": 340.0, "stop": 370.0, "steps": 99,
+        "metric": {"type": "flow", "stream": "VAP"}})
+    assert bad["ok"] is False and "steps" in bad["error"]
+    typo = dispatch(s, "sweep_parameter", {
+        "unit_id": "FL", "param": "T", "start": 340.0, "stop": 370.0,
+        "metric": {"type": "flow", "stream": "VAPOUR"}})
+    assert typo["ok"] is False and "VAPOUR" in typo["error"]
+
+
+def test_property_table_tool():
+    s = AgentSession()
+    _run(s, PENTANE_FLASH)
+    out = dispatch(s, "property_table", {
+        "z": {"n-pentane": 0.5, "n-octane": 0.5},
+        "T": [300.0, 400.0, 500.0], "P": 101325.0,
+        "props": ["mass_density", "vapor_fraction"]})
+    assert out["ok"] and len(out["T"]) == 3 and len(out["P"]) == 1
+    vf = [row[0] for row in out["values"]["vapor_fraction"]]
+    assert vf[0] < vf[-1]                          # heating vaporizes the mixture
+    # composition can come from a stream instead of an explicit z
+    from_stream = dispatch(s, "property_table",
+                           {"stream": "FEED", "T": 350.0, "P": 101325.0})
+    assert from_stream["ok"] and "vapor_fraction" in from_stream["values"]
+    # helpful errors: no composition; foreign component
+    assert dispatch(s, "property_table",
+                    {"T": 300.0, "P": 1e5})["ok"] is False
+    foreign = dispatch(s, "property_table",
+                       {"z": {"benzene": 1.0}, "T": 300.0, "P": 1e5})
+    assert foreign["ok"] is False and "benzene" in foreign["error"]
 
 
 # -- robustness the LLM relies on ------------------------------------------

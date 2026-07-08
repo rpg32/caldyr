@@ -93,6 +93,73 @@ class FakeBackend:
         return LLMResponse(text="Done — solved.")
 
 
+class FakeParityBackend:
+    """Drives the Phase-1 parity tools: set_param, then remove_unit, then solve."""
+    name = "fake"
+    model = "scripted"
+
+    def __init__(self) -> None:
+        self.step = 0
+
+    def complete(self, system: str, turns: list[dict], tools: list[dict]) -> LLMResponse:
+        self.step += 1
+        if self.step == 1:
+            return LLMResponse(text="Retuning the flash, dropping the splitter.", tool_calls=[
+                ToolCall("c1", "set_param", {"unit_id": "FL", "param": "T", "value": 355.0}),
+                ToolCall("c2", "remove_unit", {"id": "SP"}),
+            ])
+        if self.step == 2:
+            last = json.loads(turns[-1]["content"])
+            assert last["ok"] is True and set(last["removed_streams"]) == {"LIQ", "RECY", "BOT"}
+            return LLMResponse(tool_calls=[
+                ToolCall("c3", "connect", {"id": "LIQ", "from": "FL:liquid", "to": None}),
+                ToolCall("c4", "solve", {}),
+            ])
+        return LLMResponse(text="Done — once-through now.")
+
+
+def test_chat_agent_edits_via_parity_tools():
+    """set_param / remove_unit flow through the chat loop and land in the doc."""
+    agent = ChatAgent(backend=FakeParityBackend())
+    agent.load_flow(to_dict(flash_recycle()))
+
+    events: list[dict] = []
+    out = agent.send("run the flash at 355 K once-through, no recycle",
+                     on_event=events.append)
+
+    assert all(e["ok"] for e in events if e["type"] == "tool_result")
+    assert out["text"] == "Done — once-through now."
+    assert not any(u["id"] == "SP" for u in out["flow"]["units"])
+    sids = {s["id"] for s in out["flow"]["streams"]}
+    assert "RECY" not in sids and "BOT" not in sids
+    fl = next(u for u in out["flow"]["units"] if u["id"] == "FL")
+    assert fl["params"]["T"] == 355.0
+    assert "solved" in out["flow"]                  # the re-solve converged and rode back
+
+
+def test_remove_prunes_logical_ops_and_tear_guesses():
+    """Removal keeps the flowsheet solvable: logical ops and solver hints that
+    reference the removed unit/streams go with it."""
+    fs = flash_recycle()
+    fs.logical.append({"type": "adjust", "vary": ["SP", "split"],
+                       "spec": {"type": "flow", "stream": "VAP"}, "target": 5.0})
+    fs.logical.append({"type": "set", "target": ["FL", "T"],
+                       "source": ["FL", "P"], "multiplier": 1.0})
+    fs.solver_hints["tear_guesses"] = {"RECY": {"molar_flow": 2.0}}
+
+    removed = fs.remove_unit("SP")
+    assert set(removed) == {"LIQ", "RECY", "BOT"}
+    assert fs.solver_hints["tear_guesses"] == {}    # RECY guess went with the stream
+    assert fs.logical == [{"type": "set", "target": ["FL", "T"],
+                           "source": ["FL", "P"], "multiplier": 1.0}]
+
+    fs2 = flash_recycle()
+    fs2.logical.append({"type": "adjust", "vary": ["FL", "T"],
+                        "spec": {"type": "flow", "stream": "VAP"}, "target": 5.0})
+    fs2.remove_stream("VAP")                        # the adjust's observed stream
+    assert fs2.logical == []
+
+
 def test_chat_agent_syncs_canvas_flow_and_returns_doc():
     agent = ChatAgent(backend=FakeBackend())
     agent.load_flow(to_dict(flash_recycle()))

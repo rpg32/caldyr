@@ -6,9 +6,15 @@ script does — it never invents numbers, the engine computes them.
 
 ## Tools
 
-`new_flowsheet`, `add_unit`, `add_feed`, `connect`, `solve`, `cost`,
-`optimize`, `stream_table`, `export_flow`, `list_unit_types`,
-`list_property_packages`, `describe_flowsheet`, `explain_convergence`.
+Build & edit: `new_flowsheet`, `add_unit`, `add_feed`, `connect`, `set_param`,
+`remove_unit`, `remove_stream`.
+Run: `solve`, `cost`, `optimize`.
+Analyze: `stream_table`, `pinch_analysis` (heat-integration targets),
+`sweep_parameter` (sensitivity studies on a copy — never alters the working
+flowsheet), `property_table` (thermophysical properties over a T×P grid),
+`describe_flowsheet`, `explain_convergence`.
+Introspect: `list_unit_types` (pass `{type}` for one unit's full parameter
+docs), `list_property_packages`, `export_flow`.
 
 Errors return as data (`{ok: false, error}`), so models recover instead of
 crashing.
