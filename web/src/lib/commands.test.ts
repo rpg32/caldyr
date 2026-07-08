@@ -13,7 +13,7 @@ function ctx(): CommandContext {
     solve: vi.fn(), cost: vi.fn(), runAutoLayout: vi.fn(), groupSelection: vi.fn(),
     newFlowsheet: vi.fn(), openFile: vi.fn(), saveFile: vi.fn(),
     toggleProjects: vi.fn(), toggleScenarios: vi.fn(), toggleChat: vi.fn(),
-    toggleGlossary: vi.fn(), toggleSettings: vi.fn(),
+    toggleGlossary: vi.fn(), toggleTutorials: vi.fn(), toggleSettings: vi.fn(),
     setViewMode: vi.fn(), setColorMode: vi.fn(), setUnitSet: vi.fn(), setTab: vi.fn(),
     addUnitAtCenter: vi.fn(),
   };

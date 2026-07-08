@@ -9,6 +9,7 @@ import { ProjectsDialog } from "./components/ProjectsDialog";
 import { ReactionEditorDialog } from "./components/ReactionEditorDialog";
 import { ScenariosDialog } from "./components/ScenariosDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { TutorialsDialog } from "./components/TutorialsDialog";
 import { Toasts } from "./components/Toasts";
 import { Toolbar } from "./components/Toolbar";
 import { Tour } from "./components/Tour";
@@ -135,6 +136,7 @@ export function App() {
         <ReactionEditorDialog />
         <SettingsDialog />
         <GlossaryDialog />
+        <TutorialsDialog />
         <CommandPalette />
         <Tour />
       </div>

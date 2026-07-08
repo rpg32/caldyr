@@ -1,7 +1,7 @@
 import {
   BookOpen, Bot, Boxes, Calculator, CircleHelp, Command as CommandIcon, FilePlus2,
-  FolderKanban, FolderOpen, Layers, MoreHorizontal, Moon, Network, Play, Redo2,
-  Save, Settings, Sun, Undo2,
+  FolderKanban, FolderOpen, GraduationCap, Layers, MoreHorizontal, Moon, Network,
+  Play, Redo2, Save, Settings, Sun, Undo2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { UNIT_SETS, type UnitSet } from "../lib/units";
@@ -218,6 +218,8 @@ export function Toolbar() {
       )}
       <Button variant={s.chatOpen ? "primary" : "ghost"} icon={<Bot size={14} />}
         title="AI copilot chat" onClick={s.toggleChat}>Copilot</Button>
+      <Button variant="ghost" aria-label="Guided tutorials" title="Guided tutorials — load a flowsheet and follow the step-by-step guide"
+        icon={<GraduationCap size={14} />} onClick={s.toggleTutorials} />
       <Button variant="ghost" aria-label="Glossary" title="Glossary of terms (LCOP, reflux, pinch…)"
         icon={<BookOpen size={14} />} onClick={s.toggleGlossary} />
       <Button variant="ghost" aria-label="Cost assumptions settings" title="Cost assumptions (prices, factors, sizing)"

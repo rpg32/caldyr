@@ -131,6 +131,7 @@ interface State {
   projectsOpen: boolean;
   settingsOpen: boolean;
   glossaryOpen: boolean;
+  tutorialsOpen: boolean;
   commandPaletteOpen: boolean;
   projects: SavedProject[];
   // history & clipboard
@@ -208,6 +209,7 @@ interface State {
   toggleProjects: () => void;
   toggleSettings: () => void;
   toggleGlossary: () => void;
+  toggleTutorials: () => void;
   toggleCommandPalette: () => void;
   setCommandPalette: (open: boolean) => void;
   saveCurrentProject: (name: string) => void;
@@ -319,6 +321,7 @@ export const useStore = create<State>((set, get) => {
     projectsOpen: false,
     settingsOpen: false,
     glossaryOpen: false,
+    tutorialsOpen: false,
     commandPaletteOpen: false,
     projects: listProjects(),
     past: [],
@@ -1039,6 +1042,7 @@ export const useStore = create<State>((set, get) => {
     toggleProjects: () => set({ projectsOpen: !get().projectsOpen }),
     toggleSettings: () => set({ settingsOpen: !get().settingsOpen }),
     toggleGlossary: () => set({ glossaryOpen: !get().glossaryOpen }),
+    toggleTutorials: () => set({ tutorialsOpen: !get().tutorialsOpen }),
     toggleCommandPalette: () => set({ commandPaletteOpen: !get().commandPaletteOpen }),
     setCommandPalette: (open) => set({ commandPaletteOpen: open }),
 
