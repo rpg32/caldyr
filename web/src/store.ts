@@ -7,7 +7,7 @@ import {
   type NodePositionChange,
 } from "@xyflow/react";
 import { create } from "zustand";
-import { api } from "./api";
+import { api, type AiConfigUpdate, type AiHealth } from "./api";
 import { canvasToFlow, flowToCanvas, type CaldyrNode } from "./flow";
 import { diffFlows, mergePositions, type FlowDiff } from "./lib/diff";
 import { applyHelperLines, type HelperLines } from "./lib/helperLines";
@@ -124,6 +124,8 @@ interface State {
   chatBusy: boolean;
   pendingFlow: FlowDoc | null;
   pendingDiff: FlowDiff | null;
+  copilotHealth: AiHealth | null;
+  copilotSettingsOpen: boolean;
   // balance diagnostics
   balance: BalanceResult | null;
   balanceBusy: boolean;
@@ -203,6 +205,9 @@ interface State {
   toggleChat: () => void;
   sendChat: (text: string) => Promise<void>;
   quickAction: (kind: "describe" | "diagnose") => Promise<void>;
+  refreshCopilotHealth: () => Promise<void>;
+  toggleCopilotSettings: () => void;
+  saveCopilotConfig: (update: AiConfigUpdate) => Promise<void>;
   acceptPending: () => void;
   rejectPending: () => void;
   runBalance: () => Promise<void>;
@@ -314,6 +319,8 @@ export const useStore = create<State>((set, get) => {
     chatOpen: false,
     chatMessages: [],
     chatBusy: false,
+    copilotHealth: null,
+    copilotSettingsOpen: false,
     pendingFlow: null,
     pendingDiff: null,
     balance: null,
@@ -1037,7 +1044,30 @@ export const useStore = create<State>((set, get) => {
       set({ logical: ops });
     },
 
-    toggleChat: () => set({ chatOpen: !get().chatOpen }),
+    toggleChat: () => {
+      const opening = !get().chatOpen;
+      set({ chatOpen: opening });
+      if (opening) void get().refreshCopilotHealth();
+    },
+
+    refreshCopilotHealth: async () => {
+      try {
+        set({ copilotHealth: await api.aiHealth() });
+      } catch {
+        set({ copilotHealth: null });  // API unreachable — panel shows a hint
+      }
+    },
+
+    toggleCopilotSettings: () => {
+      const opening = !get().copilotSettingsOpen;
+      set({ copilotSettingsOpen: opening });
+      if (opening) void get().refreshCopilotHealth();
+    },
+
+    saveCopilotConfig: async (update: AiConfigUpdate) => {
+      await api.aiSetConfig(update);
+      await get().refreshCopilotHealth();
+    },
 
     toggleProjects: () => set({ projectsOpen: !get().projectsOpen }),
     toggleSettings: () => set({ settingsOpen: !get().settingsOpen }),

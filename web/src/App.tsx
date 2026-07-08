@@ -8,6 +8,7 @@ import { GlossaryDialog } from "./components/GlossaryDialog";
 import { ProjectsDialog } from "./components/ProjectsDialog";
 import { ReactionEditorDialog } from "./components/ReactionEditorDialog";
 import { ScenariosDialog } from "./components/ScenariosDialog";
+import { CopilotSettingsDialog } from "./components/CopilotSettingsDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TutorialsDialog } from "./components/TutorialsDialog";
 import { Toasts } from "./components/Toasts";
@@ -137,6 +138,7 @@ export function App() {
         <SettingsDialog />
         <GlossaryDialog />
         <TutorialsDialog />
+        <CopilotSettingsDialog />
         <CommandPalette />
         <Tour />
       </div>

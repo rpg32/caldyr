@@ -613,6 +613,148 @@ def ai_tool(body: dict) -> dict:
     return out
 
 
+# -- AI: bring-your-own-LLM configuration ------------------------------------
+# The copilot's provider/model/key are configured in the app and stored
+# server-side (see caldyr.ai.config) so the key never lives in the browser.
+def _effective_provider(cfg: dict) -> str:
+    import os as _os
+    return (cfg.get("provider") or _os.environ.get("CALDYR_LLM_PROVIDER")
+            or "ollama").lower()
+
+
+@app.get("/ai/health")
+def ai_health() -> dict:
+    """Which providers are usable and whether the configured one is ready — so
+    the UI can show a real setup state instead of failing on first message."""
+    import os as _os
+
+    from caldyr.ai import config as ai_config
+    from caldyr.ai.llm import (anthropic_available, ollama_available,
+                               ollama_tool_models)
+
+    saved = ai_config.load_config()
+    pub = ai_config.public_config(saved)
+    host = saved.get("base_url") if _effective_provider(saved) == "ollama" else None
+    ollama_up = ollama_available(host) if host else ollama_available()
+    models = (ollama_tool_models(host) if host else ollama_tool_models()) if ollama_up else []
+    anth = anthropic_available()
+
+    provider = _effective_provider(saved)
+    if provider == "ollama":
+        ready = ollama_up and bool(models)
+    elif provider == "openai":
+        ready = bool(pub["has_key"] or saved.get("base_url") or _os.environ.get("OPENAI_API_KEY"))
+    elif provider == "anthropic":
+        ready = anth and bool(pub["has_key"] or _os.environ.get("ANTHROPIC_API_KEY"))
+    else:
+        ready = False
+
+    return {
+        "config": pub,
+        "effective_provider": provider,
+        "providers": {
+            "ollama": {"reachable": ollama_up, "models": models},
+            "openai": {"available": True},
+            "anthropic": {"available": anth},
+        },
+        "ready": ready,
+    }
+
+
+@app.get("/ai/models")
+def ai_models(provider: str = "ollama", base_url: str | None = None) -> dict:
+    """List selectable models for a provider (Ollama tool-capable models only;
+    hosted providers have too many to enumerate, so the UI free-texts those)."""
+    from caldyr.ai.llm import ollama_tool_models
+    if provider != "ollama":
+        return {"models": []}
+    return {"models": ollama_tool_models(base_url) if base_url else ollama_tool_models()}
+
+
+@app.get("/ai/config")
+def ai_get_config() -> dict:
+    """Current copilot config WITHOUT the API key (only whether one is set)."""
+    from caldyr.ai import config as ai_config
+    return ai_config.public_config()
+
+
+@app.post("/ai/config")
+def ai_set_config(body: dict) -> dict:
+    """Persist the copilot provider/model/base_url/api_key server-side.
+
+    An empty/absent ``api_key`` leaves any previously-saved key untouched (so
+    the UI can save model/provider changes without re-entering the key); pass
+    ``clear_key: true`` to remove a saved key."""
+    from caldyr.ai import config as ai_config
+
+    saved = ai_config.load_config()
+    new = {
+        "provider": body.get("provider") or saved.get("provider"),
+        "model": body.get("model") if body.get("model") is not None else saved.get("model"),
+        "base_url": body.get("base_url") if body.get("base_url") is not None else saved.get("base_url"),
+    }
+    if body.get("clear_key"):
+        new["api_key"] = ""
+    elif body.get("api_key"):
+        new["api_key"] = body["api_key"]
+    else:
+        new["api_key"] = saved.get("api_key", "")
+    return ai_config.save_config(new)
+
+
+@app.post("/ai/test")
+def ai_test(body: dict) -> dict:
+    """Validate a provider/key/base_url (given overrides, else the saved
+    config). Returns {ok, detail} — a cheap reachability/auth check."""
+    import os as _os
+
+    import httpx
+
+    from caldyr.ai import config as ai_config
+    from caldyr.ai.llm import (DEFAULT_OLLAMA_HOST, _normalize_host,
+                               anthropic_available, ollama_tool_models)
+
+    cfg = {**ai_config.load_config(),
+           **{k: v for k, v in (body or {}).items() if v not in (None, "")}}
+    provider = _effective_provider(cfg)
+    try:
+        if provider == "ollama":
+            host = _normalize_host(cfg.get("base_url") or DEFAULT_OLLAMA_HOST)
+            r = httpx.get(f"{host}/api/tags", timeout=4.0)
+            if r.status_code != 200:
+                return {"ok": False, "detail": f"Ollama not reachable at {host}"}
+            models = ollama_tool_models(host)
+            if not models:
+                return {"ok": False, "detail": "Ollama is up but has no tool-capable models pulled"}
+            want = cfg.get("model")
+            if want and not any(m == want or m.split(":")[0] == want for m in models):
+                return {"ok": False, "detail": f"model {want!r} not found; have: {', '.join(models)}"}
+            return {"ok": True, "detail": f"Ollama OK ({len(models)} tool model(s))"}
+        if provider == "openai":
+            base = (cfg.get("base_url") or _os.environ.get("OPENAI_BASE_URL")
+                    or "https://api.openai.com/v1").rstrip("/")
+            key = cfg.get("api_key") or _os.environ.get("OPENAI_API_KEY") or "not-needed"
+            r = httpx.get(f"{base}/models", headers={"Authorization": f"Bearer {key}"}, timeout=8.0)
+            if r.status_code == 200:
+                return {"ok": True, "detail": f"OpenAI-compatible endpoint OK ({base})"}
+            return {"ok": False, "detail": f"{base} returned HTTP {r.status_code}"}
+        if provider == "anthropic":
+            if not anthropic_available():
+                return {"ok": False, "detail": "anthropic SDK not installed — pip install 'caldyr[anthropic]'"}
+            import anthropic
+            key = cfg.get("api_key") or _os.environ.get("ANTHROPIC_API_KEY")
+            if not key:
+                return {"ok": False, "detail": "no Anthropic API key set"}
+            opts = {"api_key": key}
+            if cfg.get("base_url"):
+                opts["base_url"] = cfg["base_url"]
+            anthropic.Anthropic(**opts).models.list(limit=1)
+            return {"ok": True, "detail": "Anthropic API key OK"}
+        return {"ok": False, "detail": f"unknown provider {provider!r}"}
+    except Exception as exc:
+        return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+
+
 # Browsers do not apply CORS to WebSocket handshakes, so a malicious page could
 # open ws://localhost:<port>/... while the API runs (cross-site WS hijacking).
 # Browser connections must come from a local origin; non-browser clients send
@@ -683,6 +825,7 @@ async def ws_chat(ws: WebSocket) -> None:
     {"type":"error", detail}. The agent (and its conversation) lives as long as
     the socket."""
     from caldyr.ai.chat import ChatAgent
+    from caldyr.ai.config import backend_kwargs
 
     if not await _accept_local(ws):
         return
@@ -693,8 +836,12 @@ async def ws_chat(ws: WebSocket) -> None:
             msg = await ws.receive_json()
             if agent is None:
                 try:
-                    agent = ChatAgent(provider=msg.get("provider"),
-                                      model=msg.get("model"))
+                    # Saved server-side config supplies the key/base_url; the
+                    # client may override only provider/model. The API key is
+                    # never accepted from (or sent to) the browser here.
+                    provider, opts = backend_kwargs(
+                        {"provider": msg.get("provider"), "model": msg.get("model")})
+                    agent = ChatAgent(provider=provider, **opts)
                 except Exception as exc:
                     await ws.send_json({"type": "error",
                                         "detail": f"no LLM backend: {exc}"})

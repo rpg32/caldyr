@@ -32,6 +32,7 @@ export interface CommandContext {
   toggleChat: () => void;
   toggleGlossary: () => void;
   toggleTutorials: () => void;
+  toggleCopilotSettings: () => void;
   toggleSettings: () => void;
   setViewMode: (m: ViewMode) => void;
   setColorMode: (m: ColorMode) => void;
@@ -84,6 +85,7 @@ export function buildCommands(c: CommandContext): Command[] {
     })),
 
     { id: "tutorials", title: "Guided tutorials", section: "Help", run: c.toggleTutorials, keywords: "tutorial learn walkthrough guide getting started" },
+    { id: "copilot-settings", title: "Copilot: AI provider settings", section: "Help", run: c.toggleCopilotSettings, keywords: "llm ollama claude anthropic openai api key model provider byo" },
     { id: "glossary", title: "Open Glossary", section: "Help", run: c.toggleGlossary, keywords: "terms lcop reflux pinch" },
     { id: "settings", title: "Open Settings", section: "Help", run: c.toggleSettings, keywords: "cost assumptions prices" },
     { id: "copilot", title: "Toggle Copilot", section: "Help", run: c.toggleChat, keywords: "ai chat assistant" },

@@ -55,4 +55,35 @@ export const api = {
     post<PinchResponse>("/pinch", { flow, backend, dt_min }),
   aiTool: (name: string, flow: FlowDoc, args: Record<string, unknown> = {}) =>
     post<Record<string, unknown>>("/ai/tool", { name, flow, args }),
+  aiHealth: () => get<AiHealth>("/ai/health"),
+  aiGetConfig: () => get<AiConfig>("/ai/config"),
+  aiSetConfig: (body: AiConfigUpdate) => post<AiConfig>("/ai/config", body),
+  aiTestConfig: (body: AiConfigUpdate) =>
+    post<{ ok: boolean; detail: string }>("/ai/test", body),
 };
+
+export interface AiConfig {
+  provider: string | null;
+  model: string | null;
+  base_url: string | null;
+  has_key: boolean;
+}
+
+export interface AiConfigUpdate {
+  provider?: string;
+  model?: string;
+  base_url?: string;
+  api_key?: string;
+  clear_key?: boolean;
+}
+
+export interface AiHealth {
+  config: AiConfig;
+  effective_provider: string;
+  providers: {
+    ollama: { reachable: boolean; models: string[] };
+    openai: { available: boolean };
+    anthropic: { available: boolean };
+  };
+  ready: boolean;
+}

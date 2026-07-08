@@ -155,13 +155,22 @@ class OpenAIBackend:
 class AnthropicBackend:
     name = "anthropic"
 
-    def __init__(self, model: str | None = None, max_tokens: int = 4096) -> None:
+    def __init__(self, model: str | None = None, max_tokens: int = 4096,
+                 api_key: str | None = None, base_url: str | None = None) -> None:
         self.model = model or os.environ.get("CALDYR_LLM_MODEL") or "claude-sonnet-4-6"
         self.max_tokens = max_tokens
+        # Fall through to the SDK's own ANTHROPIC_API_KEY env read when unset.
+        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY") or None
+        self.base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL") or None
 
     def complete(self, system: str, turns: list[Turn], tools: list[dict]) -> LLMResponse:
         import anthropic
 
+        client_opts: dict = {}
+        if self.api_key:
+            client_opts["api_key"] = self.api_key
+        if self.base_url:
+            client_opts["base_url"] = self.base_url
         messages = []
         for t in turns:
             if t["role"] == "user":
@@ -180,7 +189,7 @@ class AnthropicBackend:
                      "content": t["content"]}]})
         atools = [{"name": t["name"], "description": t["description"],
                    "input_schema": t["input_schema"]} for t in tools]
-        resp = anthropic.Anthropic().messages.create(
+        resp = anthropic.Anthropic(**client_opts).messages.create(
             model=self.model, system=system, max_tokens=self.max_tokens,
             tools=atools, messages=messages)  # type: ignore[arg-type]
         text = "".join(b.text for b in resp.content if b.type == "text")
@@ -205,6 +214,16 @@ def make_backend(provider: str | None = None, **opts) -> LLMBackend:
 def ollama_available(host: str = DEFAULT_OLLAMA_HOST) -> bool:
     try:
         return httpx.get(f"{_normalize_host(host)}/api/tags", timeout=2.0).status_code == 200
+    except Exception:
+        return False
+
+
+def anthropic_available() -> bool:
+    """Whether the optional ``anthropic`` SDK is importable (the ``.[anthropic]``
+    extra); the Anthropic backend needs it."""
+    try:
+        import anthropic  # noqa: F401
+        return True
     except Exception:
         return False
 

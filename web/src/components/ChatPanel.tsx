@@ -1,7 +1,7 @@
 // AI chat sidebar: converse with the flowsheet copilot (local LLM via the
 // engine's caldyr.ai layer), watch its tool calls stream by, and review every
 // proposed flowsheet edit as a diff before it touches the canvas.
-import { Bot, Check, Loader2, Send, Sparkles, Wrench, X } from "lucide-react";
+import { Bot, Check, Loader2, Send, Settings, Sparkles, Wrench, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { FlowDiff } from "../lib/diff";
 import { useStore } from "../store";
@@ -68,6 +68,9 @@ export function ChatPanel() {
   const sendChat = useStore((s) => s.sendChat);
   const quickAction = useStore((s) => s.quickAction);
   const toggleChat = useStore((s) => s.toggleChat);
+  const health = useStore((s) => s.copilotHealth);
+  const openSettings = useStore((s) => s.toggleCopilotSettings);
+  const refreshHealth = useStore((s) => s.refreshCopilotHealth);
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -75,7 +78,16 @@ export function ChatPanel() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages, pendingDiff, busy]);
 
+  useEffect(() => {
+    if (open && health === null) void refreshHealth();
+  }, [open, health, refreshHealth]);
+
   if (!open) return null;
+
+  const providerLabel = health
+    ? `${health.effective_provider}${health.config.model ? " · " + health.config.model : ""}`
+    : "LLM";
+  const notReady = health !== null && !health.ready;
 
   const send = () => {
     if (draft.trim()) {
@@ -89,10 +101,30 @@ export function ChatPanel() {
       <div className="flex items-center gap-2 border-b border-line px-3 py-2">
         <Bot size={15} className="text-accent" aria-hidden />
         <b>Copilot</b>
-        <span className="text-[11px] text-muted">local LLM</span>
+        <span className="truncate text-[11px] text-muted" title="Active AI provider">
+          {providerLabel}
+        </span>
         <button className="ml-auto cursor-pointer text-muted hover:text-text"
+          onClick={openSettings} aria-label="Copilot AI provider settings" title="AI provider settings">
+          <Settings size={14} />
+        </button>
+        <button className="cursor-pointer text-muted hover:text-text"
           onClick={toggleChat} aria-label="Close chat"><X size={14} /></button>
       </div>
+
+      {notReady && (
+        <div className="m-2 rounded-lg border border-warn/40 bg-warn/10 p-2.5 text-[12px]">
+          <div className="mb-1 font-semibold text-warn">No AI provider is ready</div>
+          <p className="mb-2 leading-snug text-muted">
+            The <b>{health?.effective_provider}</b> provider isn&apos;t reachable
+            or configured. Chat needs an LLM; the quick actions below work without
+            one. Set up Ollama, or add your Claude / OpenAI key.
+          </p>
+          <Button variant="primary" icon={<Settings size={12} />} onClick={openSettings}>
+            Set up AI provider
+          </Button>
+        </div>
+      )}
 
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-2.5">
         {messages.length === 0 && (
