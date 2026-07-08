@@ -1,5 +1,6 @@
 import { ArrowRightFromLine, ArrowRightToLine } from "lucide-react";
-import { useState, type MouseEvent } from "react";
+import { useMemo, useState, type MouseEvent } from "react";
+import { groupUnitTypes } from "../lib/unitCategories";
 import { useStore } from "../store";
 import { PanelTitle } from "./ui";
 
@@ -9,6 +10,7 @@ export function Palette() {
   const unitTypes = useStore((s) => s.unitTypes);
   const addUnit = useStore((s) => s.addUnit);
   const [tip, setTip] = useState<Tip | null>(null);
+  const groups = useMemo(() => groupUnitTypes(unitTypes), [unitTypes]);
 
   const item =
     "w-full rounded-md border border-line bg-panel2 px-2 py-1.5 text-left text-[13px] " +
@@ -39,12 +41,16 @@ export function Palette() {
         Product
       </button>
 
-      <PanelTitle>Unit ops</PanelTitle>
-      {unitTypes.map((t) => (
-        <button key={t.type} className={item} onClick={() => addUnit("unit", t)}
-          onMouseEnter={show(t.description || t.doc)} onMouseLeave={hide}>
-          {t.type}
-        </button>
+      {groups.map((g) => (
+        <div key={g.label} className="flex flex-col gap-1">
+          <PanelTitle>{g.label}</PanelTitle>
+          {g.units.map((t) => (
+            <button key={t.type} className={item} onClick={() => addUnit("unit", t)}
+              onMouseEnter={show(t.description || t.doc)} onMouseLeave={hide}>
+              {t.type}
+            </button>
+          ))}
+        </div>
       ))}
 
       {tip && (
